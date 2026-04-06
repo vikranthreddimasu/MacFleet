@@ -10,13 +10,16 @@ heartbeat gossip, coordinator election, and work assignment.
 from __future__ import annotations
 
 import asyncio
+import logging
 import platform
-import secrets
+import secrets as secrets_mod
 import socket
 import subprocess
 from typing import Optional
 
 from rich.console import Console
+
+logger = logging.getLogger(__name__)
 
 from macfleet.engines.base import HardwareProfile, ThermalPressure
 from macfleet.monitoring.thermal import get_thermal_state
@@ -24,6 +27,13 @@ from macfleet.pool.discovery import ServiceRegistry, DiscoveredNode
 from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig
 from macfleet.pool.network import LinkType, detect_interfaces, get_network_topology
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
+from macfleet.security.auth import (
+    SecurityConfig,
+    create_client_ssl_context,
+    create_server_ssl_context,
+    sign_heartbeat,
+    verify_heartbeat,
+)
 
 console = Console()
 
@@ -110,7 +120,7 @@ def _check_mlx_available() -> bool:
 def profile_hardware() -> HardwareProfile:
     """Profile the local Mac's hardware capabilities."""
     hostname = socket.gethostname()
-    node_id = f"{hostname}-{secrets.token_hex(4)}"
+    node_id = f"{hostname}-{secrets_mod.token_hex(4)}"
 
     return HardwareProfile(
         hostname=hostname,
@@ -141,21 +151,27 @@ class PoolAgent:
         name: Optional[str] = None,
         port: int = 50051,
         token: Optional[str] = None,
+        fleet_id: Optional[str] = None,
+        tls: bool = False,
     ):
         self.port = port
         self.token = token
+        self._security = SecurityConfig(token=token, fleet_id=fleet_id, tls=tls)
 
         # Profiled at start()
         self.hardware: Optional[HardwareProfile] = None
         self._name_override = name
 
-        # Components
-        self._discovery = ServiceRegistry()
+        # Components (pass security config)
+        self._discovery = ServiceRegistry(security=self._security)
         self._heartbeat: Optional[GossipHeartbeat] = None
         self._registry: Optional[ClusterRegistry] = None
 
         self._running = False
         self._heartbeat_server: Optional[asyncio.Server] = None
+        self._heartbeat_ssl_ctx = None
+        if self._security.tls:
+            self._heartbeat_ssl_ctx = create_server_ssl_context()
 
     @property
     def node_id(self) -> str:
@@ -184,6 +200,11 @@ class PoolAgent:
         console.print(f"  RAM: {self.hardware.ram_gb:.0f} GB")
         console.print(f"  MPS: {'yes' if self.hardware.mps_available else 'no'}")
         console.print(f"  MLX: {'yes' if self.hardware.mlx_available else 'no'}")
+        if self._security.is_secure:
+            fleet_label = self._security.fleet_id or "default"
+            console.print(f"  Fleet: {fleet_label} [bold green](token-protected)[/bold green]")
+            if self._security.tls:
+                console.print(f"  TLS: [bold green]enabled[/bold green]")
 
         # 2. Detect network
         topology = get_network_topology()
@@ -231,14 +252,16 @@ class PoolAgent:
         self._heartbeat = GossipHeartbeat(
             node_id=self.hardware.node_id,
             config=HeartbeatConfig(interval_sec=1.0, suspicion_rounds=3, failure_timeout_sec=10.0),
+            security=self._security,
             on_suspected=self._on_peer_suspected,
             on_failed=self._on_peer_failed,
             on_recovered=self._on_peer_recovered,
         )
 
-        # Start heartbeat responder server
+        # Start heartbeat responder server (TLS when auth is enabled)
         self._heartbeat_server = await asyncio.start_server(
             self._handle_heartbeat_ping, "0.0.0.0", self.port,
+            ssl=self._heartbeat_ssl_ctx,
         )
 
         await self._heartbeat.start()
@@ -265,12 +288,34 @@ class PoolAgent:
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         """Respond to heartbeat pings from peers."""
+        fleet_key = self._security.fleet_key
         try:
             data = await asyncio.wait_for(reader.readline(), timeout=5.0)
-            if data.startswith(b"PING"):
+
+            if fleet_key and data.startswith(b"APING"):
+                # Authenticated heartbeat
+                parts = data.decode().strip().split(" ")
+                if len(parts) == 4:
+                    _, peer_node_id, nonce_hex, sig_hex = parts
+                    nonce = bytes.fromhex(nonce_hex)
+                    sig = bytes.fromhex(sig_hex)
+                    if verify_heartbeat(fleet_key, peer_node_id, nonce, sig):
+                        # Send authenticated PONG
+                        resp_nonce = secrets_mod.token_bytes(16)
+                        resp_sig = sign_heartbeat(fleet_key, self.node_id, resp_nonce)
+                        writer.write(
+                            f"APONG {self.node_id} {resp_nonce.hex()} {resp_sig.hex()}\n".encode()
+                        )
+                        await writer.drain()
+                    else:
+                        logger.debug("Heartbeat auth failed from peer %s", peer_node_id)
+            elif not fleet_key and data.startswith(b"PING"):
+                # Open heartbeat (backward compatible)
                 writer.write(f"PONG {self.node_id}\n".encode())
                 await writer.drain()
-        except (asyncio.TimeoutError, ConnectionResetError):
+            # If secure but received plain PING, or open but received APING: silently ignore
+
+        except (asyncio.TimeoutError, ConnectionResetError, ValueError):
             pass
         finally:
             writer.close()
@@ -281,7 +326,10 @@ class PoolAgent:
         if node.node_id == self.node_id:
             return  # Ignore self
 
-        # Create a HardwareProfile from discovery data
+        # SECURITY: Create HardwareProfile from discovery data and compute
+        # score locally from reported hardware specs. Never trust the
+        # broadcast compute_score — a rogue node could inflate it to
+        # win coordinator election.
         hw = HardwareProfile(
             hostname=node.hostname,
             node_id=node.node_id,
@@ -300,7 +348,8 @@ class PoolAgent:
             hardware=hw,
         ))
 
-        self._heartbeat.add_peer(node.node_id, node.ip_address, node.port, node.compute_score)
+        # Use locally-computed score, not the broadcast one
+        self._heartbeat.add_peer(node.node_id, node.ip_address, node.port, hw.compute_score)
 
         console.print(f"[cyan]Discovered[/cyan] {node.hostname} ({node.chip_name}, {node.gpu_cores} GPU cores)")
 

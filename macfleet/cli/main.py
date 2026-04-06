@@ -37,12 +37,14 @@ def cli():
 @cli.command()
 @click.option("--name", default=None, help="Custom node name")
 @click.option("--port", default=50051, help="Communication port")
-@click.option("--token", default=None, help="Pool authentication token")
-def join(name: str | None, port: int, token: str | None):
+@click.option("--token", default=None, envvar="MACFLEET_TOKEN", help="Pool token (or set MACFLEET_TOKEN env var)")
+@click.option("--fleet-id", default=None, help="Fleet identifier (isolates pool on network)")
+@click.option("--tls", "use_tls", is_flag=True, default=False, help="Enable TLS encryption")
+def join(name: str | None, port: int, token: str | None, fleet_id: str | None, use_tls: bool):
     """Join the compute pool. Auto-discovers peers on the network."""
     from macfleet.pool.agent import PoolAgent
 
-    agent = PoolAgent(name=name, port=port, token=token)
+    agent = PoolAgent(name=name, port=port, token=token, fleet_id=fleet_id, tls=use_tls)
 
     async def run():
         await agent.start()
@@ -98,13 +100,21 @@ def info():
 
 
 @cli.command()
-def status():
+@click.option("--token", default=None, envvar="MACFLEET_TOKEN", help="Pool token (scopes discovery to fleet)")
+@click.option("--fleet-id", default=None, help="Fleet identifier")
+def status(token: str | None, fleet_id: str | None):
     """Show pool status (discovers peers for 3 seconds)."""
     from macfleet.pool.discovery import ServiceRegistry
+    from macfleet.security.auth import SecurityConfig
 
-    console.print("[bold]Scanning for pool members...[/bold]")
+    sec = SecurityConfig(token=token, fleet_id=fleet_id) if token else None
+    if sec and sec.is_secure:
+        fleet_label = fleet_id or "default"
+        console.print(f"[bold]Scanning fleet '{fleet_label}' for members...[/bold]")
+    else:
+        console.print("[bold]Scanning for pool members...[/bold]")
 
-    registry = ServiceRegistry()
+    registry = ServiceRegistry(security=sec)
     try:
         peers = registry.find_peers(timeout=3.0)
     finally:

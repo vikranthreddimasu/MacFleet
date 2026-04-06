@@ -1,8 +1,14 @@
 """Tests for the wire protocol."""
 
+import asyncio
+import struct
+
+import pytest
 import torch
 
 from macfleet.comm.protocol import (
+    HEADER_FORMAT,
+    MAX_PAYLOAD_SIZE,
     MessageType,
     MessageFlags,
     WireMessage,
@@ -75,6 +81,46 @@ class TestWireMessage:
         assert MessageFlags.COMPRESSED in unpacked.flags
         assert MessageFlags.CHUNKED in unpacked.flags
         assert MessageFlags.LAST_CHUNK not in unpacked.flags
+
+
+class TestMaxPayloadSize:
+    """Verify that read_from_stream rejects oversized payloads (OOM protection)."""
+
+    async def test_oversized_payload_rejected(self):
+        """A header claiming payload_size > MAX_PAYLOAD_SIZE must raise ValueError."""
+        fake_header = struct.pack(
+            HEADER_FORMAT,
+            0,                          # stream_id
+            MessageType.TENSOR,         # msg_type
+            MessageFlags.NONE,          # flags
+            MAX_PAYLOAD_SIZE + 1,       # payload_size — over limit
+            0,                          # sequence
+            0,                          # checksum (irrelevant, rejected before read)
+            0,                          # reserved
+        )
+        reader = asyncio.StreamReader()
+        reader.feed_data(fake_header)
+        reader.feed_eof()
+
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            await WireMessage.read_from_stream(reader)
+
+    async def test_max_boundary_accepted(self):
+        """payload_size == MAX_PAYLOAD_SIZE should not be rejected by the size check."""
+        # We only test the size check passes — we don't actually send 256MB.
+        # Feed a header with payload_size=MAX_PAYLOAD_SIZE but EOF immediately
+        # so readexactly raises IncompleteReadError (not ValueError).
+        fake_header = struct.pack(
+            HEADER_FORMAT,
+            0, MessageType.TENSOR, MessageFlags.NONE,
+            MAX_PAYLOAD_SIZE, 0, 0, 0,
+        )
+        reader = asyncio.StreamReader()
+        reader.feed_data(fake_header)
+        reader.feed_eof()
+
+        with pytest.raises(asyncio.IncompleteReadError):
+            await WireMessage.read_from_stream(reader)
 
 
 class TestTensorSerialization:

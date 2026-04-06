@@ -14,6 +14,7 @@ Data parallel flow (each training step):
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -29,6 +30,9 @@ from macfleet.compression.adaptive import (
 )
 from macfleet.engines.base import TrainingMetrics
 from macfleet.pool.network import LinkType
+from macfleet.security.auth import GradientValidationError, validate_gradients
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -169,25 +173,37 @@ class DataParallel:
         original_bytes = flat_grads.nbytes
 
         # Compress if active
-        if self._compressor is not None and self._compressor.active:
-            compressed = self._compressor.compress(flat_grads)
+        try:
+            if self._compressor is not None and self._compressor.active:
+                compressed = self._compressor.compress(flat_grads)
 
-            if isinstance(compressed, CompressedArray):
-                # Decompress locally to get the sparse representation,
-                # then allreduce the sparse-approximated gradients.
-                # Each node compresses independently but allreduces
-                # the decompressed version for correctness.
-                sparse_grads = self._compressor.decompress(compressed)
-                averaged = await self.group.allreduce(sparse_grads, op="mean")
-                self._bytes_sent += compressed.compressed_size
-                self._bytes_saved += original_bytes - compressed.compressed_size
+                if isinstance(compressed, CompressedArray):
+                    sparse_grads = self._compressor.decompress(compressed)
+                    averaged = await self.group.allreduce(sparse_grads, op="mean")
+                    self._bytes_sent += compressed.compressed_size
+                    self._bytes_saved += original_bytes - compressed.compressed_size
+                else:
+                    averaged = await self.group.allreduce(compressed, op="mean")
+                    self._bytes_sent += original_bytes
             else:
-                averaged = await self.group.allreduce(compressed, op="mean")
+                # No compression
+                averaged = await self.group.allreduce(flat_grads, op="mean")
                 self._bytes_sent += original_bytes
-        else:
-            # No compression
-            averaged = await self.group.allreduce(flat_grads, op="mean")
-            self._bytes_sent += original_bytes
+        except GradientValidationError as e:
+            # SECURITY: Metadata bomb or corrupt compressed gradient from peer.
+            # Fall back to local gradients rather than crashing.
+            logger.error("Gradient deserialization failed: %s", e)
+            logger.warning("Falling back to local gradients (discarding allreduce result)")
+            averaged = flat_grads
+
+        # SECURITY: Validate gradients before applying to model.
+        # Prevents gradient poisoning attacks (NaN, Inf, extreme magnitudes).
+        try:
+            validate_gradients(averaged)
+        except GradientValidationError as e:
+            logger.error("Gradient validation failed: %s", e)
+            logger.warning("Falling back to local gradients (discarding allreduce result)")
+            averaged = flat_grads  # use own gradients only
 
         # Write averaged gradients back to model
         self.engine.apply_flat_gradients(averaged)

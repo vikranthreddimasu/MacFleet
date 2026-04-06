@@ -8,11 +8,22 @@ Failure triggers scheduler re-computation and collective reconfiguration.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
+import secrets
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
+
+from macfleet.security.auth import (
+    SecurityConfig,
+    create_client_ssl_context,
+    sign_heartbeat,
+    verify_heartbeat,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class NodeStatus(Enum):
@@ -60,12 +71,14 @@ class GossipHeartbeat:
         self,
         node_id: str,
         config: Optional[HeartbeatConfig] = None,
+        security: Optional[SecurityConfig] = None,
         on_suspected: Optional[Callable[[str], None]] = None,
         on_failed: Optional[Callable[[str], None]] = None,
         on_recovered: Optional[Callable[[str], None]] = None,
     ):
         self.node_id = node_id
         self.config = config or HeartbeatConfig()
+        self._security = security or SecurityConfig()
         self._on_suspected = on_suspected
         self._on_failed = on_failed
         self._on_recovered = on_recovered
@@ -177,22 +190,47 @@ class GossipHeartbeat:
 
     async def _ping_peer(self, peer: PeerState) -> bool:
         """Send a heartbeat ping to a peer. Returns True if peer responds."""
+        fleet_key = self._security.fleet_key
+        ssl_ctx = create_client_ssl_context() if self._security.tls else None
         try:
             reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(peer.ip_address, peer.port),
+                asyncio.open_connection(peer.ip_address, peer.port, ssl=ssl_ctx),
                 timeout=2.0,
             )
-            # Send a minimal heartbeat message
-            msg = f"PING {self.node_id}\n".encode()
-            writer.write(msg)
-            await writer.drain()
 
-            # Wait for PONG
-            response = await asyncio.wait_for(reader.readline(), timeout=2.0)
-            writer.close()
-            await writer.wait_closed()
-            return response.startswith(b"PONG")
-        except (OSError, asyncio.TimeoutError, ConnectionRefusedError):
+            if fleet_key:
+                # Authenticated heartbeat: APING {node_id} {nonce_hex} {hmac_hex}\n
+                nonce = secrets.token_bytes(16)
+                sig = sign_heartbeat(fleet_key, self.node_id, nonce)
+                msg = f"APING {self.node_id} {nonce.hex()} {sig.hex()}\n".encode()
+                writer.write(msg)
+                await writer.drain()
+
+                response = await asyncio.wait_for(reader.readline(), timeout=2.0)
+                writer.close()
+                await writer.wait_closed()
+
+                if not response.startswith(b"APONG"):
+                    return False
+                # Verify APONG signature
+                parts = response.decode().strip().split(" ")
+                if len(parts) != 4:
+                    return False
+                _, resp_node_id, resp_nonce_hex, resp_sig_hex = parts
+                resp_nonce = bytes.fromhex(resp_nonce_hex)
+                resp_sig = bytes.fromhex(resp_sig_hex)
+                return verify_heartbeat(fleet_key, resp_node_id, resp_nonce, resp_sig)
+            else:
+                # Open heartbeat (backward compatible)
+                msg = f"PING {self.node_id}\n".encode()
+                writer.write(msg)
+                await writer.drain()
+
+                response = await asyncio.wait_for(reader.readline(), timeout=2.0)
+                writer.close()
+                await writer.wait_closed()
+                return response.startswith(b"PONG")
+        except (OSError, asyncio.TimeoutError, ConnectionRefusedError, ValueError):
             return False
 
     def get_status_summary(self) -> dict[str, int]:

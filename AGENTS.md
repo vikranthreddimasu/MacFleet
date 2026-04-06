@@ -9,7 +9,7 @@ MacFleet pools multiple Apple Silicon Macs into a single distributed ML training
 - **Version**: 2.0.0
 - **Language**: Python 3.11+
 - **Platform**: macOS only (Apple Silicon)
-- **Tests**: 268, run with `make test` or `python -m pytest tests/ -v`
+- **Tests**: 371, run with `make test` or `python -m pytest tests/ -v`
 - **Package**: `pip install macfleet`
 
 ## Critical Architecture Rule
@@ -62,6 +62,9 @@ macfleet/
     network.py             # Network interface detection, link type classification
     scheduler.py           # Weighted batch allocation, thermal-aware rebalancing
     heartbeat.py           # Gossip-based peer liveness detection
+  security/
+    auth.py                # SecurityConfig, HMAC challenge-response, TLS, gradient validation
+    __init__.py            # Re-exports security primitives
   sdk/
     pool.py                # macfleet.Pool() context manager
     train.py               # macfleet.train() convenience function

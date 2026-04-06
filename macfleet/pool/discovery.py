@@ -15,8 +15,9 @@ from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 from zeroconf.asyncio import AsyncZeroconf
 
 import macfleet
+from macfleet.security.auth import DEFAULT_SERVICE_TYPE, SecurityConfig
 
-MACFLEET_SERVICE_TYPE = "_macfleet._tcp.local."
+MACFLEET_SERVICE_TYPE = DEFAULT_SERVICE_TYPE
 DEFAULT_TTL = 120
 
 
@@ -107,7 +108,9 @@ class PoolServiceListener(ServiceListener):
 class ServiceRegistry:
     """Register and discover MacFleet pool members using Bonjour/zeroconf."""
 
-    def __init__(self):
+    def __init__(self, security: Optional[SecurityConfig] = None):
+        self._security = security or SecurityConfig()
+        self._service_type = self._security.mdns_service_type
         self._zeroconf: Optional[Zeroconf] = None
         self._async_zeroconf: Optional[AsyncZeroconf] = None
         self._service_info: Optional[ServiceInfo] = None
@@ -153,6 +156,36 @@ class ServiceRegistry:
         with self._nodes_lock:
             self._discovered_nodes.clear()
 
+    def _build_properties(
+        self,
+        node_id: str,
+        gpu_cores: int,
+        ram_gb: int,
+        chip_name: str,
+        link_types: str,
+        compute_score: float,
+    ) -> dict[bytes, bytes]:
+        """Build mDNS service properties.
+
+        SECURITY: When fleet is token-protected, minimize broadcast info.
+        Only broadcast node_id, port, and version. Hardware details
+        (GPU cores, RAM, chip) are exchanged AFTER authenticated connection.
+        """
+        if self._security.is_secure:
+            return {
+                b"node_id": node_id.encode(),
+                b"pool_version": macfleet.__version__.encode(),
+            }
+        return {
+            b"node_id": node_id.encode(),
+            b"gpu_cores": str(gpu_cores).encode(),
+            b"ram_gb": str(ram_gb).encode(),
+            b"chip_name": chip_name.encode(),
+            b"link_types": link_types.encode(),
+            b"pool_version": macfleet.__version__.encode(),
+            b"compute_score": f"{compute_score:.1f}".encode(),
+        }
+
     def register_node(
         self,
         hostname: str,
@@ -169,19 +202,13 @@ class ServiceRegistry:
         if not self._zeroconf:
             self.start()
 
-        service_name = f"{node_id}.{MACFLEET_SERVICE_TYPE}"
-        properties = {
-            b"node_id": node_id.encode(),
-            b"gpu_cores": str(gpu_cores).encode(),
-            b"ram_gb": str(ram_gb).encode(),
-            b"chip_name": chip_name.encode(),
-            b"link_types": link_types.encode(),
-            b"pool_version": macfleet.__version__.encode(),
-            b"compute_score": f"{compute_score:.1f}".encode(),
-        }
+        service_name = f"{node_id}.{self._service_type}"
+        properties = self._build_properties(
+            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score,
+        )
 
         self._service_info = ServiceInfo(
-            MACFLEET_SERVICE_TYPE,
+            self._service_type,
             service_name,
             addresses=[socket.inet_aton(ip_address)],
             port=port,
@@ -206,19 +233,13 @@ class ServiceRegistry:
         if not self._async_zeroconf:
             await self.async_start()
 
-        service_name = f"{node_id}.{MACFLEET_SERVICE_TYPE}"
-        properties = {
-            b"node_id": node_id.encode(),
-            b"gpu_cores": str(gpu_cores).encode(),
-            b"ram_gb": str(ram_gb).encode(),
-            b"chip_name": chip_name.encode(),
-            b"link_types": link_types.encode(),
-            b"pool_version": macfleet.__version__.encode(),
-            b"compute_score": f"{compute_score:.1f}".encode(),
-        }
+        service_name = f"{node_id}.{self._service_type}"
+        properties = self._build_properties(
+            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score,
+        )
 
         self._service_info = ServiceInfo(
-            MACFLEET_SERVICE_TYPE,
+            self._service_type,
             service_name,
             addresses=[socket.inet_aton(ip_address)],
             port=port,
@@ -261,7 +282,7 @@ class ServiceRegistry:
             on_add=track_add, on_remove=track_remove, on_update=track_update,
         )
         self._browser = ServiceBrowser(
-            self._zeroconf, MACFLEET_SERVICE_TYPE, self._listener,
+            self._zeroconf, self._service_type, self._listener,
         )
 
     def stop_discovery(self) -> None:
@@ -287,7 +308,7 @@ class ServiceRegistry:
                 found.append(node)
 
         listener = PoolServiceListener(on_add=on_add)
-        browser = ServiceBrowser(self._zeroconf, MACFLEET_SERVICE_TYPE, listener)
+        browser = ServiceBrowser(self._zeroconf, self._service_type, listener)
 
         time.sleep(timeout)
         browser.cancel()

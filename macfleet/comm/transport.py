@@ -10,7 +10,9 @@ Manages per-peer TCP connections with:
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
+import struct
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -22,6 +24,18 @@ from macfleet.comm.protocol import (
     WireMessage,
 )
 from macfleet.pool.network import LinkType
+from macfleet.security.auth import (
+    CHALLENGE_SIZE,
+    AuthRateLimiter,
+    SecurityConfig,
+    compute_response,
+    create_client_ssl_context,
+    create_server_ssl_context,
+    generate_challenge,
+    verify_response,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -135,13 +149,19 @@ class PeerTransport:
         self,
         local_id: str,
         config: Optional[TransportConfig] = None,
+        security: Optional[SecurityConfig] = None,
     ):
         self.local_id = local_id
         self.config = config or TransportConfig()
+        self._security = security or SecurityConfig()
         self._connections: dict[str, PeerConnection] = {}
         self._server: Optional[asyncio.Server] = None
         self._lock = asyncio.Lock()
         self._on_connect: Optional[Callable] = None
+        self._rate_limiter = AuthRateLimiter()
+        self._server_ssl_ctx = None
+        if self._security.tls:
+            self._server_ssl_ctx = create_server_ssl_context()
 
     @property
     def peer_ids(self) -> list[str]:
@@ -175,8 +195,23 @@ class PeerTransport:
             reader: asyncio.StreamReader,
             writer: asyncio.StreamWriter,
         ) -> None:
+            # Get peer IP for rate limiting
+            peername = writer.get_extra_info("peername")
+            peer_ip = peername[0] if peername else "unknown"
+
             try:
-                # Read handshake: peer sends its ID
+                # SECURITY: Rate limit — reject banned IPs immediately
+                if self._rate_limiter.is_banned(peer_ip):
+                    logger.warning("Rate limit: rejecting banned IP %s", peer_ip)
+                    writer.close()
+                    return
+
+                # Apply backoff delay for IPs with recent failures
+                delay = self._rate_limiter.get_delay(peer_ip)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+                # Read handshake: peer sends its ID (+ challenge if secure)
                 msg = await asyncio.wait_for(
                     WireMessage.read_from_stream(reader),
                     timeout=self.config.connect_timeout_sec,
@@ -184,26 +219,94 @@ class PeerTransport:
                 if msg.msg_type != MessageType.CONTROL:
                     writer.close()
                     return
-                peer_id = msg.payload.decode("utf-8")
-            except Exception:
+
+                payload = msg.payload
+                fleet_key = self._security.fleet_key
+
+                if fleet_key:
+                    # SECURITY: Downgrade protection — secure server rejects
+                    # open handshakes (payload without challenge appended)
+                    if len(payload) < CHALLENGE_SIZE + 1:
+                        logger.warning(
+                            "Auth handshake: payload too short from %s "
+                            "(possible downgrade attack or misconfigured peer)",
+                            peer_ip,
+                        )
+                        self._rate_limiter.record_failure(peer_ip)
+                        writer.close()
+                        return
+                    peer_id = payload[:-CHALLENGE_SIZE].decode("utf-8")
+                    challenge_a = payload[-CHALLENGE_SIZE:]
+
+                    # Compute response to peer's challenge + send our own challenge
+                    response_a = compute_response(fleet_key, challenge_a)
+                    challenge_b = generate_challenge()
+                    ack_payload = (
+                        self.local_id.encode("utf-8") + response_a + challenge_b
+                    )
+                    ack = WireMessage(
+                        stream_id=0,
+                        msg_type=MessageType.CONTROL,
+                        flags=MessageFlags.NONE,
+                        sequence=0,
+                        payload=ack_payload,
+                    )
+                    conn = PeerConnection(peer_id=peer_id, reader=reader, writer=writer)
+                    await conn.send_message(ack)
+
+                    # Read peer's response to our challenge
+                    msg2 = await asyncio.wait_for(
+                        WireMessage.read_from_stream(reader),
+                        timeout=self.config.connect_timeout_sec,
+                    )
+                    response_b = msg2.payload
+                    if not verify_response(fleet_key, challenge_b, response_b):
+                        logger.warning(
+                            "Auth handshake: peer %s (%s) failed challenge "
+                            "(wrong token or attack)",
+                            peer_id, peer_ip,
+                        )
+                        self._rate_limiter.record_failure(peer_ip)
+                        writer.close()
+                        await writer.wait_closed()
+                        return
+
+                    # Auth succeeded
+                    self._rate_limiter.record_success(peer_ip)
+                    logger.debug("Auth handshake succeeded: peer=%s ip=%s", peer_id, peer_ip)
+                else:
+                    # SECURITY: Downgrade protection — open server rejects
+                    # authenticated handshakes (prevents mixed-mode confusion)
+                    if len(payload) > 256:
+                        logger.warning(
+                            "Open handshake: payload suspiciously large from %s "
+                            "(possible auth handshake sent to open server)",
+                            peer_ip,
+                        )
+                        writer.close()
+                        return
+
+                    peer_id = payload.decode("utf-8")
+                    conn = PeerConnection(peer_id=peer_id, reader=reader, writer=writer)
+
+                    ack = WireMessage(
+                        stream_id=0,
+                        msg_type=MessageType.CONTROL,
+                        flags=MessageFlags.NONE,
+                        sequence=0,
+                        payload=self.local_id.encode("utf-8"),
+                    )
+                    await conn.send_message(ack)
+
+            except Exception as e:
+                logger.debug("Handshake error from %s: %s", peer_ip, e)
                 try:
                     writer.close()
                 except Exception:
                     pass
                 return
 
-            conn = PeerConnection(peer_id=peer_id, reader=reader, writer=writer)
             self._tune_socket(writer, conn.link_type)
-
-            # Send ack with our local_id
-            ack = WireMessage(
-                stream_id=0,
-                msg_type=MessageType.CONTROL,
-                flags=MessageFlags.NONE,
-                sequence=0,
-                payload=self.local_id.encode("utf-8"),
-            )
-            await conn.send_message(ack)
 
             async with self._lock:
                 self._connections[peer_id] = conn
@@ -211,7 +314,9 @@ class PeerTransport:
             if self._on_connect:
                 self._on_connect(peer_id, conn)
 
-        self._server = await asyncio.start_server(handle_client, host, port)
+        self._server = await asyncio.start_server(
+            handle_client, host, port, ssl=self._server_ssl_ctx,
+        )
 
     async def stop_server(self) -> None:
         """Stop the server and close all connections."""
@@ -237,9 +342,14 @@ class PeerTransport:
 
         Returns:
             The established PeerConnection.
+
+        Raises:
+            ConnectionError: If authentication fails.
         """
+        ssl_ctx = create_client_ssl_context() if self._security.tls else None
+
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
+            asyncio.open_connection(host, port, ssl=ssl_ctx),
             timeout=self.config.connect_timeout_sec,
         )
 
@@ -251,21 +361,68 @@ class PeerTransport:
         )
         self._tune_socket(writer, link_type)
 
-        # Send handshake with our local_id
-        handshake = WireMessage(
-            stream_id=0,
-            msg_type=MessageType.CONTROL,
-            flags=MessageFlags.NONE,
-            sequence=0,
-            payload=self.local_id.encode("utf-8"),
-        )
-        await conn.send_message(handshake)
+        fleet_key = self._security.fleet_key
 
-        # Wait for ack
-        await asyncio.wait_for(
-            conn.recv_message(),
-            timeout=self.config.connect_timeout_sec,
-        )
+        if fleet_key:
+            # Authenticated handshake: send node_id + challenge
+            challenge_a = generate_challenge()
+            handshake_payload = self.local_id.encode("utf-8") + challenge_a
+
+            handshake = WireMessage(
+                stream_id=0,
+                msg_type=MessageType.CONTROL,
+                flags=MessageFlags.NONE,
+                sequence=0,
+                payload=handshake_payload,
+            )
+            await conn.send_message(handshake)
+
+            # Read ack: peer_id + response_a(32) + challenge_b(32)
+            ack = await asyncio.wait_for(
+                conn.recv_message(),
+                timeout=self.config.connect_timeout_sec,
+            )
+            ack_payload = ack.payload
+            # Parse: everything before last 64 bytes is node_id
+            if len(ack_payload) < CHALLENGE_SIZE * 2 + 1:
+                await conn.close()
+                raise ConnectionError("Auth handshake: server response too short")
+
+            response_a = ack_payload[-(CHALLENGE_SIZE * 2):-CHALLENGE_SIZE]
+            challenge_b = ack_payload[-CHALLENGE_SIZE:]
+
+            # Verify server proved it knows the token
+            if not verify_response(fleet_key, challenge_a, response_a):
+                await conn.close()
+                raise ConnectionError(
+                    f"Auth handshake failed: peer {peer_id} does not have the correct token"
+                )
+
+            # Respond to server's challenge (prove we know the token too)
+            response_b = compute_response(fleet_key, challenge_b)
+            resp_msg = WireMessage(
+                stream_id=0,
+                msg_type=MessageType.CONTROL,
+                flags=MessageFlags.NONE,
+                sequence=0,
+                payload=response_b,
+            )
+            await conn.send_message(resp_msg)
+        else:
+            # Open handshake (backward compatible)
+            handshake = WireMessage(
+                stream_id=0,
+                msg_type=MessageType.CONTROL,
+                flags=MessageFlags.NONE,
+                sequence=0,
+                payload=self.local_id.encode("utf-8"),
+            )
+            await conn.send_message(handshake)
+
+            await asyncio.wait_for(
+                conn.recv_message(),
+                timeout=self.config.connect_timeout_sec,
+            )
 
         async with self._lock:
             self._connections[peer_id] = conn

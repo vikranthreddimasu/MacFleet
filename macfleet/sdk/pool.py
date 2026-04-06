@@ -36,12 +36,16 @@ class Pool:
         engine: str = "torch",
         port: int = 50051,
         discovery_timeout: float = 3.0,
+        fleet_id: Optional[str] = None,
+        tls: bool = False,
     ):
         self.name = name
         self.token = token
         self.engine_type = engine
         self.port = port
         self.discovery_timeout = discovery_timeout
+        self.fleet_id = fleet_id
+        self.tls = tls
         self._joined = False
         self._agent = None
         self._peers = []

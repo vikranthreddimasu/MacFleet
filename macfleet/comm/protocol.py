@@ -49,6 +49,11 @@ class MessageFlags(IntFlag):
 HEADER_FORMAT = "!IHHIIII"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 24 bytes
 
+# SECURITY: Maximum payload size to prevent OOM from malicious headers.
+# 256 MB is larger than any realistic gradient tensor (100M float32 = 400 MB,
+# but compressed gradients are much smaller). Set conservatively high.
+MAX_PAYLOAD_SIZE = 256 * 1024 * 1024  # 256 MB
+
 
 # Dtype mappings (framework-agnostic codes)
 DTYPE_TO_CODE = {
@@ -133,6 +138,11 @@ class WireMessage:
         stream_id, msg_type, flags, payload_size, sequence, checksum, _ = struct.unpack(
             HEADER_FORMAT, header_data
         )
+        if payload_size > MAX_PAYLOAD_SIZE:
+            raise ValueError(
+                f"Payload size {payload_size} exceeds maximum {MAX_PAYLOAD_SIZE} "
+                f"— possible OOM attack or corrupt header"
+            )
         payload = await reader.readexactly(payload_size)
 
         actual_checksum = zlib.crc32(payload) & 0xFFFFFFFF
@@ -257,6 +267,8 @@ def deserialize_compressed_gradient(
     device: Optional[str] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, int, torch.dtype]:
     """Deserialize a compressed gradient."""
+    from macfleet.security.auth import validate_gradient_metadata
+
     inner_header_size = 16
     msg_type, _, _, payload_size = struct.unpack("!IIII", data[:inner_header_size])
 
@@ -268,6 +280,10 @@ def deserialize_compressed_gradient(
     original_numel, topk_count, orig_dtype_code = struct.unpack(
         "!III", data[metadata_start:metadata_end]
     )
+
+    # SECURITY: Validate metadata before allocating memory
+    validate_gradient_metadata(original_numel, topk_count)
+
     original_dtype = CODE_TO_DTYPE.get(orig_dtype_code, torch.float32)
 
     indices_start = metadata_end
