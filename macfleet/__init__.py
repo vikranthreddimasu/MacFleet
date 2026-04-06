@@ -1,45 +1,34 @@
-"""MacFleet: Distributed ML training across Apple Silicon Macs over Thunderbolt."""
+"""MacFleet v2: Pool Apple Silicon Macs into a distributed ML training cluster.
+
+Zero-config discovery. Framework-agnostic engines. Adaptive networking.
+
+    pip install macfleet && macfleet join
+"""
 
 import logging
 
-__version__ = "0.3.0"
+__version__ = "2.0.0a1"
 
-# Configure a NullHandler so library users can control logging.
-# Applications (CLI, scripts) should call logging.basicConfig() to see output.
 logging.getLogger(__name__).addHandler(logging.NullHandler())
-
-# Config classes are lightweight — safe to import eagerly.
-from macfleet.core.config import (
-    ClusterConfig,
-    ClusterState,
-    NodeConfig,
-    NodeRole,
-    TrainingConfig,
-)
 
 
 def __getattr__(name: str):
-    """Lazy imports for heavy classes (avoid importing torch/grpc at module load)."""
-    if name == "Coordinator":
-        from macfleet.core.coordinator import Coordinator
-        return Coordinator
-    if name == "Worker":
-        from macfleet.core.worker import Worker
-        return Worker
-    if name == "Trainer":
-        from macfleet.training.trainer import Trainer
-        return Trainer
+    """Lazy imports for heavy modules (avoid importing torch/mlx at module load)."""
+    if name == "Pool":
+        from macfleet.sdk.pool import Pool
+        return Pool
+    if name == "train":
+        from macfleet.sdk.train import train
+        return train
+    if name == "DataParallel":
+        from macfleet.training.data_parallel import DataParallel
+        return DataParallel
     raise AttributeError(f"module 'macfleet' has no attribute {name!r}")
 
 
 __all__ = [
     "__version__",
-    "ClusterConfig",
-    "ClusterState",
-    "NodeConfig",
-    "NodeRole",
-    "TrainingConfig",
-    "Coordinator",
-    "Worker",
-    "Trainer",
+    "Pool",
+    "train",
+    "DataParallel",
 ]

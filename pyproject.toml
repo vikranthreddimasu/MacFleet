@@ -4,15 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "macfleet"
-version = "0.3.0"
-description = "Distributed ML training across Apple Silicon Macs over Thunderbolt"
+version = "2.0.0a1"
+description = "Pool Apple Silicon Macs into a distributed ML training cluster"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 authors = [
     {name = "MacFleet Contributors"}
 ]
-keywords = ["distributed", "machine-learning", "pytorch", "apple-silicon", "mps", "thunderbolt"]
+keywords = [
+    "distributed", "machine-learning", "apple-silicon", "mps", "mlx",
+    "pytorch", "training", "gpu-pooling", "data-parallel",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -22,34 +25,29 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 dependencies = [
-    "torch>=2.1.0",
-    "grpcio>=1.60.0",
-    "grpcio-tools>=1.60.0",
     "zeroconf>=0.131.0",
     "rich>=13.0.0",
     "click>=8.1.0",
     "numpy>=1.24.0",
+    "msgpack>=1.0.0",
 ]
 
 [project.optional-dependencies]
+torch = ["torch>=2.1.0"]
+mlx = ["mlx>=0.5.0"]
+yaml = ["pyyaml>=6.0"]
+all = ["torch>=2.1.0", "mlx>=0.5.0", "pyyaml>=6.0"]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
     "ruff>=0.3.0",
     "mypy>=1.8.0",
     "pytest-cov>=4.1.0",
-]
-yaml = [
-    "pyyaml>=6.0",
-]
-examples = [
-    "torchvision>=0.16.0",
-    "datasets>=2.14.0",
-    "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -75,3 +73,8 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true

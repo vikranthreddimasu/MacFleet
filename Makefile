@@ -1,14 +1,4 @@
-.PHONY: proto test lint format install dev clean
-
-proto:
-	python -m grpc_tools.protoc \
-		-I macfleet/comm/proto \
-		--python_out=macfleet/comm/proto \
-		--grpc_python_out=macfleet/comm/proto \
-		macfleet/comm/proto/control.proto
-	# Fix relative import in generated grpc file
-	sed -i '' 's/^import control_pb2/from macfleet.comm.proto import control_pb2/' \
-		macfleet/comm/proto/control_pb2_grpc.py
+.PHONY: test lint format install dev clean bench
 
 test:
 	python -m pytest tests/ -v
@@ -29,6 +19,11 @@ install:
 
 dev:
 	pip install -e ".[dev]"
+
+bench:
+	python -m macfleet.cli.main bench --type compute
+	python -m macfleet.cli.main bench --type network --size-mb 1
+	python -m macfleet.cli.main bench --type allreduce --size-mb 1
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +

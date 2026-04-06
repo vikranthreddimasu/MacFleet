@@ -1,1 +1,1 @@
-"""Utility functions for MacFleet."""
+"""Shared utilities."""

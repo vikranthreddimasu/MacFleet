@@ -1,1 +1,1 @@
-"""Command-line interface for MacFleet."""
+"""CLI interface for MacFleet."""

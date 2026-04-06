@@ -1,1 +1,1 @@
-"""Communication layer for MacFleet."""
+"""Communication layer: transport, protocol, and collectives."""
