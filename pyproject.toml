@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "macfleet"
-version = "2.1.0"
+version = "2.1.1"
 description = "Pool Apple Silicon Macs for distributed compute and ML training"
 readme = "README.md"
 license = {text = "MIT"}
