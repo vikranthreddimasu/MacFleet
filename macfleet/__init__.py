@@ -7,7 +7,7 @@ Zero-config discovery. Framework-agnostic engines. Adaptive networking.
 
 import logging
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 
