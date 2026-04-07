@@ -231,8 +231,8 @@ class PoolAgent:
             hardware=self.hardware,
         ))
 
-        # 4. Register via mDNS
-        self._discovery.register_node(
+        # 4. Register via mDNS (async to avoid EventLoopBlocked)
+        await self._discovery.async_register_node(
             hostname=self.hardware.hostname,
             node_id=self.hardware.node_id,
             ip_address=ip_address,
@@ -287,7 +287,7 @@ class PoolAgent:
             self._heartbeat_server.close()
             await self._heartbeat_server.wait_closed()
 
-        self._discovery.stop()
+        await self._discovery.async_stop()
         console.print(f"[yellow]Left pool[/yellow]")
 
     async def _handle_heartbeat_ping(
