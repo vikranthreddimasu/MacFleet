@@ -14,6 +14,7 @@ import logging
 import platform
 import secrets as secrets_mod
 import socket
+import ssl
 import subprocess
 from typing import Optional
 
@@ -331,8 +332,11 @@ class PoolAgent:
         except (asyncio.TimeoutError, ConnectionResetError, ValueError):
             pass
         finally:
-            writer.close()
-            await writer.wait_closed()
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except (OSError, ssl.SSLError, BrokenPipeError, ConnectionResetError):
+                pass
 
     async def _add_manual_peer(self, peer_addr: str) -> None:
         """Connect to a manually specified peer (bypasses mDNS).
@@ -352,9 +356,11 @@ class PoolAgent:
             fleet_key = self._security.fleet_key
             ssl_ctx = create_client_ssl_context() if self._security.tls else None
 
+            console.print(f"[dim]Connecting to peer {host}:{port}...[/dim]")
+
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port, ssl=ssl_ctx),
-                timeout=5.0,
+                timeout=10.0,
             )
 
             if fleet_key:
@@ -362,12 +368,23 @@ class PoolAgent:
                 sig = sign_heartbeat(fleet_key, self.node_id, nonce)
                 writer.write(f"APING {self.node_id} {nonce.hex()} {sig.hex()}\n".encode())
                 await writer.drain()
-                response = await asyncio.wait_for(reader.readline(), timeout=5.0)
+                response = await asyncio.wait_for(reader.readline(), timeout=10.0)
+            else:
+                writer.write(f"PING {self.node_id}\n".encode())
+                await writer.drain()
+                response = await asyncio.wait_for(reader.readline(), timeout=10.0)
+
+            # Close connection gracefully
+            try:
                 writer.close()
                 await writer.wait_closed()
+            except (OSError, ssl.SSLError, BrokenPipeError, ConnectionResetError):
+                pass
 
+            # Parse response
+            if fleet_key:
                 if not response.startswith(b"APONG"):
-                    console.print(f"[red]Peer {peer_addr}: no authenticated response[/red]")
+                    console.print(f"[red]Peer {peer_addr}: no authenticated response (got: {response[:50]})[/red]")
                     return
                 parts = response.decode().strip().split(" ")
                 if len(parts) != 4:
@@ -378,14 +395,8 @@ class PoolAgent:
                     console.print(f"[red]Peer {peer_addr}: authentication failed (wrong token?)[/red]")
                     return
             else:
-                writer.write(f"PING {self.node_id}\n".encode())
-                await writer.drain()
-                response = await asyncio.wait_for(reader.readline(), timeout=5.0)
-                writer.close()
-                await writer.wait_closed()
-
                 if not response.startswith(b"PONG"):
-                    console.print(f"[red]Peer {peer_addr}: no response[/red]")
+                    console.print(f"[red]Peer {peer_addr}: no response (got: {response[:50]})[/red]")
                     return
                 parts = response.decode().strip().split(" ")
                 peer_node_id = parts[1] if len(parts) >= 2 else f"peer-{host}"
@@ -411,8 +422,8 @@ class PoolAgent:
 
             console.print(f"[cyan]Connected to peer[/cyan] {peer_node_id} at {host}:{port}")
 
-        except (OSError, asyncio.TimeoutError, ConnectionRefusedError, ValueError) as e:
-            console.print(f"[red]Failed to connect to peer {peer_addr}: {e}[/red]")
+        except (OSError, ssl.SSLError, asyncio.TimeoutError, ConnectionRefusedError, ValueError) as e:
+            console.print(f"[red]Failed to connect to peer {peer_addr}: {type(e).__name__}: {e}[/red]")
             console.print("[dim]Make sure the peer is running 'macfleet join' and is reachable[/dim]")
 
     def _on_peer_discovered(self, node: DiscoveredNode) -> None:
