@@ -114,17 +114,11 @@ class TestIsDistributedProperty:
 
     def test_distributed_flag_on_with_agent(self):
         """With flag on AND agent joined, is_distributed reports True."""
-        import socket
-
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-
         with Pool(
             name="pool-is-dist",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,      # kernel picks ephemeral (no TIME_WAIT race)
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,

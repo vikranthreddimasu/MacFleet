@@ -12,16 +12,7 @@ Covers:
 
 from __future__ import annotations
 
-import socket
-
 import pytest
-
-
-def _free_port() -> int:
-    """Grab an ephemeral port for this test run."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 class TestPoolFeatureFlagDefault:
@@ -62,12 +53,11 @@ class TestPoolDistributedFlag:
     def test_join_starts_agent(self):
         from macfleet.sdk.pool import Pool
 
-        port = _free_port()
         pool = Pool(
             name="pool-test-1",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,
@@ -80,8 +70,12 @@ class TestPoolDistributedFlag:
             nodes = pool.nodes
             assert len(nodes) == 1
             self_node = nodes[0]
-            assert self_node["port"] == port
-            assert self_node["data_port"] == port + 1
+            # Ports were kernel-assigned (port=0 at construction); assert
+            # they're populated and distinct rather than matching a specific
+            # value we'd have had to probe for.
+            assert self_node["port"] > 0
+            assert self_node["data_port"] > 0
+            assert self_node["port"] != self_node["data_port"]
             assert self_node["is_coordinator"] is True
         finally:
             pool.leave()
@@ -89,12 +83,11 @@ class TestPoolDistributedFlag:
     def test_context_manager_distributed(self):
         from macfleet.sdk.pool import Pool
 
-        port = _free_port()
         with Pool(
             name="pool-test-2",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,
@@ -106,12 +99,11 @@ class TestPoolDistributedFlag:
         """quorum_size above observed → TimeoutError with remediation text."""
         from macfleet.sdk.pool import Pool
 
-        port = _free_port()
         pool = Pool(
             name="pool-test-3",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=2,  # need 2, will only see 1
             quorum_timeout_sec=1.0,  # fail fast
@@ -127,12 +119,11 @@ class TestPoolDistributedFlag:
     def test_leave_stops_agent(self):
         from macfleet.sdk.pool import Pool
 
-        port = _free_port()
         pool = Pool(
             name="pool-test-4",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,
@@ -148,12 +139,11 @@ class TestPoolDistributedFlag:
         """Pool.nodes dumps the local hardware profile fields the user cares about."""
         from macfleet.sdk.pool import Pool
 
-        port = _free_port()
         with Pool(
             name="pool-test-5",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,

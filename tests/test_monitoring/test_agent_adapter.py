@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import socket
-
 from macfleet.monitoring.agent_adapter import (
     build_node_health_for_peers,
     build_node_health_for_self,
@@ -12,12 +10,6 @@ from macfleet.monitoring.agent_adapter import (
 )
 from macfleet.monitoring.health import HealthStatus
 from macfleet.sdk.pool import Pool
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 class TestClassifyHealth:
@@ -36,12 +28,11 @@ class TestClassifyHealth:
 
 class TestBuildNodeHealthForSelf:
     def test_snapshot_populates_basics(self):
-        port = _free_port()
         with Pool(
             name="dash-self",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,
@@ -61,12 +52,11 @@ class TestBuildNodeHealthForSelf:
             assert health.status != HealthStatus.UNKNOWN
 
     def test_connection_failures_tracked(self):
-        port = _free_port()
         with Pool(
             name="dash-failures",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,
@@ -80,12 +70,11 @@ class TestBuildNodeHealthForSelf:
 class TestBuildNodeHealthForPeers:
     def test_empty_when_solo(self):
         """No peers in registry → empty list."""
-        port = _free_port()
         with Pool(
             name="dash-solo",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,
@@ -95,12 +84,11 @@ class TestBuildNodeHealthForPeers:
 
     def test_self_excluded(self):
         """build_node_health_for_peers must not include self."""
-        port = _free_port()
         with Pool(
             name="dash-no-self",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,
@@ -112,12 +100,11 @@ class TestBuildNodeHealthForPeers:
 
 class TestSnapshotAll:
     def test_includes_self_first(self):
-        port = _free_port()
         with Pool(
             name="dash-all",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,
@@ -128,12 +115,11 @@ class TestSnapshotAll:
 
     def test_pool_dashboard_snapshot_helper(self):
         """Pool.dashboard_snapshot() is the one-call entry point."""
-        port = _free_port()
         with Pool(
             name="dash-helper",
             open=True,
-            port=port,
-            data_port=port + 1,
+            port=0,
+            data_port=0,
             enable_pool_distributed=True,
             quorum_size=1,
             quorum_timeout_sec=5.0,

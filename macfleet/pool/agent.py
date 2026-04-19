@@ -52,6 +52,27 @@ HEARTBEAT_READ_TIMEOUT_SEC = 1.0
 console = Console()
 
 
+def _pick_ephemeral_port(exclude: int = 0) -> int:
+    """Return a kernel-assigned ephemeral port that's not `exclude`.
+
+    v2.2 post-rc port-flake fix: when PoolAgent is constructed with
+    port=0 data_port=0, we bind the heartbeat server first to lock
+    `self.port`, then call this to pick `self.data_port`. Rare 1-in-60k
+    case of the kernel handing back the same port is handled by a retry.
+    """
+    for _ in range(16):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", 0))
+            port = s.getsockname()[1]
+        finally:
+            s.close()
+        if port != exclude:
+            return port
+    raise RuntimeError("could not pick an ephemeral port distinct from {exclude} after 16 tries")
+
+
 def _detect_chip_name() -> str:
     """Detect the Apple Silicon chip name."""
     try:
@@ -177,8 +198,17 @@ class PoolAgent:
         # port means a transport handshake looks like a malformed APING and vice
         # versa. See docs/designs/v3-cathedral.md Issue 5.
         self.port = port
-        self.data_port = data_port if data_port is not None else port + 1
-        if self.data_port == self.port:
+        # v2.2 post-rc: port=0 means "kernel picks ephemeral" for both
+        # heartbeat and data_port. We rewrite self.port to the actually-bound
+        # value after asyncio.start_server returns in start(). data_port=0
+        # gets resolved in _resolve_data_port() via a throwaway bind.
+        if port == 0:
+            self.data_port = 0 if data_port is None else data_port
+        else:
+            self.data_port = data_port if data_port is not None else port + 1
+        # Collision check only applies to explicit nonzero pairs; (0, 0) is
+        # valid (kernel picks two distinct ephemeral ports).
+        if self.port != 0 and self.data_port == self.port:
             raise ValueError(
                 f"heartbeat port and data port must differ "
                 f"(both set to {self.port}). Set --data-port or pick distinct ports."
@@ -295,10 +325,28 @@ class PoolAgent:
         best = topology.best_link
         ip_address = best.ip_address if best else "127.0.0.1"
 
-        # 3. Initialize registry
-        self._registry = ClusterRegistry(self.hardware.node_id)
+        # 3. Start heartbeat responder server FIRST so we know the actual bound
+        # port before anything else (registry / mDNS) needs it. When the caller
+        # passed port=0, the kernel picks an ephemeral port; we rewrite
+        # self.port to reflect reality. reuse_address=True survives TIME_WAIT
+        # from a previous clean stop, which is what CI test rapid-fire needs.
+        self._heartbeat_server = await asyncio.start_server(
+            self._handle_heartbeat_ping, "0.0.0.0", self.port,
+            ssl=self._heartbeat_ssl_ctx,
+            reuse_address=True,
+        )
+        bound_port = self._heartbeat_server.sockets[0].getsockname()[1]
+        if self.port == 0:
+            self.port = bound_port
+            # If data_port was also 0, resolve it now via a throwaway bind.
+            # The transport layer hasn't bound yet, so we're free to pick an
+            # ephemeral port the kernel will hand back (and which won't
+            # collide with self.port since each bind to 0 gets a distinct one).
+            if self.data_port == 0:
+                self.data_port = _pick_ephemeral_port(exclude=self.port)
 
-        # Register self
+        # 4. Initialize registry (now that ports are final)
+        self._registry = ClusterRegistry(self.hardware.node_id)
         self._registry.register(NodeRecord(
             node_id=self.hardware.node_id,
             hostname=self.hardware.hostname,
@@ -308,7 +356,7 @@ class PoolAgent:
             hardware=self.hardware,
         ))
 
-        # 4. Register via mDNS (async to avoid EventLoopBlocked)
+        # 5. Register via mDNS (async to avoid EventLoopBlocked)
         await self._discovery.async_register_node(
             hostname=self.hardware.hostname,
             node_id=self.hardware.node_id,
@@ -322,13 +370,13 @@ class PoolAgent:
             data_port=self.data_port,
         )
 
-        # 5. Start discovery
+        # 6. Start discovery
         self._discovery.start_discovery(
             on_add=self._on_peer_discovered,
             on_remove=self._on_peer_removed,
         )
 
-        # 6. Start heartbeat
+        # 7. Start heartbeat gossip
         self._heartbeat = GossipHeartbeat(
             node_id=self.hardware.node_id,
             config=HeartbeatConfig(interval_sec=1.0, suspicion_rounds=3, failure_timeout_sec=10.0),
@@ -336,17 +384,6 @@ class PoolAgent:
             on_suspected=self._on_peer_suspected,
             on_failed=self._on_peer_failed,
             on_recovered=self._on_peer_recovered,
-        )
-
-        # Start heartbeat responder server (TLS when auth is enabled).
-        # reuse_address=True lets us rebind the same port after a clean stop
-        # even while the previous socket is in TIME_WAIT. Without it, rapid
-        # start/stop cycles (especially in CI tests) see ephemeral-port
-        # conflicts and "Address already in use" errors.
-        self._heartbeat_server = await asyncio.start_server(
-            self._handle_heartbeat_ping, "0.0.0.0", self.port,
-            ssl=self._heartbeat_ssl_ctx,
-            reuse_address=True,
         )
 
         await self._heartbeat.start()
