@@ -4,9 +4,7 @@ import asyncio
 
 import pytest
 
-from macfleet.comm.protocol import MessageType
 from macfleet.comm.transport import (
-    PeerConnection,
     PeerTransport,
     TransportConfig,
 )

@@ -6,10 +6,9 @@ training performance into a single health score per node.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 

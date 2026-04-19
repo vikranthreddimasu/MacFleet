@@ -10,7 +10,6 @@ import pytest
 from macfleet.comm.transport import PeerTransport, TransportConfig
 from macfleet.security.auth import SecurityConfig
 
-
 CONFIG = TransportConfig(recv_timeout_sec=5.0, connect_timeout_sec=5.0)
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import cloudpickle

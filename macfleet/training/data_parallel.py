@@ -17,15 +17,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
 from macfleet.comm.collectives import CollectiveGroup
 from macfleet.compression.adaptive import (
-    AdaptiveCompressor,
     AdaptiveCompressionConfig,
+    AdaptiveCompressor,
     CompressedArray,
     CompressionLevel,
 )

@@ -21,8 +21,6 @@ from macfleet.engines.base import (
     EngineCapabilities,
     EngineType,
     HardwareProfile,
-    ThermalPressure,
-    TrainingMetrics,
 )
 
 

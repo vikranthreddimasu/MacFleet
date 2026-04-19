@@ -14,14 +14,12 @@ with other work. Supports:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import numpy as np
 
-from macfleet.engines.base import TrainingMetrics
 from macfleet.training.data_parallel import DataParallel
 
 

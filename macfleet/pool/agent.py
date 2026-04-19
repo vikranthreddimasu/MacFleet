@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import platform
 import secrets as secrets_mod
 import socket
 import ssl
@@ -22,13 +21,13 @@ from rich.console import Console
 
 logger = logging.getLogger(__name__)
 
-from macfleet.engines.base import HardwareProfile, ThermalPressure
-from macfleet.monitoring.thermal import get_thermal_state
-from macfleet.pool.discovery import ServiceRegistry, DiscoveredNode
-from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig
-from macfleet.pool.network import LinkType, detect_interfaces, get_network_topology
-from macfleet.pool.registry import ClusterRegistry, NodeRecord
 from macfleet.compute.worker import TaskWorker
+from macfleet.engines.base import HardwareProfile
+from macfleet.monitoring.thermal import get_thermal_state
+from macfleet.pool.discovery import DiscoveredNode, ServiceRegistry
+from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig
+from macfleet.pool.network import LinkType, get_network_topology
+from macfleet.pool.registry import ClusterRegistry, NodeRecord
 from macfleet.security.auth import (
     SecurityConfig,
     create_client_ssl_context,
@@ -209,7 +208,7 @@ class PoolAgent:
             fleet_label = self._security.fleet_id or "default"
             console.print(f"  Fleet: {fleet_label} [bold green](token-protected)[/bold green]")
             if self._security.tls:
-                console.print(f"  TLS: [bold green]enabled[/bold green]")
+                console.print("  TLS: [bold green]enabled[/bold green]")
 
         # 2. Detect network
         topology = get_network_topology()
@@ -296,7 +295,7 @@ class PoolAgent:
             await self._heartbeat_server.wait_closed()
 
         await self._discovery.async_stop()
-        console.print(f"[yellow]Left pool[/yellow]")
+        console.print("[yellow]Left pool[/yellow]")
 
     async def _handle_heartbeat_ping(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -391,7 +390,10 @@ class PoolAgent:
                     console.print(f"[red]Peer {peer_addr}: malformed response[/red]")
                     return
                 _, peer_node_id, resp_nonce_hex, resp_sig_hex = parts
-                if not verify_heartbeat(fleet_key, peer_node_id, bytes.fromhex(resp_nonce_hex), bytes.fromhex(resp_sig_hex)):
+                if not verify_heartbeat(
+                    fleet_key, peer_node_id,
+                    bytes.fromhex(resp_nonce_hex), bytes.fromhex(resp_sig_hex),
+                ):
                     console.print(f"[red]Peer {peer_addr}: authentication failed (wrong token?)[/red]")
                     return
             else:
@@ -459,7 +461,10 @@ class PoolAgent:
         console.print(f"[cyan]Discovered[/cyan] {node.hostname} ({node.chip_name}, {node.gpu_cores} GPU cores)")
 
         if self._registry.is_coordinator:
-            console.print(f"[bold yellow]This node is the coordinator[/bold yellow] (world_size={self._registry.world_size})")
+            console.print(
+                f"[bold yellow]This node is the coordinator[/bold yellow] "
+                f"(world_size={self._registry.world_size})"
+            )
 
     def _on_peer_removed(self, hostname: str) -> None:
         """Called when a peer's mDNS registration expires."""

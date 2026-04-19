@@ -3,18 +3,16 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from macfleet.compression.adaptive import (
-    AdaptiveCompressor,
     AdaptiveCompressionConfig,
+    AdaptiveCompressor,
     CompressedArray,
     CompressionLevel,
     NumpyFP16Compressor,
     NumpyTopKCompressor,
 )
 from macfleet.pool.network import LinkType
-
 
 # ------------------------------------------------------------------ #
 # NumpyTopKCompressor                                                #
@@ -318,11 +316,8 @@ class TestCompressionQuality:
                 reconstructed = c.decompress(compressed)
                 total_info += np.sum(np.abs(reconstructed))
 
-        # Total information transferred should exceed single-step
-        single = c.decompress(c.compress(grad))
-        if isinstance(single, np.ndarray):
-            single_info = np.sum(np.abs(single)) * 5
-        else:
-            single_info = np.sum(np.abs(c.decompress(single))) * 5
+        # Total information transferred should exceed single-step.
+        # (single_info used to be computed here but was never asserted against;
+        # removing the dead computation. The assertion below is the contract.)
         # With error feedback, we should capture at least as much info
         assert total_info > 0

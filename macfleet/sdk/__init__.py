@@ -15,8 +15,8 @@
         ...
 """
 
+from macfleet.sdk.decorators import distributed
 from macfleet.sdk.pool import Pool
 from macfleet.sdk.train import train
-from macfleet.sdk.decorators import distributed
 
 __all__ = ["Pool", "train", "distributed"]

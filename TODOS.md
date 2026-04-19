@@ -23,6 +23,7 @@ Deferred work from reviews. Grouped by release target.
 ### Code quality
 
 - **Issues 10, 11, 12, 14.** Pre-allocated flat gradient buffers (10). MLXEngine forward_backward to avoid 2x forward (11). In-place ring division (12). `async def async_find_peers` (14).
+- **mypy cleanup.** CI currently runs mypy with `continue-on-error: true` — 57 pre-existing Optional-unwrap + type narrowing errors in `macfleet/pool/agent.py` and `macfleet/cli/main.py`. Fix by: (a) tightening `self._registry: ClusterRegistry` (non-optional, assigned in `__init__`) instead of defaulting to None, (b) early-return guards for the `str | bytes` formatting warnings, (c) `assert spec is not None` before `module_from_spec(spec)` in cli/main.py. Then remove `continue-on-error: true` from `.github/workflows/test.yml`.
 
 ### Performance (after v2.2 real multi-node profiling data)
 

@@ -6,21 +6,17 @@ per-node health, and throughput metrics.
 
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
 from macfleet.engines.base import ThermalPressure
 from macfleet.monitoring.health import HealthStatus, NodeHealth
-from macfleet.monitoring.throughput import ThroughputTracker
-
 
 # ------------------------------------------------------------------ #
 # Building blocks: tables and panels                                 #

@@ -327,7 +327,11 @@ class AdaptiveCompressor:
 
         # FP16 dequantize values first
         if ca.is_fp16 and ca.topk_values is not None:
-            values = self._fp16.decompress(ca.topk_values, ca.scale) if self._fp16 else ca.topk_values.astype(np.float32)
+            values = (
+                self._fp16.decompress(ca.topk_values, ca.scale)
+                if self._fp16
+                else ca.topk_values.astype(np.float32)
+            )
         elif ca.topk_values is not None:
             values = ca.topk_values.astype(np.float32)
         else:

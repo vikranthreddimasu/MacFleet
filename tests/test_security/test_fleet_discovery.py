@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
-
-from macfleet.security.auth import DEFAULT_SERVICE_TYPE, SecurityConfig
 from macfleet.pool.discovery import MACFLEET_SERVICE_TYPE, ServiceRegistry
+from macfleet.security.auth import DEFAULT_SERVICE_TYPE, SecurityConfig
 
 
 class TestFleetScopedServiceType:

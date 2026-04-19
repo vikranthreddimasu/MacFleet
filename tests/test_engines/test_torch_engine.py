@@ -1,7 +1,6 @@
 """Tests for the PyTorch training engine."""
 
 import numpy as np
-import pytest
 import torch
 import torch.nn as nn
 

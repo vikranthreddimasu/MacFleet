@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
 import torch.nn as nn
 
 import macfleet
-from macfleet.sdk.pool import Pool
 from macfleet.sdk.decorators import distributed
-
+from macfleet.sdk.pool import Pool
 
 # ------------------------------------------------------------------ #
 # Test models                                                        #

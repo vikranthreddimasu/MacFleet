@@ -15,8 +15,7 @@ import torch.nn as nn
 from macfleet.comm.collectives import CollectiveGroup
 from macfleet.comm.transport import PeerTransport, TransportConfig
 from macfleet.engines.torch_engine import TorchEngine
-from macfleet.training.data_parallel import DataParallel, DataParallelConfig
-
+from macfleet.training.data_parallel import DataParallel
 
 # --------------------------------------------------------------------------- #
 # Test models                                                                 #

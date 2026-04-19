@@ -17,7 +17,6 @@ from macfleet.comm.collectives import (
 )
 from macfleet.comm.transport import PeerTransport, TransportConfig
 
-
 # --------------------------------------------------------------------------- #
 # Array serialization tests                                                   #
 # --------------------------------------------------------------------------- #

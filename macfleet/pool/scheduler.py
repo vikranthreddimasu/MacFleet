@@ -9,8 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from macfleet.engines.base import ThermalPressure
-from macfleet.pool.registry import ClusterRegistry, NodeRecord
+from macfleet.pool.registry import ClusterRegistry
 
 
 @dataclass

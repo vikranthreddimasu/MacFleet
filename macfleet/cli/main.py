@@ -20,7 +20,6 @@ import time
 import click
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 import macfleet
 
@@ -40,9 +39,15 @@ def cli():
 @click.option("--token", default=None, envvar="MACFLEET_TOKEN", help="Pool token (or set MACFLEET_TOKEN env var)")
 @click.option("--fleet-id", default=None, help="Fleet identifier (isolates pool on network)")
 @click.option("--tls", "use_tls", is_flag=True, default=False, help="Enable TLS encryption")
-@click.option("--open", "open_fleet", is_flag=True, default=False, help="Disable security (open fleet, no authentication)")
+@click.option(
+    "--open", "open_fleet", is_flag=True, default=False,
+    help="Disable security (open fleet, no authentication)",
+)
 @click.option("--peer", "peers", multiple=True, help="Peer address (IP:PORT). Use when mDNS is blocked. Repeatable.")
-def join(name: str | None, port: int, token: str | None, fleet_id: str | None, use_tls: bool, open_fleet: bool, peers: tuple):
+def join(
+    name: str | None, port: int, token: str | None, fleet_id: str | None,
+    use_tls: bool, open_fleet: bool, peers: tuple,
+):
     """Join the compute pool. Auto-discovers peers on the network.
 
     Security is enabled by default. A fleet token is auto-generated on first
@@ -57,7 +62,7 @@ def join(name: str | None, port: int, token: str | None, fleet_id: str | None, u
         Mac B: macfleet join --token <token> --peer <Mac-A-IP>:50051
     """
     from macfleet.pool.agent import PoolAgent
-    from macfleet.security.auth import resolve_token_with_file, TOKEN_FILE
+    from macfleet.security.auth import TOKEN_FILE, resolve_token_with_file
 
     if open_fleet:
         if token:
@@ -97,9 +102,9 @@ def join(name: str | None, port: int, token: str | None, fleet_id: str | None, u
 @cli.command()
 def info():
     """Show local hardware information."""
+    from macfleet.monitoring.thermal import get_thermal_state, thermal_state_to_string
     from macfleet.pool.agent import profile_hardware
     from macfleet.pool.network import get_network_topology
-    from macfleet.monitoring.thermal import get_thermal_state, thermal_state_to_string
 
     hw = profile_hardware()
     topo = get_network_topology()
@@ -183,8 +188,8 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool):
 @cli.command()
 def diagnose():
     """Run system health checks."""
-    from macfleet.pool.agent import profile_hardware, _check_mps_available, _check_mlx_available
     from macfleet.monitoring.thermal import get_thermal_state
+    from macfleet.pool.agent import _check_mlx_available, _check_mps_available, profile_hardware
     from macfleet.pool.network import detect_interfaces
 
     console.print("[bold]Running diagnostics...[/bold]\n")
@@ -270,9 +275,6 @@ def _train_demo(engine_type: str, epochs: int, batch_size: int, lr: float):
     from torch.utils.data import DataLoader, TensorDataset
 
     from macfleet.engines.torch_engine import TorchEngine
-    from macfleet.training.data_parallel import DataParallel
-    from macfleet.comm.collectives import CollectiveGroup
-    from macfleet.comm.transport import PeerTransport
 
     console.print("[bold blue]MacFleet Demo Training[/bold blue]")
     console.print("[dim]Single-node training on synthetic data (no peers needed)[/dim]\n")

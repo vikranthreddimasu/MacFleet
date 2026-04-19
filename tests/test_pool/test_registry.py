@@ -1,8 +1,7 @@
 """Tests for the cluster registry and coordinator election."""
 
-from macfleet.engines.base import HardwareProfile, ThermalPressure
+from macfleet.engines.base import HardwareProfile
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
-from macfleet.pool.heartbeat import NodeStatus
 
 
 def _make_node(node_id: str, gpu_cores: int = 10, ram_gb: float = 16.0) -> NodeRecord:

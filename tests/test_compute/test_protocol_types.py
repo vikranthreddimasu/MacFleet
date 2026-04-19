@@ -1,6 +1,5 @@
 """Tests for TASK/RESULT message types in the wire protocol."""
 
-import zlib
 
 import pytest
 

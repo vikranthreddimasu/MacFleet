@@ -3,7 +3,7 @@
     macfleet.train(model=MyModel(), dataset=ds, epochs=10)
 """
 
-from typing import Any, Optional
+from typing import Any
 
 
 def train(

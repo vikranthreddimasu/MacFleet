@@ -5,11 +5,8 @@ from __future__ import annotations
 import asyncio
 import secrets
 
-import pytest
-
-from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig, PeerState, NodeStatus
+from macfleet.pool.heartbeat import GossipHeartbeat
 from macfleet.security.auth import SecurityConfig, sign_heartbeat, verify_heartbeat
-
 
 # ------------------------------------------------------------------ #
 # Heartbeat signing at the protocol level                             #

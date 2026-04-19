@@ -14,7 +14,6 @@ from macfleet.monitoring.health import (
 )
 from macfleet.monitoring.thermal import ThermalState
 
-
 # ------------------------------------------------------------------ #
 # MemoryInfo                                                         #
 # ------------------------------------------------------------------ #

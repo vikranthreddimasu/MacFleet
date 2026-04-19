@@ -24,15 +24,13 @@ from macfleet.engines.base import (
     EngineCapabilities,
     EngineType,
     HardwareProfile,
-    ThermalPressure,
-    TrainingMetrics,
 )
 
 # MLX is optional — only imported when MLXEngine is instantiated
 try:
     import mlx.core as mx
     import mlx.nn as nn
-    import mlx.optimizers as optim
+    import mlx.optimizers as optim  # noqa: F401 — availability probe for callers
 
     MLX_AVAILABLE = True
 except ImportError:

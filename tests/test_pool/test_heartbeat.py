@@ -1,6 +1,5 @@
 """Tests for gossip heartbeat failure detection."""
 
-import time
 
 from macfleet.pool.heartbeat import (
     GossipHeartbeat,

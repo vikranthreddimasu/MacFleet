@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable
 
-from macfleet.comm.protocol import MessageFlags, MessageType, WireMessage
+from macfleet.comm.protocol import MessageType
 from macfleet.comm.transport import PeerTransport
 from macfleet.compute.models import TaskFuture, TaskResult, TaskSpec
 

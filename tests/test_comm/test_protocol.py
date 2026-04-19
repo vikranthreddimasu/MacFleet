@@ -1,24 +1,31 @@
-"""Tests for the wire protocol."""
+"""Tests for the wire protocol.
+
+Torch is required here because this module exercises the v1 compat
+torch-tensor serialization helpers in `macfleet/engines/serialization.py`
+(scheduled for deletion in v2.3 per TODOS.md). Skip the entire module when
+torch is not installed so framework-agnostic CI matrices collect cleanly.
+"""
 
 import asyncio
 import struct
 
 import pytest
-import torch
 
-from macfleet.comm.protocol import (
+torch = pytest.importorskip("torch", reason="torch-dependent wire serialization tests")
+
+from macfleet.comm.protocol import (  # noqa: E402
     HEADER_FORMAT,
-    MAX_PAYLOAD_SIZE,
-    MessageType,
-    MessageFlags,
-    WireMessage,
     HEADER_SIZE,
+    MAX_PAYLOAD_SIZE,
+    MessageFlags,
+    MessageType,
+    WireMessage,
 )
-from macfleet.engines.serialization import (
-    tensor_to_bytes,
+from macfleet.engines.serialization import (  # noqa: E402
     bytes_to_tensor,
-    serialize_compressed_gradient,
     deserialize_compressed_gradient,
+    serialize_compressed_gradient,
+    tensor_to_bytes,
 )
 
 

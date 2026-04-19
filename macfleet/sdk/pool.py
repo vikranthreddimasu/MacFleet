@@ -12,13 +12,11 @@ or any Python function for general-purpose compute.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Callable, Iterable, Optional
 
 import cloudpickle
-
 from rich.console import Console
 
 console = Console()

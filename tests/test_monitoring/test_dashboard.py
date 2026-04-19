@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from macfleet.engines.base import ThermalPressure
 from macfleet.monitoring.dashboard import (
     Dashboard,

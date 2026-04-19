@@ -3,14 +3,13 @@
 import pytest
 import torch
 
-from macfleet.compression.topk import TopKCompressor, topk_compress, topk_decompress
-from macfleet.compression.quantize import FP16Quantizer, Int8Quantizer, quantize_fp16, dequantize_fp16
 from macfleet.compression.pipeline import (
     CompressionPipeline,
-    TopKStage,
     FP16Stage,
     create_pipeline,
 )
+from macfleet.compression.quantize import FP16Quantizer, Int8Quantizer, dequantize_fp16, quantize_fp16
+from macfleet.compression.topk import TopKCompressor, topk_compress, topk_decompress
 
 
 class TestTopKCompression:

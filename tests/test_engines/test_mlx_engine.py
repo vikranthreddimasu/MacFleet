@@ -13,9 +13,8 @@ mlx = pytest.importorskip("mlx.core", reason="MLX not installed")
 nn = pytest.importorskip("mlx.nn")
 optim = pytest.importorskip("mlx.optimizers")
 
-from macfleet.engines.mlx_engine import MLXEngine, _flatten_params, _unflatten_params
 from macfleet.engines.base import EngineType
-
+from macfleet.engines.mlx_engine import MLXEngine, _flatten_params, _unflatten_params
 
 # ------------------------------------------------------------------ #
 # Test models                                                        #

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import ssl
-import time
 
 import numpy as np
 import pytest
@@ -32,7 +30,6 @@ from macfleet.security.auth import (
     verify_heartbeat,
     verify_response,
 )
-
 
 # ------------------------------------------------------------------ #
 # SecurityConfig                                                      #

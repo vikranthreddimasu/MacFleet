@@ -16,7 +16,6 @@ import torch
 
 from macfleet.comm.protocol import MessageType
 
-
 # Dtype mappings (framework-agnostic codes)
 DTYPE_TO_CODE = {
     torch.float32: 0,

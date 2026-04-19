@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
 from macfleet.comm.protocol import MessageType
 from macfleet.comm.transport import PeerTransport
-
 
 # --------------------------------------------------------------------------- #
 # Array serialization (lightweight, no external deps beyond numpy)            #
