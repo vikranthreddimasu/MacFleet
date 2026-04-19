@@ -609,6 +609,29 @@ class Pool:
         """
         return self.submit(fn, *args, **kwargs)
 
+    def dashboard_snapshot(self) -> list:
+        """Return a list of NodeHealth snapshots for the current pool state.
+
+        v2.2 PR 11 (E2): for callers that want to drive the Rich TUI
+        Dashboard themselves, or for headless health checks (e.g.
+        `macfleet status --json`). Returns [] if the pool is not running
+        in distributed mode (no agent to snapshot).
+
+        Example — run your own dashboard loop:
+
+            from macfleet.monitoring.dashboard import Dashboard
+
+            with macfleet.Pool(enable_pool_distributed=True) as pool:
+                with Dashboard() as dash:
+                    while training:
+                        dash.update_nodes(pool.dashboard_snapshot())
+                        time.sleep(2.0)
+        """
+        if self._agent is None:
+            return []
+        from macfleet.monitoring.agent_adapter import snapshot_all
+        return snapshot_all(self._agent)
+
     @property
     def is_distributed(self) -> bool:
         """True iff the pool is running in distributed mode with a live agent.
