@@ -483,21 +483,27 @@ class Pool:
     ) -> list:
         """Apply fn to each item across the pool, return results in order.
 
-        For single-node pools, uses a local ProcessPoolExecutor.
-        For multi-node, distributes tasks to workers via TaskDispatcher.
+        v2.2 PR 10 (Issue 25): if `fn` is decorated with @macfleet.task, the
+        call routes through the task registry (name + msgpack args, no
+        cloudpickle). Legacy bare-lambda calls still work via the
+        ProcessPoolExecutor + cloudpickle fallback, but that path will
+        eventually go away — decorate your functions.
 
         Args:
-            fn: Function to apply to each item.
+            fn: Function to apply to each item. Prefer @macfleet.task.
             iterable: Items to process.
             timeout: Per-task timeout in seconds.
-            max_workers: Max parallel processes (single-node only).
+            max_workers: Max parallel workers.
 
         Returns:
             List of results in the same order as input.
 
         Usage:
+            @macfleet.task
+            def process(img): ...
+
             with macfleet.Pool() as pool:
-                results = pool.map(process_image, image_paths)
+                results = pool.map(process, image_paths)
         """
         if not self._joined:
             raise RuntimeError("Must join pool before compute. Use Pool as context manager.")
@@ -506,6 +512,10 @@ class Pool:
         if not items:
             return []
 
+        if self._is_registered_task(fn):
+            return [self._run_registered_task(fn, item, timeout=timeout) for item in items]
+
+        # Legacy cloudpickle fallback (discouraged — fn not decorated with @task)
         import os
         workers = max_workers or min(os.cpu_count() or 1, 4)
         fn_bytes = cloudpickle.dumps(fn)
@@ -524,11 +534,12 @@ class Pool:
     def submit(self, fn: Callable, *args: Any, timeout: float = 300.0, **kwargs: Any) -> Any:
         """Submit a single task and block until complete.
 
-        For single-node pools, executes in a child process.
-        For multi-node, dispatches to a worker.
+        v2.2 PR 10 (Issue 25): @macfleet.task-decorated fns route through
+        the registry (safe, msgpack-native). Undecorated fns fall through to
+        the legacy ProcessPoolExecutor + cloudpickle path.
 
         Args:
-            fn: Function to execute.
+            fn: Function to execute. Prefer @macfleet.task.
             *args: Positional arguments for fn.
             timeout: Timeout in seconds.
             **kwargs: Keyword arguments for fn.
@@ -537,12 +548,19 @@ class Pool:
             The function's return value.
 
         Usage:
+            @macfleet.task
+            def analyze(data): ...
+
             with macfleet.Pool() as pool:
-                result = pool.submit(expensive_fn, data)
+                result = pool.submit(analyze, data)
         """
         if not self._joined:
             raise RuntimeError("Must join pool before compute. Use Pool as context manager.")
 
+        if self._is_registered_task(fn):
+            return self._run_registered_task(fn, *args, timeout=timeout, **kwargs)
+
+        # Legacy cloudpickle fallback
         with ProcessPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
                 _run_pickled,
@@ -552,6 +570,36 @@ class Pool:
             )
             return future.result(timeout=timeout)
 
+    @staticmethod
+    def _is_registered_task(fn: Any) -> bool:
+        """True iff `fn` was decorated with @macfleet.task."""
+        return callable(fn) and hasattr(fn, "task_name")
+
+    def _run_registered_task(
+        self, fn: Any, *args: Any, timeout: float = 300.0, **kwargs: Any,
+    ) -> Any:
+        """Execute a registered task by name, validating args via Pydantic schema.
+
+        This is the secure path (no cloudpickle). For distributed mode
+        with live peers we'd go through TaskDispatcher; for now we invoke
+        the registered callable locally by name so Pool.submit/map stay
+        functional in single-node setups without a peer mesh.
+
+        The wire encoding happens regardless: TaskSpec.from_call validates
+        args/kwargs against the Pydantic schema (if declared), then
+        serializes to msgpack. We decode and invoke locally. This keeps
+        the invocation shape identical to what a future distributed path
+        would see.
+        """
+        from macfleet.compute.models import TaskSpec
+
+        spec = TaskSpec.from_call(fn, args=args, kwargs=kwargs, timeout=timeout)
+        entry = spec.resolve()
+        resolved_args, resolved_kwargs = spec.validated_args(entry)
+        # Invoke the registered callable in-process. A future PR wires
+        # this to TaskDispatcher when pool.world_size > 1.
+        return entry.fn(*resolved_args, **resolved_kwargs)
+
     def run(self, fn: Callable, *args: Any, **kwargs: Any) -> Any:
         """Run a function on the pool. Shorthand for submit().
 
@@ -560,6 +608,21 @@ class Pool:
                 result = pool.run(analyze, dataset)
         """
         return self.submit(fn, *args, **kwargs)
+
+    @property
+    def is_distributed(self) -> bool:
+        """True iff the pool is running in distributed mode with a live agent.
+
+        v2.2 PR 10 (Issue 25): callers that want to branch on "am I running
+        solo or across the fleet?" should check this instead of `world_size > 1`
+        directly, because world_size is 1 in both solo mode AND a distributed
+        pool with no peers yet. This property captures intent.
+        """
+        return (
+            self.enable_pool_distributed
+            and self._agent is not None
+            and self._agent.registry is not None
+        )
 
     @property
     def world_size(self) -> int:
