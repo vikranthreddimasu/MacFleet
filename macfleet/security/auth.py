@@ -8,7 +8,11 @@ Provides:
 - Gradient validation: NaN/Inf/magnitude bounds checking
 - Rate limiting: per-IP exponential backoff on failed auth
 
-Zero new dependencies — uses stdlib hmac, hashlib, secrets, ssl.
+v2.2 PR 3 (Issue 9+21+A6+A12): TLS cert generation migrated from subprocess
+to the `cryptography` library — no openssl binary dependency, no EC/RSA
+fallback fragility. Certs + keys live in-memory, are written to user-only
+temp files only for `SSLContext.load_cert_chain` to consume (stdlib ssl
+requires file paths), then immediately unlinked.
 """
 
 from __future__ import annotations
@@ -19,11 +23,17 @@ import logging
 import os
 import secrets
 import ssl
+import stat
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import numpy as np
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 logger = logging.getLogger(__name__)
 
@@ -58,23 +68,55 @@ AUTO_TOKEN_LENGTH = 32
 
 
 def _read_token_file() -> Optional[str]:
-    """Read saved fleet token from ~/.macfleet/fleet-token."""
+    """Read saved fleet token from ~/.macfleet/fleet-token.
+
+    Warns if the file is readable by group or other (v2.2 PR 3 / A6).
+    The warning is non-blocking — we still return the token so the user's
+    workflow isn't broken, but the log tells them another local user can
+    read their fleet credential.
+    """
+    try:
+        st = os.stat(TOKEN_FILE)
+    except FileNotFoundError:
+        return None
+    _check_token_file_mode(st.st_mode)
     try:
         with open(TOKEN_FILE) as f:
             token = f.read().strip()
             return token if token else None
     except FileNotFoundError:
+        # Race: someone deleted it between stat and open
         return None
 
 
+def _check_token_file_mode(st_mode: int) -> None:
+    """Log a warning if the token file has group or other permission bits set."""
+    perms = stat.S_IMODE(st_mode)
+    if perms & 0o077:
+        logger.warning(
+            "Fleet token at %s has permissive mode %o (group/other bits set). "
+            "Another local user can read your fleet credential. Fix with: "
+            "`chmod 600 %s`",
+            TOKEN_FILE, perms, TOKEN_FILE,
+        )
+
+
 def _write_token_file(token: str) -> None:
-    """Save fleet token to ~/.macfleet/fleet-token with restricted permissions."""
+    """Save fleet token to ~/.macfleet/fleet-token with restricted permissions.
+
+    Creates the file with mode 0600 via O_CREAT. If the file already exists
+    with broader permissions, O_CREAT won't tighten them — so we explicitly
+    chmod after the write to enforce 0o600 on every call (repairs a
+    previously-mis-permissioned file).
+    """
     os.makedirs(TOKEN_DIR, mode=0o700, exist_ok=True)
     fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, token.encode("utf-8"))
     finally:
         os.close(fd)
+    # Re-enforce 0600 in case the file pre-existed with broader mode
+    os.chmod(TOKEN_FILE, 0o600)
 
 
 def generate_fleet_token() -> str:
@@ -399,21 +441,27 @@ def create_server_ssl_context() -> ssl.SSLContext:
 
     Authentication is handled by HMAC challenge-response, not certificates.
     TLS is used purely for encryption of gradient data in transit.
+
+    Cert + private key are generated in-process via the `cryptography` library.
+    They are written to user-only temp files ($TMPDIR is user-scoped on macOS)
+    just long enough for `SSLContext.load_cert_chain` to consume them (stdlib
+    ssl requires file paths), then immediately unlinked — the key stays in
+    the SSLContext's memory for the lifetime of the server but never sits
+    on disk after this function returns.
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
-    # Generate ephemeral self-signed cert
-    certfile, keyfile = _generate_self_signed_cert()
-    ctx.load_cert_chain(certfile, keyfile)
-
-    # Clean up temp files
+    cert_pem, key_pem = _generate_cert_bytes()
+    certfile, keyfile = _write_ephemeral_pem(cert_pem, key_pem)
     try:
-        os.unlink(certfile)
-        os.unlink(keyfile)
-    except OSError:
-        pass
-
+        ctx.load_cert_chain(certfile, keyfile)
+    finally:
+        for path in (certfile, keyfile):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     return ctx
 
 
@@ -429,48 +477,68 @@ def create_client_ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def _generate_self_signed_cert() -> tuple[str, str]:
-    """Generate a temporary self-signed certificate and key.
+def _generate_cert_bytes() -> tuple[bytes, bytes]:
+    """Generate an ephemeral self-signed EC (P-256) cert + private key.
 
-    Returns (certfile_path, keyfile_path). Caller should clean up.
-    Uses OpenSSL CLI since stdlib ssl doesn't have cert generation.
+    Returns (cert_pem, key_pem) — both as PEM-encoded bytes, never touches
+    disk. SHA-256 signature, 25-hour validity (5-min clock-skew leeway on
+    the not-before bound so agents behind slightly-off clocks still accept
+    the cert), SubjectAlternativeName=localhost for server-name checks if
+    the client ever enables them.
     """
-    import subprocess
-
-    cert_fd, certfile = tempfile.mkstemp(suffix=".pem", prefix="macfleet_cert_")
-    key_fd, keyfile = tempfile.mkstemp(suffix=".pem", prefix="macfleet_key_")
-    os.close(cert_fd)
-    os.close(key_fd)
-
-    try:
-        subprocess.run(
-            [
-                "openssl", "req", "-x509", "-newkey", "ec",
-                "-pkeyopt", "ec_paramgen_curve:prime256v1",
-                "-keyout", keyfile, "-out", certfile,
-                "-days", "1", "-nodes",
-                "-subj", "/CN=macfleet-node",
-            ],
-            capture_output=True,
-            timeout=10,
-            check=True,
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, "macfleet-node"),
+    ])
+    now = datetime.now(timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("localhost")]),
+            critical=False,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        # Fallback: RSA if EC isn't available
-        try:
-            subprocess.run(
-                [
-                    "openssl", "req", "-x509", "-newkey", "rsa:2048",
-                    "-keyout", keyfile, "-out", certfile,
-                    "-days", "1", "-nodes",
-                    "-subj", "/CN=macfleet-node",
-                ],
-                capture_output=True,
-                timeout=10,
-                check=True,
-            )
-        except Exception:
-            logger.warning("Failed to generate self-signed cert. TLS will not work.")
-            raise
+        .sign(private_key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return cert_pem, key_pem
 
-    return certfile, keyfile
+
+def _write_ephemeral_pem(cert_pem: bytes, key_pem: bytes) -> tuple[str, str]:
+    """Write PEM blobs to mode-0600 tempfiles. Returns (cert_path, key_path).
+
+    Uses `tempfile.mkstemp`, which on macOS resolves to $TMPDIR
+    (/var/folders/xx/.../T/) — user-owned, 0700 directory, not the shared
+    /tmp. Files are created with mode 0600 by mkstemp. Caller MUST unlink
+    after consuming them.
+    """
+    cert_fd, cert_path = tempfile.mkstemp(suffix=".pem", prefix="macfleet_cert_")
+    key_fd, key_path = tempfile.mkstemp(suffix=".pem", prefix="macfleet_key_")
+    try:
+        os.write(cert_fd, cert_pem)
+        os.write(key_fd, key_pem)
+    finally:
+        os.close(cert_fd)
+        os.close(key_fd)
+    return cert_path, key_path
+
+
+def _generate_self_signed_cert() -> tuple[str, str]:
+    """Deprecated shim retained for callers that imported the old name.
+
+    Returns tempfile paths the caller must unlink. Kept for one release to
+    avoid breaking anything outside this module that imported the private
+    helper; `create_server_ssl_context` no longer uses it.
+    """
+    cert_pem, key_pem = _generate_cert_bytes()
+    return _write_ephemeral_pem(cert_pem, key_pem)

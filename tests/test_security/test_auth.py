@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import ssl
 
 import numpy as np
@@ -419,6 +420,82 @@ class TestTLS:
         assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
 
 
+class TestCertGeneration:
+    """v2.2 PR 3 — cert generation via cryptography library, no openssl subprocess."""
+
+    def test_generate_cert_bytes_produces_valid_pem(self):
+        """_generate_cert_bytes returns parseable PEM cert + PKCS8 key."""
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+
+        from macfleet.security.auth import _generate_cert_bytes
+
+        cert_pem, key_pem = _generate_cert_bytes()
+        assert cert_pem.startswith(b"-----BEGIN CERTIFICATE-----")
+        assert key_pem.startswith(b"-----BEGIN PRIVATE KEY-----")
+
+        # Cert parses and has expected CN
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        cn = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+        assert cn[0].value == "macfleet-node"
+
+        # Key parses as EC
+        key = serialization.load_pem_private_key(key_pem, password=None)
+        # EC keys have a .curve attribute; RSA has .key_size but no .curve
+        assert hasattr(key, "curve"), "expected EC key, got something else"
+
+    def test_generate_cert_bytes_unique_per_call(self):
+        """Every call produces a fresh key pair (no key reuse across instances)."""
+        from macfleet.security.auth import _generate_cert_bytes
+
+        _, key_a = _generate_cert_bytes()
+        _, key_b = _generate_cert_bytes()
+        assert key_a != key_b
+
+    def test_server_ssl_context_cleans_up_tempfiles(self, tmp_path, monkeypatch):
+        """After create_server_ssl_context returns, no PEM tempfiles linger.
+
+        Monkeypatches tempfile.mkstemp to return paths under tmp_path, then
+        verifies both files are unlinked by the time the context is returned.
+        """
+        import tempfile as _tf
+
+        from macfleet.security import auth as auth_mod
+
+        created_paths = []
+        real_mkstemp = _tf.mkstemp
+
+        def tracking_mkstemp(suffix=None, prefix=None, dir=None):
+            fd, path = real_mkstemp(suffix=suffix, prefix=prefix, dir=str(tmp_path))
+            created_paths.append(path)
+            return fd, path
+
+        monkeypatch.setattr(auth_mod.tempfile, "mkstemp", tracking_mkstemp)
+
+        ctx = auth_mod.create_server_ssl_context()
+        assert isinstance(ctx, ssl.SSLContext)
+        assert len(created_paths) == 2, "expected 2 tempfiles (cert + key)"
+        for p in created_paths:
+            assert not os.path.exists(p), f"tempfile {p} should have been unlinked"
+
+    def test_no_openssl_dependency(self, monkeypatch):
+        """Cert generation does not shell out to openssl anymore."""
+        import subprocess as _sp
+
+        from macfleet.security.auth import create_server_ssl_context
+
+        called = []
+
+        def should_not_run(*args, **kwargs):
+            called.append(args)
+            raise AssertionError("subprocess.run called — openssl dependency not removed")
+
+        monkeypatch.setattr(_sp, "run", should_not_run)
+        ctx = create_server_ssl_context()
+        assert isinstance(ctx, ssl.SSLContext)
+        assert called == [], "subprocess.run should never be invoked"
+
+
 # ------------------------------------------------------------------ #
 # Rate limiter eviction                                                #
 # ------------------------------------------------------------------ #
@@ -542,3 +619,87 @@ class TestTokenFileManagement:
         monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
         monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_file))
         assert resolve_token() is None
+
+
+class TestTokenFilePermissions:
+    """v2.2 PR 3 / A6 — token file must be 0600 on write, warn on broader mode."""
+
+    def test_write_creates_file_with_mode_0600(self, tmp_path, monkeypatch):
+        """_write_token_file produces a file with exactly mode 0o600."""
+        import stat as _stat
+
+        from macfleet.security import auth as auth_mod
+
+        token_file = tmp_path / "fleet-token"
+        monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(token_file))
+        monkeypatch.setattr(auth_mod, "TOKEN_DIR", str(tmp_path))
+
+        auth_mod._write_token_file("some-token-value-long-enough-to-pass")
+
+        assert token_file.exists()
+        mode = _stat.S_IMODE(token_file.stat().st_mode)
+        assert mode == 0o600, f"expected mode 0o600, got {oct(mode)}"
+
+    def test_write_repairs_permissive_mode(self, tmp_path, monkeypatch):
+        """If token file pre-exists with broader mode, write tightens it to 0600."""
+        import stat as _stat
+
+        from macfleet.security import auth as auth_mod
+
+        token_file = tmp_path / "fleet-token"
+        monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(token_file))
+        monkeypatch.setattr(auth_mod, "TOKEN_DIR", str(tmp_path))
+
+        # Seed with a mode 0644 file — simulates a previously mis-permissioned token
+        token_file.write_text("old-value")
+        os.chmod(token_file, 0o644)
+        assert _stat.S_IMODE(token_file.stat().st_mode) == 0o644
+
+        auth_mod._write_token_file("new-token-value-long-enough-to-pass")
+
+        mode = _stat.S_IMODE(token_file.stat().st_mode)
+        assert mode == 0o600, f"expected 0o600 after write, got {oct(mode)}"
+
+    def test_read_warns_on_permissive_mode(self, tmp_path, monkeypatch, caplog):
+        """_read_token_file emits a warning when mode has group/other bits set."""
+        import logging as _logging
+
+        from macfleet.security import auth as auth_mod
+
+        token_file = tmp_path / "fleet-token"
+        token_file.write_text("some-fleet-token-value")
+        os.chmod(token_file, 0o644)
+        monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(token_file))
+
+        with caplog.at_level(_logging.WARNING, logger="macfleet.security.auth"):
+            token = auth_mod._read_token_file()
+
+        assert token == "some-fleet-token-value"  # still returns the token
+        assert any("permissive mode" in rec.message for rec in caplog.records), (
+            "expected permissive-mode warning in log"
+        )
+
+    def test_read_no_warning_when_mode_is_0600(self, tmp_path, monkeypatch, caplog):
+        """Proper mode 0600 produces no warning."""
+        import logging as _logging
+
+        from macfleet.security import auth as auth_mod
+
+        token_file = tmp_path / "fleet-token"
+        token_file.write_text("token-value")
+        os.chmod(token_file, 0o600)
+        monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(token_file))
+
+        with caplog.at_level(_logging.WARNING, logger="macfleet.security.auth"):
+            token = auth_mod._read_token_file()
+
+        assert token == "token-value"
+        perm_warnings = [r for r in caplog.records if "permissive mode" in r.message]
+        assert not perm_warnings, f"unexpected warnings: {perm_warnings}"
+
+    def test_read_returns_none_when_file_missing(self, tmp_path, monkeypatch):
+        """Missing file returns None without crashing or warning."""
+        from macfleet.security import auth as auth_mod
+
+        monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(tmp_path / "does-not-exist"))
+        assert auth_mod._read_token_file() is None

@@ -35,6 +35,10 @@ dependencies = [
     "numpy>=1.24.0",
     "msgpack>=1.0.0",
     "cloudpickle>=3.0.0",
+    # cryptography is core because TLS is mandatory when fleet auth is enabled
+    # (SecurityConfig forces tls=True whenever a token is set). See v2.2 PR 3
+    # (Issue 9 + 21): native X.509 cert generation in-memory, no openssl subprocess.
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
