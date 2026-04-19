@@ -35,7 +35,8 @@ class TestQuickstart:
         runner = CliRunner()
         result = runner.invoke(cli, ["quickstart", "--output", str(target)])
         assert result.exit_code == 1
-        assert "already exists" in result.output
+        # Rich may wrap output; normalize whitespace before assertion
+        assert "already exists" in " ".join(result.output.split())
         # File must not have been clobbered
         assert target.read_text() == "# original contents"
 
