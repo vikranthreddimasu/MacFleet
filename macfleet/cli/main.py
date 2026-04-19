@@ -35,7 +35,8 @@ def cli():
 
 @cli.command()
 @click.option("--name", default=None, help="Custom node name")
-@click.option("--port", default=50051, help="Communication port")
+@click.option("--port", default=50051, help="Heartbeat / discovery port")
+@click.option("--data-port", default=50052, help="Data transport port (training)")
 @click.option("--token", default=None, envvar="MACFLEET_TOKEN", help="Pool token (or set MACFLEET_TOKEN env var)")
 @click.option("--fleet-id", default=None, help="Fleet identifier (isolates pool on network)")
 @click.option("--tls", "use_tls", is_flag=True, default=False, help="Enable TLS encryption")
@@ -45,7 +46,7 @@ def cli():
 )
 @click.option("--peer", "peers", multiple=True, help="Peer address (IP:PORT). Use when mDNS is blocked. Repeatable.")
 def join(
-    name: str | None, port: int, token: str | None, fleet_id: str | None,
+    name: str | None, port: int, data_port: int, token: str | None, fleet_id: str | None,
     use_tls: bool, open_fleet: bool, peers: tuple,
 ):
     """Join the compute pool. Auto-discovers peers on the network.
@@ -77,7 +78,11 @@ def join(
             console.print(f"[dim]Saved to {TOKEN_FILE}[/dim]")
             console.print("[dim]Copy this token to other Macs: macfleet join --token <token>[/dim]\n")
 
-    agent = PoolAgent(name=name, port=port, token=resolved_token, fleet_id=fleet_id, tls=use_tls, peers=list(peers))
+    agent = PoolAgent(
+        name=name, port=port, data_port=data_port,
+        token=resolved_token, fleet_id=fleet_id, tls=use_tls,
+        peers=list(peers),
+    )
 
     async def run():
         await agent.start()
@@ -169,7 +174,7 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool):
     table.add_column("Chip")
     table.add_column("GPU Cores", justify="right")
     table.add_column("RAM (GB)", justify="right")
-    table.add_column("IP Address")
+    table.add_column("IP / heartbeat / data")
     table.add_column("Score", justify="right")
 
     for node in sorted(peers, key=lambda n: -n.compute_score):
@@ -178,7 +183,7 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool):
             node.chip_name,
             str(node.gpu_cores),
             str(node.ram_gb),
-            f"{node.ip_address}:{node.port}",
+            f"{node.ip_address} :{node.port} :{node.data_port}",
             f"{node.compute_score:.0f}",
         )
 

@@ -151,12 +151,25 @@ class PoolAgent:
         self,
         name: Optional[str] = None,
         port: int = 50051,
+        data_port: Optional[int] = None,
         token: Optional[str] = None,
         fleet_id: Optional[str] = None,
         tls: bool = False,
         peers: Optional[list[str]] = None,
     ):
+        # Port split (v2.2 PR 2): heartbeat/discovery on `port` (50051 default),
+        # data transport (future PeerTransport from Issue 1a) on `data_port`
+        # (50052 default). Must be distinct ports — heartbeat uses line-delimited
+        # APING/PONG; transport uses WireMessage binary protocol. Sharing one
+        # port means a transport handshake looks like a malformed APING and vice
+        # versa. See docs/designs/v3-cathedral.md Issue 5.
         self.port = port
+        self.data_port = data_port if data_port is not None else port + 1
+        if self.data_port == self.port:
+            raise ValueError(
+                f"heartbeat port and data port must differ "
+                f"(both set to {self.port}). Set --data-port or pick distinct ports."
+            )
         self.token = token
         self._security = SecurityConfig(token=token, fleet_id=fleet_id, tls=tls)
         self._manual_peers = peers or []  # ["ip:port", ...]
@@ -230,6 +243,7 @@ class PoolAgent:
             hostname=self.hardware.hostname,
             ip_address=ip_address,
             port=self.port,
+            data_port=self.data_port,
             hardware=self.hardware,
         ))
 
@@ -244,6 +258,7 @@ class PoolAgent:
             chip_name=self.hardware.chip_name,
             link_types=link_types_str,
             compute_score=self.hardware.compute_score,
+            data_port=self.data_port,
         )
 
         # 5. Start discovery
@@ -271,7 +286,10 @@ class PoolAgent:
         await self._heartbeat.start()
         self._running = True
 
-        console.print(f"[green]Joined pool[/green] as {self.hardware.node_id} on {ip_address}:{self.port}")
+        console.print(
+            f"[green]Joined pool[/green] as {self.hardware.node_id} "
+            f"on {ip_address} (heartbeat :{self.port}, data :{self.data_port})"
+        )
 
         # 7. Connect to manually specified peers (bypasses mDNS)
         for peer_addr in self._manual_peers:
@@ -403,7 +421,10 @@ class PoolAgent:
                 parts = response.decode().strip().split(" ")
                 peer_node_id = parts[1] if len(parts) >= 2 else f"peer-{host}"
 
-            # Register the peer with minimal hardware info
+            # Register the peer with minimal hardware info.
+            # Manual peers don't advertise data_port (no mDNS TXT); default to
+            # heartbeat port + 1 per v2.2 convention. Issue 6 (PR 5) upgrades
+            # this to a post-ping capability exchange that returns the real data_port.
             hw = HardwareProfile(
                 hostname=peer_node_id,
                 node_id=peer_node_id,
@@ -418,11 +439,15 @@ class PoolAgent:
                 hostname=peer_node_id,
                 ip_address=host,
                 port=port,
+                data_port=port + 1,
                 hardware=hw,
             ))
             self._heartbeat.add_peer(peer_node_id, host, port, hw.compute_score)
 
-            console.print(f"[cyan]Connected to peer[/cyan] {peer_node_id} at {host}:{port}")
+            console.print(
+                f"[cyan]Connected to peer[/cyan] {peer_node_id} at {host} "
+                f"(heartbeat :{port}, data :{port + 1})"
+            )
 
         except (OSError, ssl.SSLError, asyncio.TimeoutError, ConnectionRefusedError, ValueError) as e:
             console.print(f"[red]Failed to connect to peer {peer_addr}: {type(e).__name__}: {e}[/red]")
@@ -452,6 +477,7 @@ class PoolAgent:
             hostname=node.hostname,
             ip_address=node.ip_address,
             port=node.port,
+            data_port=node.data_port,
             hardware=hw,
         ))
 

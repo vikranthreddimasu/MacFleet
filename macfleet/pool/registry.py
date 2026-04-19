@@ -18,17 +18,27 @@ from macfleet.pool.heartbeat import NodeStatus
 
 @dataclass
 class NodeRecord:
-    """Full record for a pool member."""
+    """Full record for a pool member.
+
+    `port` is the heartbeat/discovery port (default 50051).
+    `data_port` is the training transport port (default port + 1, i.e. 50052).
+    Port split landed in v2.2 PR 2 (Issue 5).
+    """
     node_id: str
     hostname: str
     ip_address: str
     port: int
     hardware: HardwareProfile
+    data_port: int = 0  # 0 = derive as port + 1 (backward compat)
     status: NodeStatus = NodeStatus.ALIVE
     joined_at: float = field(default_factory=time.time)
     last_heartbeat: float = field(default_factory=time.time)
     throughput_samples_sec: float = 0.0
     current_weight: float = 0.0  # assigned by scheduler
+
+    def __post_init__(self) -> None:
+        if self.data_port == 0:
+            self.data_port = self.port + 1
 
     @property
     def compute_score(self) -> float:

@@ -79,16 +79,20 @@ class TestMdnsInfoMinimization:
     """Verify that secure mode minimizes broadcast information."""
 
     def test_secure_properties_minimal(self):
-        """Secure mode only broadcasts node_id and pool_version."""
+        """Secure mode only broadcasts node_id, pool_version, and data_port."""
         sec = SecurityConfig(token="secret-token")
         registry = ServiceRegistry(security=sec)
         props = registry._build_properties(
             node_id="node-0", gpu_cores=32, ram_gb=64,
             chip_name="M2 Ultra", link_types="thunderbolt,ethernet",
-            compute_score=42.0,
+            compute_score=42.0, data_port=50052,
         )
         assert b"node_id" in props
         assert b"pool_version" in props
+        # data_port is broadcast even in secure mode — not sensitive, needed
+        # by peers to initiate the authenticated handshake on the transport port
+        assert b"data_port" in props
+        assert props[b"data_port"] == b"50052"
         # Hardware details must NOT be broadcast in secure mode
         assert b"gpu_cores" not in props
         assert b"ram_gb" not in props
@@ -97,12 +101,12 @@ class TestMdnsInfoMinimization:
         assert b"compute_score" not in props
 
     def test_open_properties_full(self):
-        """Open mode broadcasts all hardware details."""
+        """Open mode broadcasts all hardware details and data_port."""
         registry = ServiceRegistry()
         props = registry._build_properties(
             node_id="node-0", gpu_cores=32, ram_gb=64,
             chip_name="M2 Ultra", link_types="thunderbolt",
-            compute_score=42.0,
+            compute_score=42.0, data_port=50052,
         )
         assert b"node_id" in props
         assert b"gpu_cores" in props
@@ -110,3 +114,5 @@ class TestMdnsInfoMinimization:
         assert b"chip_name" in props
         assert b"link_types" in props
         assert b"compute_score" in props
+        assert b"data_port" in props
+        assert props[b"data_port"] == b"50052"

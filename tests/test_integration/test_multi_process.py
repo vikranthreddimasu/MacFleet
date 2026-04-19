@@ -28,7 +28,7 @@ def _get_free_port() -> int:
 
 
 def _agent_worker(
-    node_name: str, port: int, token: str,
+    node_name: str, port: int, data_port: int, token: str,
     ready_evt: multiprocessing.Event, stop_evt: multiprocessing.Event,
 ) -> None:
     """Run a PoolAgent in a child process.
@@ -36,6 +36,9 @@ def _agent_worker(
     Starts the agent, signals ready, then waits for the parent to set stop_evt.
     This is a long-running daemon in a subprocess — the agent's own asyncio loop
     drives discovery and heartbeat.
+
+    Takes distinct `port` (heartbeat) and `data_port` (transport) so multiple
+    subprocess agents can coexist on localhost without port collisions.
     """
     import asyncio as _async
     import logging as _log
@@ -44,7 +47,7 @@ def _agent_worker(
     from macfleet.pool.agent import PoolAgent
 
     async def run() -> None:
-        agent = PoolAgent(name=node_name, port=port, token=token)
+        agent = PoolAgent(name=node_name, port=port, data_port=data_port, token=token)
         await agent.start()
         ready_evt.set()
         try:
@@ -72,14 +75,19 @@ async def test_three_agents_discover_each_other() -> None:
     shared_token = "gstack-test-token-long-enough-to-pass-min-length"
     n_agents = 3
 
+    # Two distinct ports per agent: heartbeat + data transport (v2.2 PR 2)
     ports = [_get_free_port() for _ in range(n_agents)]
+    data_ports = [_get_free_port() for _ in range(n_agents)]
     ready_events = [ctx.Event() for _ in range(n_agents)]
     stop_event = ctx.Event()
 
     processes = [
         ctx.Process(
             target=_agent_worker,
-            args=(f"test-node-{i}", ports[i], shared_token, ready_events[i], stop_event),
+            args=(
+                f"test-node-{i}", ports[i], data_ports[i], shared_token,
+                ready_events[i], stop_event,
+            ),
             daemon=True,
         )
         for i in range(n_agents)
@@ -139,13 +147,17 @@ async def test_two_agents_fleet_isolation() -> None:
     """
     ctx = multiprocessing.get_context("spawn")
     ports = [_get_free_port() for _ in range(2)]
+    data_ports = [_get_free_port() for _ in range(2)]
     ready_events = [ctx.Event() for _ in range(2)]
     stop_event = ctx.Event()
 
     processes = [
         ctx.Process(
             target=_agent_worker,
-            args=(f"iso-node-{i}", ports[i], f"token-{i}-" + "x" * 20, ready_events[i], stop_event),
+            args=(
+                f"iso-node-{i}", ports[i], data_ports[i],
+                f"token-{i}-" + "x" * 20, ready_events[i], stop_event,
+            ),
             daemon=True,
         )
         for i in range(2)

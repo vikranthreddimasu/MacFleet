@@ -23,17 +23,31 @@ DEFAULT_TTL = 120
 
 @dataclass
 class DiscoveredNode:
-    """A node discovered via mDNS."""
+    """A node discovered via mDNS.
+
+    v2.2 PR 2 introduced a port split: `port` is the heartbeat/discovery port
+    (default 50051), `data_port` is the training transport port (default 50052).
+    `port` remains the mDNS ServiceInfo.port for backward compat with 2.1.x
+    peers. `data_port` rides in a TXT property and falls back to `port + 1`
+    when a 2.1.x peer is discovered without advertising it.
+    """
     hostname: str
     node_id: str
     ip_address: str
-    port: int  # main communication port
+    port: int  # heartbeat / discovery / control (default 50051)
     gpu_cores: int
     ram_gb: int
     chip_name: str
     link_types: str  # comma-separated: "wifi,ethernet,thunderbolt"
     pool_version: str
     compute_score: float = 0.0
+    data_port: int = 0  # training transport port (default 50052, 0 = not advertised)
+
+    def __post_init__(self) -> None:
+        # Backward compat: 2.1.x peers don't advertise data_port. Fall back to
+        # heartbeat_port + 1 — matches the 50051/50052 convention.
+        if self.data_port == 0:
+            self.data_port = self.port + 1
 
     @property
     def link_type_list(self) -> list[str]:
@@ -88,6 +102,9 @@ class PoolServiceListener(ServiceListener):
             link_types = props.get(b"link_types", b"").decode()
             pool_version = props.get(b"pool_version", b"0.0.0").decode()
             compute_score = float(props.get(b"compute_score", b"0").decode())
+            # data_port advertised since v2.2; 2.1.x peers lack this. DiscoveredNode
+            # __post_init__ falls back to heartbeat port + 1 when 0.
+            data_port = int(props.get(b"data_port", b"0").decode())
 
             return DiscoveredNode(
                 hostname=hostname,
@@ -100,6 +117,7 @@ class PoolServiceListener(ServiceListener):
                 link_types=link_types,
                 pool_version=pool_version,
                 compute_score=compute_score,
+                data_port=data_port,
             )
         except (ValueError, AttributeError):
             return None
@@ -164,17 +182,23 @@ class ServiceRegistry:
         chip_name: str,
         link_types: str,
         compute_score: float,
+        data_port: int,
     ) -> dict[bytes, bytes]:
         """Build mDNS service properties.
 
         SECURITY: When fleet is token-protected, minimize broadcast info.
-        Only broadcast node_id, port, and version. Hardware details
+        Only broadcast node_id, data_port, and version. Hardware details
         (GPU cores, RAM, chip) are exchanged AFTER authenticated connection.
+
+        data_port is always broadcast (even in secure mode) because it's not
+        sensitive — it's just the TCP port the transport listens on. Peers
+        need it to initiate the authenticated handshake.
         """
         if self._security.is_secure:
             return {
                 b"node_id": node_id.encode(),
                 b"pool_version": macfleet.__version__.encode(),
+                b"data_port": str(data_port).encode(),
             }
         return {
             b"node_id": node_id.encode(),
@@ -184,6 +208,7 @@ class ServiceRegistry:
             b"link_types": link_types.encode(),
             b"pool_version": macfleet.__version__.encode(),
             b"compute_score": f"{compute_score:.1f}".encode(),
+            b"data_port": str(data_port).encode(),
         }
 
     def register_node(
@@ -197,14 +222,21 @@ class ServiceRegistry:
         chip_name: str = "unknown",
         link_types: str = "",
         compute_score: float = 0.0,
+        data_port: int = 0,
     ) -> None:
-        """Register this node in the pool via mDNS."""
+        """Register this node in the pool via mDNS.
+
+        `port` is the heartbeat/discovery port (default 50051).
+        `data_port` is the training transport port (default port + 1).
+        """
         if not self._zeroconf:
             self.start()
+        if data_port == 0:
+            data_port = port + 1
 
         service_name = f"{node_id}.{self._service_type}"
         properties = self._build_properties(
-            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score,
+            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score, data_port,
         )
 
         self._service_info = ServiceInfo(
@@ -228,14 +260,21 @@ class ServiceRegistry:
         chip_name: str = "unknown",
         link_types: str = "",
         compute_score: float = 0.0,
+        data_port: int = 0,
     ) -> None:
-        """Register this node in the pool via mDNS (async)."""
+        """Register this node in the pool via mDNS (async).
+
+        `port` is the heartbeat/discovery port (default 50051).
+        `data_port` is the training transport port (default port + 1).
+        """
         if not self._async_zeroconf:
             await self.async_start()
+        if data_port == 0:
+            data_port = port + 1
 
         service_name = f"{node_id}.{self._service_type}"
         properties = self._build_properties(
-            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score,
+            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score, data_port,
         )
 
         self._service_info = ServiceInfo(
