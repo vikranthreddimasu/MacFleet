@@ -1,0 +1,71 @@
+site_name: MacFleet
+site_description: Distributed ML training on Apple Silicon
+site_url: https://macfleet.dev
+repo_url: https://github.com/vikranthreddimasu/MacFleet
+repo_name: vikranthreddimasu/MacFleet
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+# Internal planning docs live under designs/ and aren't part of the site.
+exclude_docs: |
+  designs/
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quickstart: getting-started/quickstart.md
+    - Pairing Macs: getting-started/pairing.md
+  - Guides:
+    - Training with Pool.train: guides/train.md
+    - Registered tasks (@macfleet.task): guides/tasks.md
+    - Dashboard: guides/dashboard.md
+  - Reference:
+    - Security: reference/security.md
+    - Protocol: reference/protocol.md
+  - CLI: cli.md
