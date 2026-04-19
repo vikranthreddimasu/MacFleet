@@ -264,7 +264,13 @@ class PoolAgent:
         # 1. Profile hardware
         self.hardware = profile_hardware()
         if self._name_override:
+            # Replace both hostname AND node_id so the mDNS service name
+            # stays under the RFC 6763 63-byte limit. Some CI / cloud hosts
+            # have hostnames like
+            # "sat12-bq147-a49fb4f3-b5ae-471f-aa6f-0eed0a917324-167552B41E56.local"
+            # which would blow past zeroconf's name validation.
             self.hardware.hostname = self._name_override
+            self.hardware.node_id = f"{self._name_override}-{secrets_mod.token_hex(4)}"
 
         console.print(f"[bold blue]MacFleet[/bold blue] agent starting on {self.hardware.hostname}")
         console.print(f"  Chip: {self.hardware.chip_name}")

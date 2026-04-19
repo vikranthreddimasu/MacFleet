@@ -12,6 +12,9 @@ or any Python function for general-purpose compute.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Callable, Iterable, Optional
@@ -19,6 +22,7 @@ from typing import Any, Callable, Iterable, Optional
 import cloudpickle
 from rich.console import Console
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 
@@ -54,10 +58,19 @@ class Pool:
         token: Optional[str] = None,
         engine: str = "torch",
         port: int = 50051,
+        data_port: Optional[int] = None,
         discovery_timeout: float = 3.0,
         fleet_id: Optional[str] = None,
         tls: bool = False,
         open: bool = False,
+        # v2.2 PR 8 (Issue 1a): distributed pool wiring behind a feature flag.
+        # With the flag off (default), Pool remains a single-node convenience
+        # wrapper and Pool.join is a no-op. Flip to True to instantiate a
+        # real PoolAgent that participates in mDNS discovery + heartbeat.
+        enable_pool_distributed: bool = False,
+        quorum_size: int = 1,
+        quorum_timeout_sec: float = 10.0,
+        peers: Optional[list[str]] = None,
     ):
         from macfleet.security.auth import resolve_token_with_file
 
@@ -68,12 +81,23 @@ class Pool:
             self.token = resolve_token_with_file(token, auto_generate=True)
         self.engine_type = engine
         self.port = port
+        self.data_port = data_port
         self.discovery_timeout = discovery_timeout
         self.fleet_id = fleet_id
         self.tls = tls
+        self.enable_pool_distributed = enable_pool_distributed
+        self.quorum_size = quorum_size
+        self.quorum_timeout_sec = quorum_timeout_sec
+        self._manual_peers = peers or []
         self._joined = False
         self._agent = None
         self._peers = []
+
+        # Background event loop — keeps the async PoolAgent alive across
+        # sync Pool method calls. Started lazily in join() when the
+        # distributed feature flag is set.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
 
     def __enter__(self) -> Pool:
         self.join()
@@ -85,14 +109,126 @@ class Pool:
     def join(self) -> None:
         """Join the compute pool (discover peers, register).
 
-        For single-node training, this succeeds immediately.
-        For multi-node, discovers peers via mDNS.
+        Default (feature flag off): no-op. The Pool behaves as a
+        single-node convenience wrapper and legacy training paths work
+        unchanged.
+
+        With `enable_pool_distributed=True`: instantiates a `PoolAgent`,
+        starts mDNS discovery, and blocks until `world_size >=
+        quorum_size` (including self) or `quorum_timeout_sec` elapses.
         """
+        if self._joined:
+            return
+
+        if not self.enable_pool_distributed:
+            self._joined = True
+            return
+
+        self._start_agent()
         self._joined = True
 
     def leave(self) -> None:
         """Gracefully leave the pool."""
+        if not self._joined:
+            return
+
+        if self._agent is not None and self._loop is not None:
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._agent.stop(), self._loop,
+                )
+                fut.result(timeout=5.0)
+            except Exception as e:
+                logger.warning("Pool.leave: agent stop raised %s", e)
+            self._agent = None
+
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._loop_thread is not None:
+                self._loop_thread.join(timeout=5.0)
+            self._loop = None
+            self._loop_thread = None
+
         self._joined = False
+
+    def _start_agent(self) -> None:
+        """Spin up a background event loop and start a PoolAgent on it.
+
+        PoolAgent is async; Pool exposes a sync API. We own a loop in a
+        background thread so the agent's discovery + heartbeat tasks keep
+        running between sync Pool calls. This avoids both `asyncio.run`
+        (which tears down the loop) and the uvloop integration fragility
+        of `nest_asyncio`.
+        """
+        from macfleet.pool.agent import PoolAgent
+
+        self._loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def _run_loop() -> None:
+            asyncio.set_event_loop(self._loop)
+            ready.set()
+            self._loop.run_forever()
+
+        self._loop_thread = threading.Thread(
+            target=_run_loop, name="macfleet-pool-loop", daemon=True,
+        )
+        self._loop_thread.start()
+        ready.wait(timeout=2.0)
+
+        self._agent = PoolAgent(
+            name=self.name,
+            port=self.port,
+            data_port=self.data_port,
+            token=self.token,
+            fleet_id=self.fleet_id,
+            tls=self.tls,
+            peers=self._manual_peers,
+        )
+
+        # Start the agent on the background loop. Agent startup includes
+        # mDNS registration + heartbeat server bind, which can take a few
+        # seconds on its own. We give it a fixed floor instead of borrowing
+        # from quorum_timeout_sec (otherwise a tight quorum timeout causes
+        # the wrong kind of error).
+        start_fut = asyncio.run_coroutine_threadsafe(
+            self._agent.start(), self._loop,
+        )
+        agent_start_timeout = max(10.0, self.quorum_timeout_sec)
+        start_fut.result(timeout=agent_start_timeout)
+
+        # Wait for quorum — poll the agent's registry for alive peers
+        deadline = time.monotonic() + self.quorum_timeout_sec
+        while time.monotonic() < deadline:
+            if self._agent.registry is not None:
+                if self._agent.registry.world_size >= self.quorum_size:
+                    return
+            time.sleep(0.1)
+
+        observed = (
+            self._agent.registry.world_size if self._agent.registry else 0
+        )
+        # Stop the agent cleanly before bubbling the error up
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._agent.stop(), self._loop,
+            ).result(timeout=2.0)
+        except Exception:
+            pass
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._loop_thread is not None:
+                self._loop_thread.join(timeout=2.0)
+        self._agent = None
+        self._loop = None
+        self._loop_thread = None
+
+        raise TimeoutError(
+            f"No quorum within {self.quorum_timeout_sec}s: saw {observed} "
+            f"node(s), need {self.quorum_size}. "
+            f"Run 'macfleet status' to check discovery, or pass "
+            f"peers=['<ip>:{self.port}'] to connect manually."
+        )
 
     def train(
         self,
@@ -383,10 +519,40 @@ class Pool:
 
     @property
     def world_size(self) -> int:
-        """Number of nodes in the pool."""
-        return 1  # Single-node for now
+        """Number of alive nodes in the pool (including self).
+
+        v2.2 PR 8 (Issue 1a): reads from the agent's ClusterRegistry when
+        `enable_pool_distributed=True`. Returns 1 for the legacy single-node
+        path so existing Pool().train() code keeps working.
+        """
+        if self._agent is not None and self._agent.registry is not None:
+            return self._agent.registry.world_size
+        return 1
 
     @property
     def nodes(self) -> list[dict]:
-        """List of nodes in the pool with their profiles."""
-        return []
+        """List of alive nodes in the pool with their profiles.
+
+        v2.2 PR 8 (Issue 1a): reads from the agent's ClusterRegistry when
+        the distributed flag is on. Legacy single-node mode returns [].
+        """
+        if self._agent is None or self._agent.registry is None:
+            return []
+        out = []
+        for record in self._agent.registry.alive_nodes:
+            hw = record.hardware
+            out.append({
+                "node_id": record.node_id,
+                "hostname": record.hostname,
+                "ip_address": record.ip_address,
+                "port": record.port,
+                "data_port": record.data_port,
+                "chip_name": hw.chip_name,
+                "gpu_cores": hw.gpu_cores,
+                "ram_gb": hw.ram_gb,
+                "compute_score": hw.compute_score,
+                "is_coordinator": (
+                    self._agent.registry.coordinator_id == record.node_id
+                ),
+            })
+        return out
