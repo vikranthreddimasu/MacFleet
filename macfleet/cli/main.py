@@ -46,9 +46,13 @@ def cli():
     help="Disable security (open fleet, no authentication)",
 )
 @click.option("--peer", "peers", multiple=True, help="Peer address (IP:PORT). Use when mDNS is blocked. Repeatable.")
+@click.option(
+    "--bootstrap", is_flag=True, default=False,
+    help="Print a QR code + pairing URL for the fleet token (v2.2 PR 13).",
+)
 def join(
     name: str | None, port: int, data_port: int, token: str | None, fleet_id: str | None,
-    use_tls: bool, open_fleet: bool, peers: tuple,
+    use_tls: bool, open_fleet: bool, peers: tuple, bootstrap: bool,
 ):
     """Join the compute pool. Auto-discovers peers on the network.
 
@@ -62,6 +66,12 @@ def join(
     If mDNS discovery doesn't work (e.g. enterprise WiFi), use --peer:
         Mac A: macfleet join
         Mac B: macfleet join --token <token> --peer <Mac-A-IP>:50051
+
+    \b
+    For 5-second cross-Mac pairing, use --bootstrap:
+        Mac A: macfleet join --bootstrap    # prints QR + URL
+        Mac B: macfleet pair                 # reads URL from pasteboard
+        Mac B: macfleet join                 # uses the token just written
     """
     from macfleet.pool.agent import PoolAgent
     from macfleet.security.auth import TOKEN_FILE, resolve_token_with_file
@@ -69,6 +79,9 @@ def join(
     if open_fleet:
         if token:
             console.print("[red]Error: --open and --token are mutually exclusive.[/red]")
+            sys.exit(1)
+        if bootstrap:
+            console.print("[red]Error: --bootstrap requires a token (can't pair an open fleet).[/red]")
             sys.exit(1)
         resolved_token = None
     else:
@@ -78,6 +91,10 @@ def join(
             console.print(f"\n[bold green]Fleet token:[/bold green] {resolved_token}")
             console.print(f"[dim]Saved to {TOKEN_FILE}[/dim]")
             console.print("[dim]Copy this token to other Macs: macfleet join --token <token>[/dim]\n")
+
+        if bootstrap:
+            from macfleet.security.bootstrap import print_pairing_info
+            print_pairing_info(resolved_token, fleet_id=fleet_id, out=sys.stdout)
 
     agent = PoolAgent(
         name=name, port=port, data_port=data_port,
@@ -580,6 +597,69 @@ def _bench_allreduce(size_mb: int, iterations: int):
         console.print(f"  Effective bandwidth: {size_mb * 2 / np.mean(times):.0f} MB/s")
 
     asyncio.run(run())
+
+
+# v2.2 PR 16a (Issue 26 CLI): `macfleet pair` reads a pairing URL and writes
+# the token to ~/.macfleet/token. Pairs with `macfleet join --bootstrap` on
+# the other Mac — same URL works via QR scan, Handoff pasteboard sync, or
+# plain text paste.
+@cli.command()
+@click.option(
+    "--stdin", "from_stdin", is_flag=True, default=False,
+    help="Read the pairing URL from stdin instead of the pasteboard.",
+)
+def pair(from_stdin: bool):
+    """Pair this Mac with an existing fleet via a pairing URL.
+
+    Reads `macfleet://pair?token=...&fleet=...` from the system pasteboard
+    (default) or stdin (--stdin). Validates the URL, writes the token to
+    ~/.macfleet/token, and prints the resolved fleet id.
+
+    \b
+    Typical flow:
+        Mac #1: macfleet join --bootstrap    # prints QR, copies URL to pasteboard
+        Mac #2: macfleet pair                 # reads URL from pasteboard
+        Mac #2: macfleet join                 # joins using the token just written
+    """
+    from macfleet.security.auth import TOKEN_FILE, _write_token_file
+    from macfleet.security.bootstrap import (
+        PairingError,
+        parse_pairing_url,
+        read_from_pasteboard,
+    )
+
+    if from_stdin:
+        url = sys.stdin.read().strip()
+        if not url:
+            console.print("[red]Error: no URL on stdin.[/red]")
+            sys.exit(1)
+    else:
+        url = read_from_pasteboard()
+        if not url:
+            console.print(
+                "[red]Error: couldn't read pairing URL from pasteboard.[/red]\n"
+                "[dim]Copy the URL from `macfleet join --bootstrap`, or use "
+                "--stdin to pipe it in:[/dim]\n"
+                "[dim]  echo 'macfleet://pair?token=...' | macfleet pair --stdin[/dim]"
+            )
+            sys.exit(1)
+        url = url.strip()
+
+    try:
+        token, fleet_id = parse_pairing_url(url)
+    except PairingError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        console.print(
+            "[dim]Expected format: macfleet://pair?token=<token>&fleet=<id>[/dim]"
+        )
+        sys.exit(1)
+
+    _write_token_file(token)
+    console.print(
+        f"[green]Paired.[/green] Token written to {TOKEN_FILE}"
+        + (f" (fleet: [bold]{fleet_id}[/bold])" if fleet_id else "")
+        + "\n[dim]Next: macfleet join[/dim]"
+    )
 
 
 # v2.2 PR 16 (D10): `macfleet doctor` is a friendlier alias for `diagnose`.
