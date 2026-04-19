@@ -26,6 +26,31 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def _dataset_len(dataset: Any) -> int:
+    """Return the number of samples in a dataset, handling common shapes.
+
+    Supports:
+        - Objects with __len__ (PyTorch Dataset, lists, etc.)
+        - (X, y) tuples where X is sized
+        - Anything else: raises TypeError so the caller can skip the guard
+
+    v2.2 PR 9 (A4): used by Pool.train's preflight guard.
+    """
+    if isinstance(dataset, (tuple, list)) and len(dataset) == 2:
+        # (X, y) pair shape
+        inner = dataset[0]
+        if hasattr(inner, "__len__"):
+            return len(inner)
+        if hasattr(inner, "shape") and len(inner.shape) > 0:
+            return int(inner.shape[0])
+    if hasattr(dataset, "__len__"):
+        return len(dataset)
+    raise TypeError(
+        f"Cannot determine size of dataset {type(dataset).__name__}; "
+        f"provide a Dataset with __len__ or an (X, y) tuple."
+    )
+
+
 def _run_pickled(fn_bytes: bytes, args_bytes: bytes, kwargs_bytes: bytes) -> Any:
     """Trampoline: deserialize with cloudpickle, call, return result.
 
@@ -267,17 +292,36 @@ class Pool:
             raise RuntimeError("Must join pool before training. Use Pool as context manager.")
 
         engine_type = engine or self.engine_type
+        if engine_type not in ("torch", "mlx"):
+            raise ValueError(
+                f"Engine '{engine_type}' not supported. Use 'torch' or 'mlx'."
+            )
+
+        # A4 preflight: reject empty / undersized datasets before we bring up
+        # optimizer state + dataloader. Checking here means the user sees a
+        # helpful error in microseconds instead of watching training
+        # silently produce 0 batches.
+        try:
+            dataset_len = _dataset_len(dataset)
+        except TypeError:
+            # Dataset doesn't support len(); skip the guard (e.g. iterable datasets).
+            # We can still rely on the DataLoader to catch edge cases downstream.
+            pass
+        else:
+            from macfleet.training.guards import check_dataset_sufficient
+            check_dataset_sufficient(
+                dataset_len=dataset_len,
+                batch_size=batch_size,
+                world_size=self.world_size,
+            )
 
         if engine_type == "torch":
             return self._train_torch(
                 model, dataset, epochs, batch_size, lr, optimizer, loss_fn, **kwargs
             )
-        elif engine_type == "mlx":
-            return self._train_mlx(
-                model, dataset, epochs, batch_size, lr, optimizer, loss_fn, **kwargs
-            )
-        else:
-            raise ValueError(f"Engine '{engine_type}' not supported. Use 'torch' or 'mlx'.")
+        return self._train_mlx(
+            model, dataset, epochs, batch_size, lr, optimizer, loss_fn, **kwargs
+        )
 
     def _train_torch(
         self,
