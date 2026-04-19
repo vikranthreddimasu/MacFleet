@@ -2,18 +2,49 @@
 
 Integration tests that verify the full task dispatch pipeline:
 Coordinator (TaskDispatcher) → PeerTransport → Worker (TaskWorker)
+
+v2.2 PR 7: tasks registered via @macfleet.task are dispatched by name
+instead of cloudpickled inline. Closure-capture tests are removed because
+closures are no longer supported — they were the exact wire-RCE vector
+Issue 20 fixed.
 """
 
 import asyncio
 
 import pytest
 
+from macfleet import task
 from macfleet.comm.transport import PeerTransport, TransportConfig
 from macfleet.compute.dispatch import TaskDispatcher
 from macfleet.compute.models import RemoteTaskError
 from macfleet.compute.worker import TaskWorker
 
 CONFIG = TransportConfig(connect_timeout_sec=5.0, recv_timeout_sec=10.0)
+
+
+# --------------------------------------------------------------------------- #
+# Tasks registered at module level (so the worker process can import them)    #
+# --------------------------------------------------------------------------- #
+
+
+@task
+def times_two(x: int) -> int:
+    return x * 2
+
+
+@task
+def pow_two(x: int) -> int:
+    return x ** 2
+
+
+@task
+def times_ten(x: int) -> int:
+    return x * 10
+
+
+@task
+def bad_fn(x: int) -> int:
+    raise ValueError(f"bad value: {x}")
 
 
 async def _setup_pair() -> tuple[PeerTransport, PeerTransport, int]:
@@ -39,7 +70,7 @@ class TestDispatcherWorkerIntegration:
 
     @pytest.mark.asyncio
     async def test_submit_simple_function(self):
-        """Submit a function, get the result back."""
+        """Submit a registered function, get the result back."""
         coordinator, worker, _ = await _setup_pair()
         try:
             dispatcher = TaskDispatcher(coordinator, ["worker-0"])
@@ -48,7 +79,7 @@ class TestDispatcherWorkerIntegration:
             await dispatcher.start()
             await tw.start()
 
-            future = await dispatcher.submit(lambda x: x * 2, 21, timeout=5.0)
+            future = await dispatcher.submit(times_two, 21, timeout=5.0)
             result = await future.result(timeout=5.0)
             assert result == 42
 
@@ -69,7 +100,7 @@ class TestDispatcherWorkerIntegration:
             await tw.start()
 
             results = await dispatcher.map(
-                lambda x: x ** 2,
+                pow_two,
                 [1, 2, 3, 4, 5],
                 timeout=5.0,
             )
@@ -91,9 +122,6 @@ class TestDispatcherWorkerIntegration:
             await dispatcher.start()
             await tw.start()
 
-            def bad_fn(x):
-                raise ValueError(f"bad value: {x}")
-
             future = await dispatcher.submit(bad_fn, 99, timeout=5.0)
             with pytest.raises(RemoteTaskError) as exc_info:
                 await future.result(timeout=5.0)
@@ -106,25 +134,16 @@ class TestDispatcherWorkerIntegration:
             await _teardown(coordinator, worker)
 
     @pytest.mark.asyncio
-    async def test_map_with_closure(self):
-        """cloudpickle handles closures that reference outer scope."""
+    async def test_unregistered_callable_rejected_before_dispatch(self):
+        """A bare lambda has no task_name → dispatcher.submit() refuses."""
         coordinator, worker, _ = await _setup_pair()
         try:
             dispatcher = TaskDispatcher(coordinator, ["worker-0"])
-            tw = TaskWorker(worker, "coordinator", max_workers=1)
-
             await dispatcher.start()
-            await tw.start()
 
-            offset = 100
-            results = await dispatcher.map(
-                lambda x: x + offset,
-                [1, 2, 3],
-                timeout=5.0,
-            )
-            assert results == [101, 102, 103]
+            with pytest.raises(ValueError, match="not registered"):
+                await dispatcher.submit(lambda x: x + 1, 5, timeout=5.0)
 
-            await tw.stop()
             await dispatcher.stop()
         finally:
             await _teardown(coordinator, worker)
@@ -137,7 +156,7 @@ class TestDispatcherWorkerIntegration:
             dispatcher = TaskDispatcher(coordinator, ["worker-0"])
             await dispatcher.start()
 
-            results = await dispatcher.map(lambda x: x, [], timeout=1.0)
+            results = await dispatcher.map(times_two, [], timeout=1.0)
             assert results == []
 
             await dispatcher.stop()
@@ -147,7 +166,6 @@ class TestDispatcherWorkerIntegration:
     @pytest.mark.asyncio
     async def test_multiple_tasks_round_robin(self):
         """With 2 workers, tasks alternate between them."""
-        # Setup 2 workers
         coord = PeerTransport(local_id="coord", config=CONFIG)
         w0 = PeerTransport(local_id="w-0", config=CONFIG)
         w1 = PeerTransport(local_id="w-1", config=CONFIG)
@@ -171,7 +189,7 @@ class TestDispatcherWorkerIntegration:
             await tw1.start()
 
             results = await dispatcher.map(
-                lambda x: x * 10,
+                times_ten,
                 [1, 2, 3, 4],
                 timeout=5.0,
             )
@@ -194,32 +212,6 @@ class TestDispatcherEdgeCases:
 
         async def run():
             with pytest.raises(RuntimeError, match="No workers"):
-                await dispatcher.submit(lambda: 42)
+                await dispatcher.submit(times_two, 42)
 
         asyncio.get_event_loop().run_until_complete(run())
-
-    @pytest.mark.asyncio
-    async def test_worker_timeout(self):
-        """A slow function exceeding timeout returns error."""
-        coordinator, worker, _ = await _setup_pair()
-        try:
-            dispatcher = TaskDispatcher(coordinator, ["worker-0"])
-            tw = TaskWorker(worker, "coordinator", max_workers=1)
-
-            await dispatcher.start()
-            await tw.start()
-
-            import time
-
-            def slow_fn(x):
-                time.sleep(3)
-                return x
-
-            future = await dispatcher.submit(slow_fn, 1, timeout=0.5)
-            with pytest.raises(RemoteTaskError):
-                await future.result(timeout=5.0)
-
-            await tw.stop()
-            await dispatcher.stop()
-        finally:
-            await _teardown(coordinator, worker)

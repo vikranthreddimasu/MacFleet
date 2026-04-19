@@ -1,8 +1,12 @@
-"""Tests for TASK/RESULT message types in the wire protocol."""
+"""Tests for TASK/RESULT message types in the wire protocol.
+
+v2.2 PR 7: tasks reference registered names instead of cloudpickled callables.
+"""
 
 
 import pytest
 
+from macfleet import task
 from macfleet.comm.protocol import (
     HEADER_SIZE,
     MAX_PAYLOAD_SIZE,
@@ -11,6 +15,21 @@ from macfleet.comm.protocol import (
     WireMessage,
 )
 from macfleet.compute.models import TaskResult, TaskSpec
+
+
+@task
+def _echo(x):
+    return x
+
+
+@task
+def _noop():
+    return None
+
+
+@task
+def _double(xs: list) -> list:
+    return [x * 2 for x in xs]
 
 
 class TestMessageTypes:
@@ -22,7 +41,7 @@ class TestMessageTypes:
 
     def test_task_message_pack_unpack(self):
         """TASK WireMessage survives pack/unpack with CRC32."""
-        spec = TaskSpec.from_call(lambda x: x, args=(1,))
+        spec = TaskSpec.from_call(_echo, args=(1,))
         payload = spec.pack()
 
         msg = WireMessage(
@@ -61,7 +80,7 @@ class TestMessageTypes:
 
     def test_crc32_detects_corruption(self):
         """Corrupted TASK payload is caught by CRC32."""
-        spec = TaskSpec.from_call(lambda: None)
+        spec = TaskSpec.from_call(_noop)
         payload = spec.pack()
 
         msg = WireMessage(
@@ -81,6 +100,6 @@ class TestMessageTypes:
 
     def test_task_payload_within_max_size(self):
         """A typical task payload is well under MAX_PAYLOAD_SIZE."""
-        spec = TaskSpec.from_call(lambda x: x * 2, args=(list(range(1000)),))
+        spec = TaskSpec.from_call(_double, args=(list(range(1000)),))
         payload = spec.pack()
         assert len(payload) < MAX_PAYLOAD_SIZE

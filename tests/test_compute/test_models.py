@@ -1,74 +1,164 @@
-"""Tests for compute data models: TaskSpec, TaskResult, TaskFuture, RemoteTaskError."""
+"""Tests for compute data models: TaskSpec, TaskResult, TaskFuture, RemoteTaskError.
+
+v2.2 PR 7: tasks are identified by name (registered via @macfleet.task) rather
+than cloudpickle'd inline. These tests cover the new name-based dispatch,
+Pydantic schema validation, and the msgpack wire format.
+"""
 
 import asyncio
 
 import pytest
+from pydantic import BaseModel
 
+from macfleet import task
 from macfleet.compute.models import (
     RemoteTaskError,
     TaskFuture,
+    TaskNotRegisteredError,
     TaskResult,
     TaskSpec,
 )
+from macfleet.compute.registry import get_default_registry
 
 # --------------------------------------------------------------------------- #
-# TaskSpec                                                                     #
+# Tasks registered at module level for reuse across tests                     #
+# --------------------------------------------------------------------------- #
+
+
+@task
+def add_one(x: int) -> int:
+    return x + 1
+
+
+@task
+def my_len(xs: list) -> int:
+    return len(xs)
+
+
+@task
+def square(x: int, extra: bool = False) -> int:
+    return x * x if not extra else (x * x) + 1
+
+
+class TrainArgs(BaseModel):
+    epochs: int
+    lr: float
+
+
+@task(schema=TrainArgs)
+def fake_train(args: TrainArgs) -> dict:
+    return {"epochs_done": args.epochs, "final_lr": args.lr}
+
+
+# --------------------------------------------------------------------------- #
+# TaskSpec: name-based dispatch                                               #
 # --------------------------------------------------------------------------- #
 
 
 class TestTaskSpec:
     def test_from_call_basic(self):
-        spec = TaskSpec.from_call(lambda x: x + 1, args=(42,))
-        assert spec.task_id  # non-empty UUID hex
+        spec = TaskSpec.from_call(add_one, args=(42,))
+        assert spec.task_id
         assert len(spec.task_id) == 32
-        assert spec.fn_bytes
-        assert spec.args_bytes
+        assert spec.task_name == add_one.task_name
+        assert spec.args == [42]
+        assert spec.kwargs == {}
         assert spec.timeout_sec == 300.0
 
     def test_from_call_with_kwargs(self):
-        spec = TaskSpec.from_call(len, args=([1, 2, 3],), kwargs=None, timeout=60.0)
+        spec = TaskSpec.from_call(my_len, args=([1, 2, 3],), kwargs=None, timeout=60.0)
         assert spec.timeout_sec == 60.0
+        assert spec.args == [[1, 2, 3]]
 
     def test_pack_unpack_roundtrip(self):
-        spec = TaskSpec.from_call(lambda x: x ** 2, args=(7,))
+        spec = TaskSpec.from_call(square, args=(7,))
         data = spec.pack()
         assert isinstance(data, bytes)
 
         restored = TaskSpec.unpack(data)
         assert restored.task_id == spec.task_id
-        assert restored.fn_bytes == spec.fn_bytes
-        assert restored.args_bytes == spec.args_bytes
-        assert restored.kwargs_bytes == spec.kwargs_bytes
+        assert restored.task_name == spec.task_name
+        assert restored.args == spec.args
+        assert restored.kwargs == spec.kwargs
         assert restored.timeout_sec == spec.timeout_sec
 
-    def test_load_fn_and_args(self):
-        def square(x):
-            return x * x
+    def test_unregistered_function_rejected(self):
+        """A bare lambda has no task_name → from_call must refuse."""
+        with pytest.raises(ValueError, match="not registered"):
+            TaskSpec.from_call(lambda x: x + 1, args=(5,))
 
-        spec = TaskSpec.from_call(square, args=(5,), kwargs={"extra": True})
-        fn = spec.load_fn()
-        args = spec.load_args()
-        kwargs = spec.load_kwargs()
+    def test_resolve_known_task(self):
+        spec = TaskSpec.from_call(add_one, args=(1,))
+        entry = spec.resolve()
+        assert entry.name == add_one.task_name
+        assert entry.fn is add_one
 
-        assert fn(5) == 25
-        assert args == (5,)
-        assert kwargs == {"extra": True}
+    def test_resolve_unknown_task_raises(self):
+        spec = TaskSpec(
+            task_id="abc", task_name="nonexistent.module.fn", args=[], kwargs={},
+        )
+        with pytest.raises(TaskNotRegisteredError) as excinfo:
+            spec.resolve()
+        assert "nonexistent.module.fn" in str(excinfo.value)
 
     def test_unique_task_ids(self):
-        ids = {TaskSpec.from_call(len, args=([],)).task_id for _ in range(100)}
+        ids = {TaskSpec.from_call(my_len, args=([],)).task_id for _ in range(100)}
         assert len(ids) == 100
 
-    def test_closure_serialization(self):
-        """cloudpickle can serialize closures (stdlib pickle cannot)."""
-        offset = 10
-        spec = TaskSpec.from_call(lambda x: x + offset, args=(5,))
-        fn = spec.load_fn()
-        assert fn(5) == 15
-
     def test_empty_args(self):
-        spec = TaskSpec.from_call(lambda: 42)
-        assert spec.load_args() == ()
-        assert spec.load_kwargs() == {}
+        @task
+        def noop() -> int:
+            return 42
+
+        spec = TaskSpec.from_call(noop)
+        assert spec.args == []
+        assert spec.kwargs == {}
+
+    def test_pack_size_bound_rejected(self):
+        """A msgpack payload larger than MAX_ARGS_BYTES is rejected on unpack."""
+        from macfleet.compute.models import MAX_ARGS_BYTES
+        giant = b"\x00" * (MAX_ARGS_BYTES + 100)
+        with pytest.raises(ValueError, match="exceeds max"):
+            TaskSpec.unpack(giant)
+
+
+# --------------------------------------------------------------------------- #
+# Pydantic schema validation                                                  #
+# --------------------------------------------------------------------------- #
+
+
+class TestTaskSpecSchema:
+    def test_schema_attached_to_decorator(self):
+        assert fake_train.schema is TrainArgs
+        assert fake_train.task_name.endswith("fake_train")
+
+    def test_from_call_serializes_pydantic_instance(self):
+        args = TrainArgs(epochs=3, lr=0.01)
+        spec = TaskSpec.from_call(fake_train, args=(args,))
+        # Wire carries the model dump, not the Pydantic instance itself
+        assert spec.args == [{"epochs": 3, "lr": 0.01}]
+
+    def test_validated_args_rehydrates_pydantic(self):
+        args = TrainArgs(epochs=3, lr=0.01)
+        spec = TaskSpec.from_call(fake_train, args=(args,))
+        entry = spec.resolve()
+        resolved_args, resolved_kwargs = spec.validated_args(entry)
+        assert len(resolved_args) == 1
+        assert isinstance(resolved_args[0], TrainArgs)
+        assert resolved_args[0].epochs == 3
+        assert resolved_args[0].lr == 0.01
+
+    def test_schema_validation_rejects_bad_args(self):
+        """If wire carries garbage that doesn't fit the schema, validation fails."""
+        spec = TaskSpec(
+            task_id="abc", task_name=fake_train.task_name,
+            args=[{"epochs": "not an int", "lr": 0.01}], kwargs={},
+        )
+        entry = spec.resolve()
+        # Pydantic 2 raises ValidationError (subclass of ValueError)
+        with pytest.raises(Exception) as excinfo:
+            spec.validated_args(entry)
+        assert "epochs" in str(excinfo.value).lower()
 
 
 # --------------------------------------------------------------------------- #
@@ -83,11 +173,17 @@ class TestTaskResult:
         assert result.error is None
         assert result.unwrap() == {"key": [1, 2, 3]}
 
-    def test_failure_roundtrip(self):
+    def test_success_with_pydantic_model(self):
+        args = TrainArgs(epochs=5, lr=0.001)
+        result = TaskResult.success("abc123", args)
+        # Pydantic model dumped for wire
+        assert result.value == {"epochs": 5, "lr": 0.001}
+
+    def test_failure_from_exception(self):
         try:
             raise ValueError("bad input")
-        except ValueError:
-            result = TaskResult.failure("abc123", None)
+        except ValueError as e:
+            result = TaskResult.failure("abc123", e)
 
         assert result.ok is False
         assert "ValueError" in result.error
@@ -137,7 +233,6 @@ class TestTaskFuture:
     async def test_result_resolves(self):
         future = TaskFuture(task_id="f-2")
 
-        # Set result from another task
         async def set_later():
             await asyncio.sleep(0.05)
             future.set_result(TaskResult.success("f-2", 99))
@@ -171,3 +266,41 @@ class TestRemoteTaskError:
         assert err.task_id == "task-99"
         assert "task-99" in str(err)
         assert "Traceback" in err.remote_traceback
+
+
+# --------------------------------------------------------------------------- #
+# TaskRegistry (global default)                                                #
+# --------------------------------------------------------------------------- #
+
+
+class TestTaskRegistry:
+    def test_decorator_bare_form_registers(self):
+        @task
+        def _ping() -> str:
+            return "pong"
+
+        assert _ping.task_name.endswith("_ping")
+        entry = get_default_registry().get(_ping.task_name)
+        assert entry is not None
+        assert entry.fn is _ping
+        assert entry.schema is None
+
+    def test_decorator_with_name_and_schema(self):
+        class _S(BaseModel):
+            x: int
+
+        @task(name="my.custom.fn", schema=_S)
+        def _custom(s: _S) -> int:
+            return s.x
+
+        assert _custom.task_name == "my.custom.fn"
+        entry = get_default_registry().get("my.custom.fn")
+        assert entry is not None
+        assert entry.schema is _S
+
+    def test_missing_task_returns_none(self):
+        assert get_default_registry().get("nonexistent") is None
+
+    def test_names_sorted(self):
+        names = get_default_registry().names()
+        assert names == sorted(names)

@@ -38,6 +38,10 @@ def __getattr__(name: str):
     if name == "RemoteTaskError":
         from macfleet.compute.models import RemoteTaskError
         return RemoteTaskError
+    # v2.2 PR 7: @macfleet.task decorator
+    if name == "task":
+        from macfleet.compute.registry import task
+        return task
     raise AttributeError(f"module 'macfleet' has no attribute {name!r}")
 
 
@@ -51,4 +55,5 @@ __all__ = [
     "MLXEngine",
     "TaskFuture",
     "RemoteTaskError",
+    "task",
 ]

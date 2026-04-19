@@ -39,6 +39,11 @@ dependencies = [
     # (SecurityConfig forces tls=True whenever a token is set). See v2.2 PR 3
     # (Issue 9 + 21): native X.509 cert generation in-memory, no openssl subprocess.
     "cryptography>=42.0.0",
+    # pydantic is core starting v2.2 PR 7 (Issue 20 + A2 + A8): task args and
+    # return values are validated against declared Pydantic schemas instead of
+    # cloudpickle'd blindly. A malicious coordinator can no longer inject
+    # arbitrary pickled code for the worker to execute.
+    "pydantic>=2.0.0",
 ]
 
 [project.optional-dependencies]
