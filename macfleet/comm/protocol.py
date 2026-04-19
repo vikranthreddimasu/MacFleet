@@ -41,6 +41,10 @@ class MessageFlags(IntFlag):
     COMPRESSED = 0x01
     CHUNKED = 0x02
     LAST_CHUNK = 0x04
+    # v2.2 PR 4: the handshake payload uses the structured v2 format
+    # (carries a signed HW profile). Without this flag the server falls
+    # back to v2.1 handshake parsing (bare `node_id + challenge`).
+    HANDSHAKE_V2 = 0x08
 
 
 # 24-byte header: stream_id(I) msg_type(H) flags(H) payload_size(I) sequence(I) checksum(I) reserved(I)

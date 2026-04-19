@@ -321,6 +321,78 @@ def verify_response(fleet_key: bytes, challenge: bytes, response: bytes) -> bool
 
 
 # ------------------------------------------------------------------ #
+# Handshake HW exchange (v2.2 PR 4 — Issue 2 + A5 + A7)                #
+# ------------------------------------------------------------------ #
+
+# Wire version for the structured handshake ACK/RESP payload that carries
+# a signed hardware profile. Bumped on breaking protocol changes. A7 (autoplan):
+# include a wire_version byte so future revisions are negotiable.
+HW_HANDSHAKE_WIRE_VERSION = 1
+
+# Max serialized HW-json size on the wire. Belt-and-braces limit to prevent
+# a malicious peer from flooding the handshake parser with huge payloads
+# after auth succeeds but before the full message is validated.
+HW_HANDSHAKE_MAX_JSON_BYTES = 8 * 1024  # 8 KB is ~50x any realistic HW profile
+
+
+class HandshakeHwValidationError(ValueError):
+    """Raised when an HW-profile payload from a peer fails HMAC verification
+    or structural validation. The connection should be closed."""
+
+
+def sign_hw_profile(
+    fleet_key: bytes,
+    wire_version: int,
+    peer_challenge: bytes,
+    node_id: str,
+    hw_json: bytes,
+) -> bytes:
+    """Sign a hardware-profile payload with the fleet HMAC key.
+
+    The signature covers `wire_version || peer_challenge || node_id || hw_json`
+    so the HW payload is bound to THIS session's challenge — replay protection
+    for A5 (captured HW profiles from another session cannot be replayed).
+
+    Args:
+        fleet_key: Derived fleet HMAC key.
+        wire_version: Protocol version byte (currently 1).
+        peer_challenge: The 32-byte challenge this peer sent to us. Including
+            it in the HMAC input binds the HW payload to this specific auth
+            session.
+        node_id: The sender's node id (also included to prevent id swap).
+        hw_json: The HW profile serialized as JSON bytes.
+
+    Returns:
+        32-byte HMAC-SHA256 signature.
+    """
+    msg = (
+        bytes([wire_version & 0xFF])
+        + peer_challenge
+        + node_id.encode("utf-8")
+        + b":"
+        + hw_json
+    )
+    return hmac_mod.new(fleet_key, msg, hashlib.sha256).digest()
+
+
+def verify_hw_profile(
+    fleet_key: bytes,
+    wire_version: int,
+    peer_challenge: bytes,
+    node_id: str,
+    hw_json: bytes,
+    signature: bytes,
+) -> bool:
+    """Verify the HMAC of a received HW-profile payload (constant-time).
+
+    Returns True if the signature is valid — meaning the sender knows the
+    fleet key and the HW payload is bound to the challenge WE sent them.
+    """
+    expected = sign_hw_profile(fleet_key, wire_version, peer_challenge, node_id, hw_json)
+    return hmac_mod.compare_digest(expected, signature)
+
+
+# ------------------------------------------------------------------ #
 # Heartbeat Authentication                                            #
 # ------------------------------------------------------------------ #
 
