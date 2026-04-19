@@ -430,6 +430,35 @@ def verify_heartbeat(
     return hmac_mod.compare_digest(expected, signature)
 
 
+def sign_heartbeat_with_hw(
+    fleet_key: bytes, node_id: str, nonce: bytes, hw_json: bytes,
+) -> bytes:
+    """Sign a v2.2 heartbeat that carries a hardware-profile payload.
+
+    v2.2 PR 5 (Issue 6): used by `--peer` manual-peer bootstrap to exchange
+    real hardware info during the APING/APONG round-trip, so manual peers
+    don't register with zero compute_score.
+
+    HMAC covers `node_id || nonce || hw_json`. The nonce binds the HW payload
+    to this specific heartbeat — the same replay-protection pattern as
+    `sign_hw_profile` in the transport handshake.
+    """
+    msg = node_id.encode("utf-8") + b":" + nonce + b":" + hw_json
+    return hmac_mod.new(fleet_key, msg, hashlib.sha256).digest()
+
+
+def verify_heartbeat_with_hw(
+    fleet_key: bytes,
+    node_id: str,
+    nonce: bytes,
+    hw_json: bytes,
+    signature: bytes,
+) -> bool:
+    """Verify the HMAC of a v2.2 heartbeat-with-HW message (constant-time)."""
+    expected = sign_heartbeat_with_hw(fleet_key, node_id, nonce, hw_json)
+    return hmac_mod.compare_digest(expected, signature)
+
+
 # ------------------------------------------------------------------ #
 # Gradient Validation (anti-poisoning)                                #
 # ------------------------------------------------------------------ #

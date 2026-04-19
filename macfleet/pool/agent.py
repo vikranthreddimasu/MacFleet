@@ -21,6 +21,7 @@ from rich.console import Console
 
 logger = logging.getLogger(__name__)
 
+from macfleet.comm.transport import HardwareExchange
 from macfleet.compute.worker import TaskWorker
 from macfleet.engines.base import HardwareProfile
 from macfleet.monitoring.thermal import get_thermal_state
@@ -29,11 +30,15 @@ from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig
 from macfleet.pool.network import LinkType, get_network_topology
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
 from macfleet.security.auth import (
+    HW_HANDSHAKE_MAX_JSON_BYTES,
+    HandshakeHwValidationError,
     SecurityConfig,
     create_client_ssl_context,
     create_server_ssl_context,
     sign_heartbeat,
+    sign_heartbeat_with_hw,
     verify_heartbeat,
+    verify_heartbeat_with_hw,
 )
 
 console = Console()
@@ -196,6 +201,42 @@ class PoolAgent:
             return self.hardware.node_id
         return "unknown"
 
+    def _local_hw_exchange(self) -> HardwareExchange:
+        """Build a HardwareExchange from the local HardwareProfile.
+
+        Used by the v2.2 manual-peer bootstrap (Issue 6) so the APING/APONG
+        round-trip carries real hardware instead of zero-scored placeholders.
+        Returns an empty exchange if hardware hasn't been profiled yet.
+        """
+        hw = self.hardware
+        if hw is None:
+            return HardwareExchange()
+        return HardwareExchange(
+            gpu_cores=hw.gpu_cores,
+            ram_gb=hw.ram_gb,
+            memory_bandwidth_gbps=hw.memory_bandwidth_gbps,
+            chip_name=hw.chip_name,
+            has_ane=hw.has_ane,
+            mps_available=hw.mps_available,
+            mlx_available=hw.mlx_available,
+            data_port=self.data_port,
+        )
+
+    @staticmethod
+    def _hw_from_exchange(peer_id: str, peer_hw: HardwareExchange) -> HardwareProfile:
+        """Build a HardwareProfile for the registry from a peer's HardwareExchange."""
+        return HardwareProfile(
+            hostname=peer_id,
+            node_id=peer_id,
+            gpu_cores=peer_hw.gpu_cores,
+            ram_gb=peer_hw.ram_gb,
+            memory_bandwidth_gbps=peer_hw.memory_bandwidth_gbps,
+            has_ane=peer_hw.has_ane,
+            chip_name=peer_hw.chip_name,
+            mps_available=peer_hw.mps_available,
+            mlx_available=peer_hw.mlx_available,
+        )
+
     @property
     def registry(self) -> Optional[ClusterRegistry]:
         return self._registry
@@ -318,7 +359,15 @@ class PoolAgent:
     async def _handle_heartbeat_ping(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """Respond to heartbeat pings from peers."""
+        """Respond to heartbeat pings from peers.
+
+        v2.1 format (4 fields): `APING {node_id} {nonce_hex} {sig_hex}`
+        v2.2 format (5 fields): `APING {node_id} {nonce_hex} {sig_hex} {hw_json_hex}`
+
+        The 5-field variant is used by `--peer` manual-peer bootstrap (Issue 6)
+        so manual peers can exchange real hardware info without mDNS TXT records.
+        Server replies in matching format: 4-in → APONG 4-out, 5-in → APONG 5-out.
+        """
         fleet_key = self._security.fleet_key
         try:
             data = await asyncio.wait_for(reader.readline(), timeout=5.0)
@@ -331,7 +380,7 @@ class PoolAgent:
                     nonce = bytes.fromhex(nonce_hex)
                     sig = bytes.fromhex(sig_hex)
                     if verify_heartbeat(fleet_key, peer_node_id, nonce, sig):
-                        # Send authenticated PONG
+                        # Send authenticated PONG (v2.1 legacy format)
                         resp_nonce = secrets_mod.token_bytes(16)
                         resp_sig = sign_heartbeat(fleet_key, self.node_id, resp_nonce)
                         writer.write(
@@ -340,6 +389,46 @@ class PoolAgent:
                         await writer.drain()
                     else:
                         logger.debug("Heartbeat auth failed from peer %s", peer_node_id)
+                elif len(parts) == 5:
+                    # v2.2: carries peer HW profile
+                    _, peer_node_id, nonce_hex, sig_hex, hw_hex = parts
+                    try:
+                        nonce = bytes.fromhex(nonce_hex)
+                        sig = bytes.fromhex(sig_hex)
+                        hw_json = bytes.fromhex(hw_hex)
+                    except ValueError:
+                        logger.debug("APING v2 from %s: malformed hex", peer_node_id)
+                        return
+                    if len(hw_json) > HW_HANDSHAKE_MAX_JSON_BYTES:
+                        logger.debug(
+                            "APING v2 from %s: HW payload %dB exceeds max %dB",
+                            peer_node_id, len(hw_json), HW_HANDSHAKE_MAX_JSON_BYTES,
+                        )
+                        return
+                    if not verify_heartbeat_with_hw(
+                        fleet_key, peer_node_id, nonce, hw_json, sig,
+                    ):
+                        logger.debug("APING v2 auth failed from peer %s", peer_node_id)
+                        return
+                    # Reply with APONG v2 (5-field) carrying local HW
+                    resp_nonce = secrets_mod.token_bytes(16)
+                    try:
+                        local_hw_json = self._local_hw_exchange().to_json_bytes()
+                    except Exception as e:
+                        logger.debug("APING v2 reply: local HW serialization failed: %s", e)
+                        return
+                    resp_sig = sign_heartbeat_with_hw(
+                        fleet_key, self.node_id, resp_nonce, local_hw_json,
+                    )
+                    writer.write(
+                        (
+                            f"APONG {self.node_id} {resp_nonce.hex()} "
+                            f"{resp_sig.hex()} {local_hw_json.hex()}\n"
+                        ).encode()
+                    )
+                    await writer.drain()
+                else:
+                    logger.debug("APING malformed (%d fields) from unknown peer", len(parts))
             elif not fleet_key and data.startswith(b"PING"):
                 # Open heartbeat (backward compatible)
                 writer.write(f"PONG {self.node_id}\n".encode())
@@ -360,6 +449,11 @@ class PoolAgent:
 
         Used when mDNS is blocked (e.g. enterprise WiFi with client isolation).
         Sends a heartbeat ping to verify the peer is reachable and running.
+
+        v2.2 Issue 6: when authenticated, sends APING v2 (5-field with HW payload)
+        and parses APONG v2 to extract the peer's real HardwareProfile + data_port.
+        If the peer responds with APONG v1 (4-field), falls back to zero-HW
+        placeholder for v2.1 compat.
         """
         try:
             if ":" in peer_addr:
@@ -380,10 +474,22 @@ class PoolAgent:
                 timeout=10.0,
             )
 
+            local_hw_json: Optional[bytes] = None
             if fleet_key:
+                # v2.2: send APING v2 with local HW so peer can register us with
+                # real compute_score + data_port on their side. Peer responds with
+                # APONG v2 (or APONG v1 if older).
                 nonce = secrets_mod.token_bytes(16)
-                sig = sign_heartbeat(fleet_key, self.node_id, nonce)
-                writer.write(f"APING {self.node_id} {nonce.hex()} {sig.hex()}\n".encode())
+                local_hw_json = self._local_hw_exchange().to_json_bytes()
+                sig = sign_heartbeat_with_hw(
+                    fleet_key, self.node_id, nonce, local_hw_json,
+                )
+                writer.write(
+                    (
+                        f"APING {self.node_id} {nonce.hex()} "
+                        f"{sig.hex()} {local_hw_json.hex()}\n"
+                    ).encode()
+                )
                 await writer.drain()
                 response = await asyncio.wait_for(reader.readline(), timeout=10.0)
             else:
@@ -398,55 +504,112 @@ class PoolAgent:
             except (OSError, ssl.SSLError, BrokenPipeError, ConnectionResetError):
                 pass
 
+            peer_hw: Optional[HardwareExchange] = None
+            peer_data_port = port + 1
+
             # Parse response
             if fleet_key:
                 if not response.startswith(b"APONG"):
-                    console.print(f"[red]Peer {peer_addr}: no authenticated response (got: {response[:50]})[/red]")
+                    console.print(
+                        f"[red]Peer {peer_addr}: no authenticated response "
+                        f"(got: {response[:50]!r})[/red]"
+                    )
                     return
                 parts = response.decode().strip().split(" ")
-                if len(parts) != 4:
-                    console.print(f"[red]Peer {peer_addr}: malformed response[/red]")
-                    return
-                _, peer_node_id, resp_nonce_hex, resp_sig_hex = parts
-                if not verify_heartbeat(
-                    fleet_key, peer_node_id,
-                    bytes.fromhex(resp_nonce_hex), bytes.fromhex(resp_sig_hex),
-                ):
-                    console.print(f"[red]Peer {peer_addr}: authentication failed (wrong token?)[/red]")
+                if len(parts) == 5:
+                    # APONG v2: peer returned signed HW
+                    _, peer_node_id, resp_nonce_hex, resp_sig_hex, peer_hw_hex = parts
+                    try:
+                        resp_nonce = bytes.fromhex(resp_nonce_hex)
+                        resp_sig = bytes.fromhex(resp_sig_hex)
+                        peer_hw_json = bytes.fromhex(peer_hw_hex)
+                    except ValueError:
+                        console.print(f"[red]Peer {peer_addr}: malformed hex in APONG v2[/red]")
+                        return
+                    if len(peer_hw_json) > HW_HANDSHAKE_MAX_JSON_BYTES:
+                        console.print(
+                            f"[red]Peer {peer_addr}: HW payload "
+                            f"{len(peer_hw_json)}B exceeds max[/red]"
+                        )
+                        return
+                    if not verify_heartbeat_with_hw(
+                        fleet_key, peer_node_id, resp_nonce, peer_hw_json, resp_sig,
+                    ):
+                        console.print(
+                            f"[red]Peer {peer_addr}: authentication failed "
+                            f"(wrong token?)[/red]"
+                        )
+                        return
+                    try:
+                        peer_hw = HardwareExchange.from_json_bytes(peer_hw_json)
+                    except HandshakeHwValidationError as e:
+                        console.print(f"[red]Peer {peer_addr}: bad HW payload: {e}[/red]")
+                        return
+                    if peer_hw.data_port > 0:
+                        peer_data_port = peer_hw.data_port
+                elif len(parts) == 4:
+                    # APONG v1: v2.1 peer — fall back to zero-HW placeholder
+                    _, peer_node_id, resp_nonce_hex, resp_sig_hex = parts
+                    if not verify_heartbeat(
+                        fleet_key, peer_node_id,
+                        bytes.fromhex(resp_nonce_hex), bytes.fromhex(resp_sig_hex),
+                    ):
+                        console.print(
+                            f"[red]Peer {peer_addr}: authentication failed "
+                            f"(wrong token?)[/red]"
+                        )
+                        return
+                    logger.info(
+                        "Peer %s responded with APONG v1 (no HW) — likely v2.1. "
+                        "Registering with zero compute_score.", peer_node_id,
+                    )
+                else:
+                    console.print(
+                        f"[red]Peer {peer_addr}: malformed response "
+                        f"({len(parts)} fields)[/red]"
+                    )
                     return
             else:
                 if not response.startswith(b"PONG"):
-                    console.print(f"[red]Peer {peer_addr}: no response (got: {response[:50]})[/red]")
+                    console.print(f"[red]Peer {peer_addr}: no response (got: {response[:50]!r})[/red]")
                     return
                 parts = response.decode().strip().split(" ")
                 peer_node_id = parts[1] if len(parts) >= 2 else f"peer-{host}"
 
-            # Register the peer with minimal hardware info.
-            # Manual peers don't advertise data_port (no mDNS TXT); default to
-            # heartbeat port + 1 per v2.2 convention. Issue 6 (PR 5) upgrades
-            # this to a post-ping capability exchange that returns the real data_port.
-            hw = HardwareProfile(
-                hostname=peer_node_id,
-                node_id=peer_node_id,
-                gpu_cores=0,
-                ram_gb=0.0,
-                memory_bandwidth_gbps=0.0,
-                has_ane=True,
-                chip_name="unknown (manual peer)",
-            )
+            # Register the peer. With v2.2 APONG we have real HW; without it we
+            # fall back to a zero-score placeholder so the peer still shows up in
+            # the registry (just loses coordinator election until discovered via
+            # mDNS or re-pinged).
+            if peer_hw is not None:
+                hw = self._hw_from_exchange(peer_node_id, peer_hw)
+            else:
+                hw = HardwareProfile(
+                    hostname=peer_node_id,
+                    node_id=peer_node_id,
+                    gpu_cores=0,
+                    ram_gb=0.0,
+                    memory_bandwidth_gbps=0.0,
+                    has_ane=True,
+                    chip_name="unknown (manual peer)",
+                )
             self._registry.register(NodeRecord(
                 node_id=peer_node_id,
                 hostname=peer_node_id,
                 ip_address=host,
                 port=port,
-                data_port=port + 1,
+                data_port=peer_data_port,
                 hardware=hw,
             ))
             self._heartbeat.add_peer(peer_node_id, host, port, hw.compute_score)
 
+            hw_label = (
+                f"{hw.chip_name}, {hw.gpu_cores} GPU cores, {hw.ram_gb:.0f} GB"
+                if peer_hw is not None
+                else "no HW info"
+            )
             console.print(
                 f"[cyan]Connected to peer[/cyan] {peer_node_id} at {host} "
-                f"(heartbeat :{port}, data :{port + 1})"
+                f"(heartbeat :{port}, data :{peer_data_port}, {hw_label})"
             )
 
         except (OSError, ssl.SSLError, asyncio.TimeoutError, ConnectionRefusedError, ValueError) as e:
