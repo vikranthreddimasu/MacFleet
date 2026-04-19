@@ -1,13 +1,14 @@
 """MacFleet CLI: zero-config compute pool for Apple Silicon Macs.
 
 Commands:
-    macfleet join       Join the compute pool
-    macfleet leave      Leave the pool gracefully
-    macfleet status     Show pool members and network info
-    macfleet info       Show local hardware info
-    macfleet train      Submit a training job
-    macfleet bench      Benchmark network + compute
-    macfleet diagnose   System health check
+    macfleet join        Join the compute pool
+    macfleet leave       Leave the pool gracefully
+    macfleet status      Show pool members and network info
+    macfleet info        Show local hardware info
+    macfleet train       Submit a training job
+    macfleet bench       Benchmark network + compute
+    macfleet doctor      System health check (alias: diagnose)
+    macfleet quickstart  Write a starter training script
 """
 
 from __future__ import annotations
@@ -579,6 +580,109 @@ def _bench_allreduce(size_mb: int, iterations: int):
         console.print(f"  Effective bandwidth: {size_mb * 2 / np.mean(times):.0f} MB/s")
 
     asyncio.run(run())
+
+
+# v2.2 PR 16 (D10): `macfleet doctor` is a friendlier alias for `diagnose`.
+# Users trained by `brew doctor` / `rustup doctor` look for this name first.
+@cli.command()
+def doctor():
+    """System health check (alias for `diagnose`)."""
+    # Delegate to the existing diagnose implementation — they do the same thing.
+    diagnose.callback()
+
+
+# v2.2 PR 16 (D10): `macfleet quickstart` scaffolds a demo training script.
+# Goal: 5 seconds from `pip install macfleet` to `python my_macfleet_demo.py`
+# to first loss going down. First-run success is the north star.
+QUICKSTART_TEMPLATE = '''"""MacFleet quickstart: a 30-line distributed-training demo.
+
+Written by `macfleet quickstart`. Run it:
+
+    python {filename}
+
+If you've paired a second Mac via `macfleet join --bootstrap` + `macfleet pair`,
+set `enable_pool_distributed=True` below to spread training across both Macs.
+"""
+
+import macfleet
+import torch
+import torch.nn as nn
+
+
+class TinyMLP(nn.Module):
+    """A 2-layer MLP — intentionally small so this demo finishes fast."""
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(4, 16),
+            nn.ReLU(),
+            nn.Linear(16, 2),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def main() -> None:
+    torch.manual_seed(42)
+    X = torch.randn(1000, 4)
+    y = (X.sum(dim=1) > 0).long()  # linearly separable toy task
+
+    with macfleet.Pool(
+        engine="torch",
+        # Flip to True after pairing a second Mac (see docs/getting-started/pairing.md)
+        enable_pool_distributed=False,
+    ) as pool:
+        print(f"Pool world size: {{pool.world_size}}")
+        result = pool.train(
+            model=TinyMLP(),
+            dataset=(X, y),
+            epochs=10,
+            batch_size=64,
+            lr=0.01,
+            loss_fn=nn.CrossEntropyLoss(),
+        )
+        print("Training done:", result)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+@cli.command()
+@click.option(
+    "--output", "-o",
+    default="my_macfleet_demo.py",
+    help="Target filename for the generated demo.",
+)
+@click.option(
+    "--force", "-f",
+    is_flag=True,
+    help="Overwrite the target file if it already exists.",
+)
+def quickstart(output: str, force: bool):
+    """Write a starter training script to get you running in <1 minute."""
+    from pathlib import Path
+
+    target = Path(output)
+    if target.exists() and not force:
+        console.print(
+            f"[yellow]{target} already exists.[/yellow] "
+            f"Pass --force to overwrite, or pick another filename with --output."
+        )
+        raise click.exceptions.Exit(1)
+
+    content = QUICKSTART_TEMPLATE.format(filename=target.name)
+    target.write_text(content)
+    console.print(
+        f"[green]Wrote {target} ({len(content)} bytes)[/green]\n"
+        f"\nNext steps:\n"
+        f"  1. Install torch: [bold]pip install 'macfleet\\[torch]'[/bold]\n"
+        f"  2. Run it: [bold]python {target}[/bold]\n"
+        f"  3. Pair a second Mac: [bold]macfleet join --bootstrap[/bold]\n"
+        f"     (see docs/getting-started/pairing.md)\n"
+    )
 
 
 if __name__ == "__main__":
