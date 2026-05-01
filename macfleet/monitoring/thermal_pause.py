@@ -185,12 +185,30 @@ class ThermalPauseController:
         Uses `time.sleep(poll_interval_sec)` between ticks — intentionally
         synchronous. Returns True if resumed within the timeout, False on
         timeout. With timeout=None, waits forever.
+
+        For async training loops use `await async_wait_for_resume(...)`
+        instead so the event loop isn't blocked.
         """
         if not self.is_paused():
             return True
         deadline = (time.monotonic() + timeout_sec) if timeout_sec else float("inf")
         while self.is_paused():
             time.sleep(self.config.poll_interval_sec)
+            self.tick()
+            if time.monotonic() > deadline:
+                return False
+        return True
+
+    async def async_wait_for_resume(
+        self, timeout_sec: Optional[float] = None,
+    ) -> bool:
+        """Async variant of wait_for_resume — yields the loop while polling."""
+        import asyncio
+        if not self.is_paused():
+            return True
+        deadline = (time.monotonic() + timeout_sec) if timeout_sec else float("inf")
+        while self.is_paused():
+            await asyncio.sleep(self.config.poll_interval_sec)
             self.tick()
             if time.monotonic() > deadline:
                 return False
