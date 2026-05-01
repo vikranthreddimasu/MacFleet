@@ -214,14 +214,30 @@ class Dashboard:
         self.stop()
 
     def start(self) -> None:
-        """Start the live dashboard."""
-        self._live = Live(
-            self._render(),
-            console=self._console,
-            refresh_per_second=1.0 / self._refresh_rate,
-            transient=True,
-        )
-        self._live.start()
+        """Start the live dashboard.
+
+        Falls back to a one-shot print when the terminal isn't a TTY
+        (CI captures, redirected stdout) and Rich's Live raises during
+        setup. The dashboard then becomes a no-op on update_*() calls
+        rather than crashing the training loop.
+        """
+        try:
+            self._live = Live(
+                self._render(),
+                console=self._console,
+                refresh_per_second=1.0 / self._refresh_rate,
+                transient=True,
+            )
+            self._live.start()
+        except Exception as e:
+            self._live = None
+            import logging
+            logging.getLogger(__name__).warning(
+                "Dashboard live mode unavailable (%s); falling back to "
+                "static output. Use print_cluster_status() / "
+                "print_training_summary() if you need rendered tables.",
+                e,
+            )
 
     def stop(self) -> None:
         """Stop the live dashboard."""
