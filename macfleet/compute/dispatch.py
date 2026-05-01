@@ -38,6 +38,9 @@ class TaskDispatcher:
         self._transport = transport
         self._workers = list(worker_peer_ids)
         self._pending: dict[str, TaskFuture] = {}
+        # task_id -> worker_id, so a disconnect only fails THAT worker's
+        # outstanding tasks rather than every pending future.
+        self._task_to_worker: dict[str, str] = {}
         self._next_worker = 0
         self._worker_listeners: dict[str, asyncio.Task] = {}
         self._running = False
@@ -72,6 +75,34 @@ class TaskDispatcher:
             except asyncio.CancelledError:
                 pass
         self._worker_listeners.clear()
+        self._fail_pending("dispatcher stopped")
+
+    def _fail_pending(self, reason: str) -> None:
+        """Resolve every pending TaskFuture with a failure result.
+
+        Without this, callers awaiting future.result() block until their
+        own per-call timeout fires (or forever if no timeout was passed).
+        """
+        if not self._pending:
+            return
+        from macfleet.compute.models import TaskResult
+        for task_id, future in list(self._pending.items()):
+            if not future.done:
+                future.set_result(
+                    TaskResult(task_id=task_id, ok=False, error=reason)
+                )
+        self._pending.clear()
+        self._task_to_worker.clear()
+
+    def _fail_pending_for_worker(self, worker_id: str, reason: str) -> None:
+        """Fail just the tasks routed to a dead worker; leave others alone."""
+        from macfleet.compute.models import TaskResult
+        dead_ids = [tid for tid, w in self._task_to_worker.items() if w == worker_id]
+        for tid in dead_ids:
+            future = self._pending.pop(tid, None)
+            self._task_to_worker.pop(tid, None)
+            if future is not None and not future.done:
+                future.set_result(TaskResult(task_id=tid, ok=False, error=reason))
 
     async def submit(
         self,
@@ -90,12 +121,22 @@ class TaskDispatcher:
 
         spec = TaskSpec.from_call(fn, args, kwargs, timeout=timeout)
         future = TaskFuture(task_id=spec.task_id)
-        self._pending[spec.task_id] = future
 
         worker_id = self._workers[self._next_worker % len(self._workers)]
         self._next_worker += 1
 
-        await self._transport.send(worker_id, spec.pack(), msg_type=MessageType.TASK)
+        # Record the assignment BEFORE the send so that a send-side
+        # failure can be cleaned up by callers if needed.
+        self._pending[spec.task_id] = future
+        self._task_to_worker[spec.task_id] = worker_id
+        try:
+            await self._transport.send(worker_id, spec.pack(), msg_type=MessageType.TASK)
+        except (ConnectionError, OSError) as e:
+            self._pending.pop(spec.task_id, None)
+            self._task_to_worker.pop(spec.task_id, None)
+            from macfleet.compute.models import TaskResult
+            future.set_result(TaskResult(task_id=spec.task_id, ok=False, error=str(e)))
+            return future
         logger.debug("Dispatched task %s to %s", spec.task_id[:8], worker_id)
         return future
 
@@ -139,6 +180,7 @@ class TaskDispatcher:
                 if msg.msg_type == MessageType.RESULT:
                     result = TaskResult.unpack(msg.payload)
                     future = self._pending.pop(result.task_id, None)
+                    self._task_to_worker.pop(result.task_id, None)
                     if future:
                         future.set_result(result)
                         logger.debug(
@@ -156,4 +198,5 @@ class TaskDispatcher:
                 return
             except (ConnectionError, OSError) as e:
                 logger.warning("Lost connection to worker %s: %s", worker_id, e)
+                self._fail_pending_for_worker(worker_id, f"worker {worker_id} disconnected: {e}")
                 return
