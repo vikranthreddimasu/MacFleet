@@ -70,7 +70,7 @@ def _pick_ephemeral_port(exclude: int = 0) -> int:
             s.close()
         if port != exclude:
             return port
-    raise RuntimeError("could not pick an ephemeral port distinct from {exclude} after 16 tries")
+    raise RuntimeError(f"could not pick an ephemeral port distinct from {exclude} after 16 tries")
 
 
 def _detect_chip_name() -> str:
