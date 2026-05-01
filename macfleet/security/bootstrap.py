@@ -30,9 +30,8 @@ and for copy-paste between terminals. Three transports, one encoding:
 
 from __future__ import annotations
 
-import io
 import subprocess
-from typing import Optional
+from typing import Optional, TextIO
 from urllib.parse import parse_qs, quote, urlparse
 
 
@@ -189,7 +188,7 @@ def print_pairing_info(
     fleet_id: Optional[str] = None,
     *,
     to_pasteboard: bool = True,
-    out: Optional[io.TextIOBase] = None,
+    out: Optional[TextIO] = None,
 ) -> str:
     """Format the full pairing block (URL + QR + instructions) and return it.
 
