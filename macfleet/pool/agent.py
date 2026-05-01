@@ -48,6 +48,10 @@ from macfleet.security.auth import (
 # event loop for 500s worth of pending reads. 1s is still generous for
 # a cross-continent round-trip but slams the door on slowloris-style DoS.
 HEARTBEAT_READ_TIMEOUT_SEC = 1.0
+# Cap how long a write to a slow / lagging peer can hold the
+# heartbeat handler. Without this, a slowloris-on-the-receive-side
+# attacker could pin handlers indefinitely on writer.drain().
+HEARTBEAT_WRITE_TIMEOUT_SEC = 1.0
 
 console = Console()
 
@@ -484,7 +488,12 @@ class PoolAgent:
                         writer.write(
                             f"APONG {self.node_id} {resp_nonce.hex()} {resp_sig.hex()}\n".encode()
                         )
-                        await writer.drain()
+                        try:
+                            await asyncio.wait_for(
+                                writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.debug("APONG drain timed out for %s", peer_ip)
                     else:
                         self._heartbeat_rate_limiter.record_failure(peer_ip)
                         logger.debug("Heartbeat auth failed from peer %s", peer_node_id)
@@ -529,14 +538,24 @@ class PoolAgent:
                             f"{resp_sig.hex()} {local_hw_json.hex()}\n"
                         ).encode()
                     )
-                    await writer.drain()
+                    try:
+                        await asyncio.wait_for(
+                            writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.debug("APONG v2 drain timed out for %s", peer_ip)
                 else:
                     self._heartbeat_rate_limiter.record_failure(peer_ip)
                     logger.debug("APING malformed (%d fields) from %s", len(parts), peer_ip)
             elif not fleet_key and data.startswith(b"PING"):
                 # Open heartbeat (backward compatible)
                 writer.write(f"PONG {self.node_id}\n".encode())
-                await writer.drain()
+                try:
+                    await asyncio.wait_for(
+                        writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug("PONG drain timed out for %s", peer_ip)
             elif fleet_key:
                 # Secure server got a non-APING message. Empty data
                 # (immediate EOF from a port scanner / TCP RST) is benign
