@@ -138,7 +138,12 @@ class Pool:
         self.join()
         return self
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: Any = None,
+        exc_val: Any = None,
+        exc_tb: Any = None,
+    ) -> None:
         self.leave()
 
     def join(self) -> None:
