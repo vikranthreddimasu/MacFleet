@@ -19,11 +19,18 @@ _thermal_warned_fallback = False
 
 @dataclass
 class ThermalState:
-    """Current thermal state of the system."""
+    """Current thermal state of the system.
+
+    Note: gpu_temp_celsius and fan_speed_rpm are reserved for future
+    sensors. macOS doesn't expose these without root privileges or
+    third-party kexts (powermetrics, smcFanControl). They stay as
+    dataclass fields for forward compat with tooling that already
+    parses them, but get_thermal_state() leaves them as None.
+    """
     pressure: ThermalPressure
     cpu_temp_celsius: Optional[float] = None
-    gpu_temp_celsius: Optional[float] = None
-    fan_speed_rpm: Optional[int] = None
+    gpu_temp_celsius: Optional[float] = None  # reserved; not populated
+    fan_speed_rpm: Optional[int] = None  # reserved; not populated
     timestamp: float = 0.0
 
     @property
@@ -51,8 +58,11 @@ def get_thermal_state() -> ThermalState:
     """
     pressure = ThermalPressure.NOMINAL
     cpu_temp = None
-    gpu_temp = None
-    fan_speed = None
+    # gpu_temp / fan_speed are reserved: macOS gates these behind root
+    # (powermetrics) so we leave them None until we add a privileged
+    # collector. See ThermalState's docstring.
+    gpu_temp: Optional[float] = None
+    fan_speed: Optional[int] = None
     any_succeeded = False
 
     # Method 1: pmset (no sudo required)
