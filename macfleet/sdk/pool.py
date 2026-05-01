@@ -184,13 +184,7 @@ class Pool:
                 logger.warning("Pool.leave: agent stop raised %s", e)
             self._agent = None
 
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            if self._loop_thread is not None:
-                self._loop_thread.join(timeout=5.0)
-            self._loop = None
-            self._loop_thread = None
-
+        self._teardown_loop()
         self._joined = False
 
     def _start_agent(self) -> None:
