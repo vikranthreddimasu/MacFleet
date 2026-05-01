@@ -89,6 +89,11 @@ class WireMessage:
         stream_id, msg_type, flags, payload_size, sequence, checksum, _ = struct.unpack(
             HEADER_FORMAT, header
         )
+        if payload_size > MAX_PAYLOAD_SIZE:
+            raise ValueError(
+                f"Payload size {payload_size} exceeds maximum {MAX_PAYLOAD_SIZE} "
+                f"— possible OOM attack or corrupt header"
+            )
         payload = data[HEADER_SIZE : HEADER_SIZE + payload_size]
 
         # Verify checksum
