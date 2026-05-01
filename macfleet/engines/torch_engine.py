@@ -120,12 +120,22 @@ class TorchEngine:
         return np.concatenate(grads)
 
     def apply_flat_gradients(self, flat_grads: np.ndarray) -> None:
-        """Write averaged flat gradients back to model parameters."""
+        """Write averaged flat gradients back to model parameters.
+
+        Reuses the existing param.grad buffer via copy_ when one is
+        already allocated, otherwise creates a fresh tensor. Keeping the
+        same tensor across steps stops per-step heap churn and works
+        with optimizers that cache references to .grad.
+        """
         offset = 0
         for param in self._trainable_params:
             numel = param.numel()
             grad_data = flat_grads[offset : offset + numel].reshape(param.shape)
-            param.grad = torch.from_numpy(grad_data.copy()).to(self._device)
+            new_grad = torch.from_numpy(grad_data.copy()).to(self._device)
+            if param.grad is not None and param.grad.shape == new_grad.shape:
+                param.grad.copy_(new_grad)
+            else:
+                param.grad = new_grad
             offset += numel
 
     def get_flat_parameters(self) -> np.ndarray:
