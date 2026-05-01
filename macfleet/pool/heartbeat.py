@@ -17,10 +17,13 @@ from enum import Enum
 from typing import Callable, Optional
 
 from macfleet.security.auth import (
+    HW_HANDSHAKE_MAX_JSON_BYTES,
     SecurityConfig,
     create_client_ssl_context,
     sign_heartbeat,
+    sign_heartbeat_with_hw,
     verify_heartbeat,
+    verify_heartbeat_with_hw,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,8 @@ class GossipHeartbeat:
         on_suspected: Optional[Callable[[str], None]] = None,
         on_failed: Optional[Callable[[str], None]] = None,
         on_recovered: Optional[Callable[[str], None]] = None,
+        local_hw_provider: Optional[Callable[[], Optional[bytes]]] = None,
+        on_peer_hw: Optional[Callable[[str, bytes], None]] = None,
     ):
         self.node_id = node_id
         self.config = config or HeartbeatConfig()
@@ -82,6 +87,13 @@ class GossipHeartbeat:
         self._on_suspected = on_suspected
         self._on_failed = on_failed
         self._on_recovered = on_recovered
+        # When set, secure-mode pings include the latest local HW JSON bytes
+        # via APING v2, and peer HW from APONG v2 is delivered to on_peer_hw.
+        # Refreshes registry compute_score on every successful round so
+        # mDNS-discovered peers don't stay zero-scored forever (Issue 2/PR 4
+        # only covered the transport handshake, not the gossip path).
+        self._local_hw_provider = local_hw_provider
+        self._on_peer_hw = on_peer_hw
 
         self._peers: dict[str, PeerState] = {}
         self._running = False
@@ -200,10 +212,26 @@ class GossipHeartbeat:
             )
 
             if fleet_key:
-                # Authenticated heartbeat: APING {node_id} {nonce_hex} {hmac_hex}\n
+                # Authenticated heartbeat. Send v2 (5-field with HW) when a
+                # local-HW provider is configured, else v1 (4-field).
+                local_hw_json: Optional[bytes] = None
+                if self._local_hw_provider is not None:
+                    try:
+                        local_hw_json = self._local_hw_provider()
+                    except Exception:
+                        local_hw_json = None
                 nonce = secrets.token_bytes(16)
-                sig = sign_heartbeat(fleet_key, self.node_id, nonce)
-                msg = f"APING {self.node_id} {nonce.hex()} {sig.hex()}\n".encode()
+                if local_hw_json is not None:
+                    sig = sign_heartbeat_with_hw(
+                        fleet_key, self.node_id, nonce, local_hw_json,
+                    )
+                    msg = (
+                        f"APING {self.node_id} {nonce.hex()} "
+                        f"{sig.hex()} {local_hw_json.hex()}\n"
+                    ).encode()
+                else:
+                    sig = sign_heartbeat(fleet_key, self.node_id, nonce)
+                    msg = f"APING {self.node_id} {nonce.hex()} {sig.hex()}\n".encode()
                 writer.write(msg)
                 await writer.drain()
 
@@ -211,14 +239,36 @@ class GossipHeartbeat:
 
                 if not response.startswith(b"APONG"):
                     return False
-                # Verify APONG signature
                 parts = response.decode().strip().split(" ")
-                if len(parts) != 4:
-                    return False
-                _, resp_node_id, resp_nonce_hex, resp_sig_hex = parts
-                resp_nonce = bytes.fromhex(resp_nonce_hex)
-                resp_sig = bytes.fromhex(resp_sig_hex)
-                return verify_heartbeat(fleet_key, resp_node_id, resp_nonce, resp_sig)
+                if len(parts) == 4:
+                    _, resp_node_id, resp_nonce_hex, resp_sig_hex = parts
+                    try:
+                        resp_nonce = bytes.fromhex(resp_nonce_hex)
+                        resp_sig = bytes.fromhex(resp_sig_hex)
+                    except ValueError:
+                        return False
+                    return verify_heartbeat(fleet_key, resp_node_id, resp_nonce, resp_sig)
+                if len(parts) == 5:
+                    _, resp_node_id, resp_nonce_hex, resp_sig_hex, resp_hw_hex = parts
+                    try:
+                        resp_nonce = bytes.fromhex(resp_nonce_hex)
+                        resp_sig = bytes.fromhex(resp_sig_hex)
+                        resp_hw = bytes.fromhex(resp_hw_hex)
+                    except ValueError:
+                        return False
+                    if len(resp_hw) > HW_HANDSHAKE_MAX_JSON_BYTES:
+                        return False
+                    if not verify_heartbeat_with_hw(
+                        fleet_key, resp_node_id, resp_nonce, resp_hw, resp_sig,
+                    ):
+                        return False
+                    if self._on_peer_hw is not None:
+                        try:
+                            self._on_peer_hw(resp_node_id, resp_hw)
+                        except Exception:
+                            pass
+                    return True
+                return False
             else:
                 # Open heartbeat (backward compatible)
                 msg = f"PING {self.node_id}\n".encode()

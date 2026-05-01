@@ -376,7 +376,10 @@ class PoolAgent:
             on_remove=self._on_peer_removed,
         )
 
-        # 7. Start heartbeat gossip
+        # 7. Start heartbeat gossip. In secure mode the gossip pings carry
+        # signed HW (APING v2) so mDNS-discovered peers refresh from a
+        # zero-score placeholder to their real compute_score on the first
+        # successful round.
         self._heartbeat = GossipHeartbeat(
             node_id=self.hardware.node_id,
             config=HeartbeatConfig(interval_sec=1.0, suspicion_rounds=3, failure_timeout_sec=10.0),
@@ -384,6 +387,8 @@ class PoolAgent:
             on_suspected=self._on_peer_suspected,
             on_failed=self._on_peer_failed,
             on_recovered=self._on_peer_recovered,
+            local_hw_provider=self._gossip_local_hw_bytes if self._security.is_secure else None,
+            on_peer_hw=self._on_peer_hw_received if self._security.is_secure else None,
         )
 
         await self._heartbeat.start()
@@ -784,3 +789,40 @@ class PoolAgent:
         """Called when a suspected peer recovers."""
         self._registry.mark_alive(node_id)
         console.print(f"[green]Peer recovered:[/green] {node_id}")
+
+    def _gossip_local_hw_bytes(self) -> Optional[bytes]:
+        """Return the local HW exchange JSON for gossip APING v2, or None."""
+        if self.hardware is None:
+            return None
+        try:
+            return self._local_hw_exchange().to_json_bytes()
+        except Exception as e:
+            logger.debug("gossip local HW serialization failed: %s", e)
+            return None
+
+    def _on_peer_hw_received(self, peer_node_id: str, peer_hw_json: bytes) -> None:
+        """Refresh registry HW for a peer using HW JSON received via APONG v2.
+
+        Closes the secure-mode coordinator-election gap: mDNS broadcasts
+        elide hardware fields, so peers initially register with
+        compute_score=0. After one successful APONG v2, this callback
+        replaces the placeholder profile with the peer's real specs.
+        """
+        if self._registry is None:
+            return
+        try:
+            peer_hw = HardwareExchange.from_json_bytes(peer_hw_json)
+        except HandshakeHwValidationError as e:
+            logger.debug("APONG v2 HW from %s: parse failed: %s", peer_node_id, e)
+            return
+        record = self._registry.get_node(peer_node_id)
+        if record is None:
+            return
+        new_hw = self._hw_from_exchange(peer_node_id, peer_hw)
+        # Preserve thermal pressure (registry is authoritative on liveness state).
+        new_hw.thermal_pressure = record.hardware.thermal_pressure
+        record.hardware = new_hw
+        if peer_hw.data_port > 0:
+            record.data_port = peer_hw.data_port
+        # Re-elect coordinator with the refreshed compute score.
+        self._registry._elect_coordinator()
