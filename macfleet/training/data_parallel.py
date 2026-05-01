@@ -201,6 +201,7 @@ class DataParallel:
         # Guard: empty gradients (no trainable params or all grads are None)
         if flat_grads.size == 0:
             logger.warning("Empty gradient array — skipping sync (no trainable params?)")
+            self._step_count += 1
             return 0.0
 
         # Guard: NaN/Inf in local gradients before sending to peers.
