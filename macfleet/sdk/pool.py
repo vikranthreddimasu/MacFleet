@@ -199,7 +199,12 @@ class Pool:
             target=_run_loop, name="macfleet-pool-loop", daemon=True,
         )
         self._loop_thread.start()
-        ready.wait(timeout=2.0)
+        if not ready.wait(timeout=2.0):
+            # Worker thread never signaled ready — clean up before raising.
+            self._teardown_loop()
+            raise RuntimeError(
+                "Pool background event loop failed to start within 2s."
+            )
 
         self._agent = PoolAgent(
             name=self.name,
@@ -216,11 +221,19 @@ class Pool:
         # seconds on its own. We give it a fixed floor instead of borrowing
         # from quorum_timeout_sec (otherwise a tight quorum timeout causes
         # the wrong kind of error).
-        start_fut = asyncio.run_coroutine_threadsafe(
-            self._agent.start(), self._loop,
-        )
-        agent_start_timeout = max(10.0, self.quorum_timeout_sec)
-        start_fut.result(timeout=agent_start_timeout)
+        try:
+            start_fut = asyncio.run_coroutine_threadsafe(
+                self._agent.start(), self._loop,
+            )
+            agent_start_timeout = max(10.0, self.quorum_timeout_sec)
+            start_fut.result(timeout=agent_start_timeout)
+        except BaseException:
+            # agent.start() can raise (mDNS bind failure, port conflict).
+            # Tear down the orphaned loop+thread before re-raising so a
+            # subsequent join() doesn't stack a fresh loop on top.
+            self._agent = None
+            self._teardown_loop()
+            raise
 
         # Wait for quorum — poll the agent's registry for alive peers
         deadline = time.monotonic() + self.quorum_timeout_sec
@@ -240,13 +253,8 @@ class Pool:
             ).result(timeout=2.0)
         except Exception:
             pass
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-            if self._loop_thread is not None:
-                self._loop_thread.join(timeout=2.0)
         self._agent = None
-        self._loop = None
-        self._loop_thread = None
+        self._teardown_loop()
 
         raise TimeoutError(
             f"No quorum within {self.quorum_timeout_sec}s: saw {observed} "
@@ -254,6 +262,18 @@ class Pool:
             f"Run 'macfleet status' to check discovery, or pass "
             f"peers=['<ip>:{self.port}'] to connect manually."
         )
+
+    def _teardown_loop(self) -> None:
+        """Stop the background event loop and join its thread."""
+        if self._loop is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError:
+                pass
+            if self._loop_thread is not None:
+                self._loop_thread.join(timeout=2.0)
+        self._loop = None
+        self._loop_thread = None
 
     def train(
         self,
