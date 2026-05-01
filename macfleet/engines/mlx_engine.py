@@ -64,7 +64,9 @@ def _flatten_params(tree: dict) -> list[tuple[str, Any]]:
 def _unflatten_params(flat: list[tuple[str, Any]], template: dict) -> dict:
     """Reconstruct nested parameter dict from flat (name, array) pairs.
 
-    Uses the template structure to rebuild the nesting.
+    Uses the template structure to rebuild the nesting. The dict
+    iteration order matches `_flatten_params` (sorted by key) so the
+    template's structural order doesn't matter.
     """
     lookup = dict(flat)
 
@@ -72,7 +74,7 @@ def _unflatten_params(flat: list[tuple[str, Any]], template: dict) -> dict:
         if isinstance(obj, dict):
             return {
                 k: _rebuild(f"{prefix}.{k}" if prefix else k, v)
-                for k, v in obj.items()
+                for k, v in sorted(obj.items())
             }
         elif isinstance(obj, (list, tuple)):
             rebuilt = [
