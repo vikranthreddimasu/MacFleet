@@ -105,7 +105,15 @@ def _classify_interface(name: str, ip: str) -> LinkType:
 
 
 def _is_wifi_interface(interface: str) -> bool:
-    """Check if an interface is WiFi using networksetup."""
+    """Check if an interface is WiFi using networksetup.
+
+    When networksetup is unavailable (sandboxed runs, restricted user,
+    timeout), we no longer assume en0 is WiFi. On Mac mini / Studio /
+    iMac the en0 jack is wired Ethernet, and an over-eager WiFi
+    classification would push the AdaptiveCompressor into AGGRESSIVE
+    mode on what is actually a Gbit/s+ link. Return False on the
+    fallback so the caller treats the interface as Ethernet.
+    """
     try:
         result = subprocess.run(
             ["networksetup", "-listallhardwareports"],
@@ -121,8 +129,7 @@ def _is_wifi_interface(interface: str) -> bool:
                     return False
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
-    # Default: en0 is WiFi on macOS laptops
-    return interface == "en0"
+    return False
 
 
 def detect_interfaces() -> list[NetworkLink]:
