@@ -12,6 +12,10 @@ from typing import Callable, Optional
 
 from macfleet.engines.base import ThermalPressure
 
+# Module-level flag so the "all thermal probes failed" warning fires
+# once per process lifetime, not on every poll tick (which can be 1 Hz).
+_thermal_warned_fallback = False
+
 
 @dataclass
 class ThermalState:
@@ -38,11 +42,18 @@ def get_thermal_state() -> ThermalState:
     1. pmset -g therm (always available, no sudo)
     2. ioreg for battery temperature
     3. sysctl for CPU thermal level
+
+    If every method fails (sandboxed environment, all tools missing),
+    a one-time WARNING is logged so callers know thermal monitoring
+    is degraded — the returned NOMINAL state is otherwise indistinguishable
+    from a healthy reading and would silently keep the pause controller
+    from ever tripping.
     """
     pressure = ThermalPressure.NOMINAL
     cpu_temp = None
     gpu_temp = None
     fan_speed = None
+    any_succeeded = False
 
     # Method 1: pmset (no sudo required)
     try:
@@ -51,6 +62,7 @@ def get_thermal_state() -> ThermalState:
             capture_output=True, text=True, timeout=2,
         )
         if result.returncode == 0:
+            any_succeeded = True
             output = result.stdout.lower()
             if "cpu_speed_limit" in output:
                 for line in output.split("\n"):
@@ -75,6 +87,7 @@ def get_thermal_state() -> ThermalState:
             capture_output=True, text=True, timeout=2,
         )
         if result.returncode == 0:
+            any_succeeded = True
             for line in result.stdout.split("\n"):
                 if "Temperature" in line:
                     try:
@@ -92,6 +105,7 @@ def get_thermal_state() -> ThermalState:
             capture_output=True, text=True, timeout=2,
         )
         if result.returncode == 0:
+            any_succeeded = True
             try:
                 level = int(result.stdout.strip())
                 if level >= 100:
@@ -104,6 +118,17 @@ def get_thermal_state() -> ThermalState:
                 pass
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
+
+    if not any_succeeded:
+        global _thermal_warned_fallback
+        if not _thermal_warned_fallback:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "All thermal probes failed (pmset / ioreg / sysctl); "
+                "reporting NOMINAL by default. ThermalPauseController "
+                "will not engage on this system."
+            )
+            _thermal_warned_fallback = True
 
     return ThermalState(
         pressure=pressure,
