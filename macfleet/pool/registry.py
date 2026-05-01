@@ -101,21 +101,21 @@ class ClusterRegistry:
         """Register or update a node in the registry."""
         with self._lock:
             self._nodes[record.node_id] = record
-        self._elect_coordinator()
+            self._elect_coordinator_locked()
 
     def deregister(self, node_id: str) -> None:
         """Remove a node from the registry."""
         with self._lock:
             if node_id in self._nodes:
                 self._nodes[node_id].status = NodeStatus.LEFT
-        self._elect_coordinator()
+            self._elect_coordinator_locked()
 
     def mark_failed(self, node_id: str) -> None:
         """Mark a node as failed."""
         with self._lock:
             if node_id in self._nodes:
                 self._nodes[node_id].status = NodeStatus.FAILED
-        self._elect_coordinator()
+            self._elect_coordinator_locked()
 
     def mark_alive(self, node_id: str) -> None:
         """Mark a node as alive (recovered)."""
@@ -125,7 +125,7 @@ class ClusterRegistry:
                 # Use monotonic to match GossipHeartbeat — wall-clock
                 # NTP slews can otherwise produce negative deltas.
                 self._nodes[node_id].last_heartbeat = time.monotonic()
-        self._elect_coordinator()
+            self._elect_coordinator_locked()
 
     def update_throughput(self, node_id: str, throughput: float) -> None:
         """Update a node's measured throughput."""
@@ -152,13 +152,23 @@ class ClusterRegistry:
     def _elect_coordinator(self) -> None:
         """Bully algorithm: highest compute_score becomes coordinator."""
         with self._lock:
-            eligible = [
-                n for n in self._nodes.values() if n.is_coordinator_eligible
-            ]
-            if not eligible:
-                self._coordinator_id = None
-                return
+            self._elect_coordinator_locked()
 
-            # Highest compute_score wins; tiebreak on node_id (lexicographic)
-            winner = max(eligible, key=lambda n: (n.compute_score, n.node_id))
-            self._coordinator_id = winner.node_id
+    def _elect_coordinator_locked(self) -> None:
+        """Election under an already-held self._lock (no re-acquisition).
+
+        The non-locked variant is preserved for external callers that
+        haven't taken the lock; in-class callers should prefer this one
+        to avoid the release/re-acquire window where another thread can
+        flip a node's status between mutation and election.
+        """
+        eligible = [
+            n for n in self._nodes.values() if n.is_coordinator_eligible
+        ]
+        if not eligible:
+            self._coordinator_id = None
+            return
+
+        # Highest compute_score wins; tiebreak on node_id (lexicographic)
+        winner = max(eligible, key=lambda n: (n.compute_score, n.node_id))
+        self._coordinator_id = winner.node_id
