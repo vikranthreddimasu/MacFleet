@@ -139,6 +139,29 @@ class ClusterRegistry:
             if node_id in self._nodes:
                 self._nodes[node_id].hardware.thermal_pressure = pressure
 
+    def update_hardware(
+        self,
+        node_id: str,
+        new_hw: HardwareProfile,
+        new_data_port: Optional[int] = None,
+    ) -> None:
+        """Atomically swap a peer's hardware profile and re-elect.
+
+        Used by the gossip HW refresh path so multiple writers can't tear
+        the (hardware, data_port) pair under concurrent reads. Preserves
+        the current thermal_pressure (registry tracks live state) and
+        re-runs coordinator election under the same lock acquisition.
+        """
+        with self._lock:
+            record = self._nodes.get(node_id)
+            if record is None:
+                return
+            new_hw.thermal_pressure = record.hardware.thermal_pressure
+            record.hardware = new_hw
+            if new_data_port is not None and 0 < new_data_port < 65536:
+                record.data_port = new_data_port
+            self._elect_coordinator_locked()
+
     def get_node(self, node_id: str) -> Optional[NodeRecord]:
         with self._lock:
             return self._nodes.get(node_id)

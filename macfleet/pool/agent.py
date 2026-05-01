@@ -852,14 +852,9 @@ class PoolAgent:
         except HandshakeHwValidationError as e:
             logger.debug("APONG v2 HW from %s: parse failed: %s", peer_node_id, e)
             return
-        record = self._registry.get_node(peer_node_id)
-        if record is None:
-            return
         new_hw = self._hw_from_exchange(peer_node_id, peer_hw)
-        # Preserve thermal pressure (registry is authoritative on liveness state).
-        new_hw.thermal_pressure = record.hardware.thermal_pressure
-        record.hardware = new_hw
-        if peer_hw.data_port > 0:
-            record.data_port = peer_hw.data_port
-        # Re-elect coordinator with the refreshed compute score.
-        self._registry._elect_coordinator()
+        # Hand the swap to the registry so (hardware, data_port) are
+        # mutated atomically under self._registry._lock and the coordinator
+        # re-election runs in the same critical section.
+        new_data_port = peer_hw.data_port if peer_hw.data_port > 0 else None
+        self._registry.update_hardware(peer_node_id, new_hw, new_data_port=new_data_port)
