@@ -78,7 +78,11 @@ class TaskRegistry:
 
         If `name` is None, defaults to `f"{fn.__module__}.{fn.__qualname__}"`.
         Re-registering the same name replaces the old entry (useful for
-        REPL/notebook workflows where the function is redefined).
+        REPL/notebook workflows where the function is redefined). The
+        replacement is logged at WARNING when the new fn differs from
+        the old, so a typo (`@task(name='my.fn')` on two distinct
+        callables) shows up in normal logging output rather than
+        silently masking one of them.
         """
         task_name = name or f"{fn.__module__}.{fn.__qualname__}"
         entry = TaskEntry(name=task_name, fn=fn, schema=schema)
@@ -86,8 +90,10 @@ class TaskRegistry:
             if task_name in self._tasks:
                 old = self._tasks[task_name]
                 if old.fn is not fn:
-                    logger.info(
-                        "Task %s re-registered (old fn at %s:%s)",
+                    logger.warning(
+                        "Task %r re-registered (old fn at %s:%s replaced). "
+                        "If the names collided unintentionally, pass an "
+                        "explicit name= or rename one of the callables.",
                         task_name,
                         getattr(old.fn, "__code__", None) and old.fn.__code__.co_filename,
                         getattr(old.fn, "__code__", None) and old.fn.__code__.co_firstlineno,
