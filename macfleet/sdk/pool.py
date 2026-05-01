@@ -551,8 +551,18 @@ class Pool:
         if self._is_registered_task(fn):
             return [self._run_registered_task(fn, item, timeout=timeout) for item in items]
 
-        # Legacy cloudpickle fallback (discouraged — fn not decorated with @task)
+        # Legacy cloudpickle fallback (discouraged — fn not decorated with @task).
+        # Will be removed once distributed dispatch is wired (see TODOS Issue 25).
         import os
+        import warnings
+        warnings.warn(
+            "Pool.map fell through to the cloudpickle/ProcessPool path. "
+            "Decorate the callable with @macfleet.task — the legacy path "
+            "will be removed in v3.0 and only registered tasks will run "
+            "across the fleet.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         workers = max_workers or min(os.cpu_count() or 1, 4)
         fn_bytes = cloudpickle.dumps(fn)
         with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -596,7 +606,16 @@ class Pool:
         if self._is_registered_task(fn):
             return self._run_registered_task(fn, *args, timeout=timeout, **kwargs)
 
-        # Legacy cloudpickle fallback
+        # Legacy cloudpickle fallback (will be removed in v3.0).
+        import warnings
+        warnings.warn(
+            "Pool.submit fell through to the cloudpickle/ProcessPool path. "
+            "Decorate the callable with @macfleet.task — the legacy path "
+            "will be removed in v3.0 and only registered tasks will run "
+            "across the fleet.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         with ProcessPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
                 _run_pickled,
