@@ -210,6 +210,7 @@ class GossipHeartbeat:
                 asyncio.open_connection(peer.ip_address, peer.port, ssl=ssl_ctx),
                 timeout=2.0,
             )
+            assert writer is not None  # narrow Optional for mypy
 
             if fleet_key:
                 # Authenticated heartbeat. Send v2 (5-field with HW) when a

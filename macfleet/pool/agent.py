@@ -626,6 +626,7 @@ class PoolAgent:
                 asyncio.open_connection(host, port, ssl=ssl_ctx),
                 timeout=10.0,
             )
+            assert writer is not None  # narrow Optional for mypy
 
             local_hw_json: Optional[bytes] = None
             if fleet_key:
