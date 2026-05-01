@@ -40,7 +40,11 @@ def cli():
 @click.option("--data-port", default=50052, help="Data transport port (training)")
 @click.option("--token", default=None, envvar="MACFLEET_TOKEN", help="Pool token (or set MACFLEET_TOKEN env var)")
 @click.option("--fleet-id", default=None, help="Fleet identifier (isolates pool on network)")
-@click.option("--tls", "use_tls", is_flag=True, default=False, help="Enable TLS encryption")
+@click.option(
+    "--tls", "use_tls", is_flag=True, default=False,
+    help="Enable TLS encryption (no-op when --token is set: TLS is "
+         "already mandatory in secure mode)",
+)
 @click.option(
     "--open", "open_fleet", is_flag=True, default=False,
     help="Disable security (open fleet, no authentication)",
@@ -86,6 +90,11 @@ def join(
         resolved_token = None
     else:
         resolved_token = resolve_token_with_file(token, auto_generate=True)
+        if use_tls:
+            console.print(
+                "[dim]--tls is implicit when a token is set (already enforced "
+                "by SecurityConfig).[/dim]"
+            )
         if token is None:
             # Token was auto-generated or loaded from file — show it
             console.print(f"\n[bold green]Fleet token:[/bold green] {resolved_token}")
