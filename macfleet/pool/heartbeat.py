@@ -192,6 +192,7 @@ class GossipHeartbeat:
         """Send a heartbeat ping to a peer. Returns True if peer responds."""
         fleet_key = self._security.fleet_key
         ssl_ctx = create_client_ssl_context() if self._security.tls else None
+        writer: Optional[asyncio.StreamWriter] = None
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(peer.ip_address, peer.port, ssl=ssl_ctx),
@@ -207,8 +208,6 @@ class GossipHeartbeat:
                 await writer.drain()
 
                 response = await asyncio.wait_for(reader.readline(), timeout=2.0)
-                writer.close()
-                await writer.wait_closed()
 
                 if not response.startswith(b"APONG"):
                     return False
@@ -227,11 +226,16 @@ class GossipHeartbeat:
                 await writer.drain()
 
                 response = await asyncio.wait_for(reader.readline(), timeout=2.0)
-                writer.close()
-                await writer.wait_closed()
                 return response.startswith(b"PONG")
         except (OSError, asyncio.TimeoutError, ConnectionRefusedError, ValueError):
             return False
+        finally:
+            if writer is not None:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except (OSError, ConnectionResetError, asyncio.TimeoutError):
+                    pass
 
     def get_status_summary(self) -> dict[str, int]:
         """Get count of peers by status."""
