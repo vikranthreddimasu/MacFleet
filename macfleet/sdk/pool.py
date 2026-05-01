@@ -690,6 +690,11 @@ class Pool:
         v2.2 PR 8 (Issue 1a): reads from the agent's ClusterRegistry when
         `enable_pool_distributed=True`. Returns 1 for the legacy single-node
         path so existing Pool().train() code keeps working.
+
+        WARNING: world_size == 1 is ambiguous between solo mode and a
+        distributed pool with no peers yet (or all peers transiently
+        dropped). Use `pool.is_distributed` to disambiguate when the
+        distinction matters.
         """
         if self._agent is not None and self._agent.registry is not None:
             return self._agent.registry.world_size
