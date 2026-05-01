@@ -132,20 +132,24 @@ class TorchEngine:
     def apply_flat_gradients(self, flat_grads: np.ndarray) -> None:
         """Write averaged flat gradients back to model parameters.
 
-        Reuses the existing param.grad buffer via copy_ when one is
-        already allocated, otherwise creates a fresh tensor. Keeping the
-        same tensor across steps stops per-step heap churn and works
-        with optimizers that cache references to .grad.
+        When a param.grad of matching shape already exists, copy_ is used
+        for cross-device transfer in-place (avoids allocating a fresh
+        device tensor each step and works with optimizers that cache
+        references to .grad). Only the initial step pays the .to(device)
+        cost when grad is first created.
         """
         offset = 0
         for param in self._collect_trainable_params():
             numel = param.numel()
             grad_data = flat_grads[offset : offset + numel].reshape(param.shape)
-            new_grad = torch.from_numpy(grad_data.copy()).to(self._device)
-            if param.grad is not None and param.grad.shape == new_grad.shape:
-                param.grad.copy_(new_grad)
+            cpu_grad = torch.from_numpy(grad_data.copy())
+            if param.grad is not None and tuple(param.grad.shape) == tuple(cpu_grad.shape):
+                # In-place cross-device copy. param.grad stays the same
+                # object, so optimizer state stays valid and we skip a
+                # device-side allocation.
+                param.grad.copy_(cpu_grad)
             else:
-                param.grad = new_grad
+                param.grad = cpu_grad.to(self._device)
             offset += numel
 
     def get_flat_parameters(self) -> np.ndarray:
