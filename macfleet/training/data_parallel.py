@@ -135,7 +135,10 @@ class DataParallel:
         }
         level = level_map.get(comp)
         if level is None:
-            return None
+            valid = ["none", "adaptive"] + sorted(level_map)
+            raise ValueError(
+                f"Unknown compression={comp!r}. Valid: {valid}"
+            )
 
         return AdaptiveCompressor(
             config=AdaptiveCompressionConfig(
