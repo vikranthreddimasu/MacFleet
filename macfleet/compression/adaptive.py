@@ -82,11 +82,20 @@ class NumpyTopKCompressor:
         Returns:
             (indices, values, original_numel) tuple.
         """
+        import logging
+        logger = logging.getLogger(__name__)
         flat = array.flatten().astype(np.float32)
 
         # Add residuals from previous round
         if self._residuals is not None and self._residuals.shape == flat.shape:
             flat = flat + self._residuals
+        elif self._residuals is not None:
+            logger.warning(
+                "TopK residual shape changed (%s → %s); discarding residuals. "
+                "Convergence guarantees from error feedback are broken until "
+                "the gradient shape stabilizes.",
+                self._residuals.shape, flat.shape,
+            )
 
         k = max(1, int(flat.size * self.ratio))
         abs_vals = np.abs(flat)
