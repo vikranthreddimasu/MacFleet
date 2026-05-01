@@ -346,7 +346,12 @@ class ServiceRegistry:
             return list(self._discovered_nodes.values())
 
     def find_peers(self, timeout: float = 5.0) -> list[DiscoveredNode]:
-        """Block until timeout, collecting all discovered peers."""
+        """Block until timeout, collecting all discovered peers.
+
+        WARNING: this is synchronous (uses time.sleep). Calling from an
+        async context blocks the event loop for the full timeout. Use
+        async_find_peers() instead from coroutines.
+        """
         if not self._zeroconf:
             self.start()
 
@@ -362,6 +367,28 @@ class ServiceRegistry:
 
         time.sleep(timeout)
         browser.cancel()
+        return found
+
+    async def async_find_peers(self, timeout: float = 5.0) -> list[DiscoveredNode]:
+        """Async variant of find_peers — yields the loop while waiting."""
+        import asyncio
+        if not self._zeroconf:
+            self.start()
+
+        found: list[DiscoveredNode] = []
+        lock = threading.Lock()
+
+        def on_add(node: DiscoveredNode) -> None:
+            with lock:
+                found.append(node)
+
+        listener = PoolServiceListener(on_add=on_add)
+        browser = ServiceBrowser(self._zeroconf, self._service_type, listener)
+
+        try:
+            await asyncio.sleep(timeout)
+        finally:
+            browser.cancel()
         return found
 
     @property
