@@ -88,9 +88,20 @@ class PoolServiceListener(ServiceListener):
 
     def _parse_service_info(self, info: ServiceInfo) -> Optional[DiscoveredNode]:
         try:
-            if info.addresses:
-                ip_address = socket.inet_ntoa(info.addresses[0])
-            else:
+            if not info.addresses:
+                return None
+            # Pick the first parseable address. inet_ntoa rejects IPv6
+            # (16-byte) entries — fall through to inet_ntop. Skip any
+            # malformed address rather than failing the whole record.
+            ip_address: Optional[str] = None
+            for raw in info.addresses:
+                if len(raw) == 4:
+                    ip_address = socket.inet_ntop(socket.AF_INET, raw)
+                    break
+                if len(raw) == 16:
+                    ip_address = socket.inet_ntop(socket.AF_INET6, raw)
+                    break
+            if ip_address is None:
                 return None
 
             props = info.properties
