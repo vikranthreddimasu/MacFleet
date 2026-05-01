@@ -162,20 +162,41 @@ class DataParallel:
     async def _validate_model_consistency(self) -> None:
         """Verify all nodes have the same model architecture.
 
-        AllReduces param counts — if any node has a different count,
-        the sum won't equal count * world_size, and we raise immediately
-        rather than silently corrupting gradients later.
+        Gathers param counts from every rank — if any disagree, raise
+        with the per-rank breakdown so the user can see WHICH node
+        loaded the wrong model. Falls back to allreduce-sum if gather
+        is unavailable for any reason (so the original cheap check
+        still fires).
         """
         local_count = len(self.engine.get_flat_parameters())
         count_array = np.array([local_count], dtype=np.float64)
+
+        try:
+            gathered = await self.group.gather(count_array, dst=0)
+        except Exception:
+            gathered = None
+
+        if self.rank == 0 and gathered is not None:
+            counts = [int(gathered[r][0]) for r in range(self.world_size)]
+            if len(set(counts)) > 1:
+                breakdown = ", ".join(
+                    f"rank{r}={c}" for r, c in enumerate(counts)
+                )
+                raise RuntimeError(
+                    f"Model architecture mismatch across ranks: {breakdown}. "
+                    "All nodes must load the same model."
+                )
+
+        # Cheaper sum check that every rank can run; catches the case
+        # where gather isn't reachable but counts still disagree.
         summed = await self.group.allreduce(count_array, op="sum")
         expected = local_count * self.world_size
-
         if int(summed[0]) != expected:
             raise RuntimeError(
-                f"Model architecture mismatch: this node has {local_count} parameters, "
-                f"but the fleet total is {int(summed[0])} (expected {expected} for "
-                f"{self.world_size} identical nodes). All nodes must load the same model."
+                f"Model architecture mismatch: this node (rank {self.rank}) has "
+                f"{local_count} parameters, but the fleet total is {int(summed[0])} "
+                f"(expected {expected} for {self.world_size} identical nodes). "
+                f"All nodes must load the same model."
             )
 
     async def sync_gradients(self) -> float:
