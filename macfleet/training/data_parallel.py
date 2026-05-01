@@ -173,9 +173,15 @@ class DataParallel:
         count_array = np.array([local_count], dtype=np.float64)
 
         # Step 1: gather counts to rank 0 (every rank participates).
+        # Bound with a short timeout so a hung peer can't block the
+        # whole validation. The richer per-rank breakdown is a "nice to
+        # have"; the cheaper allreduce-sum still catches the mismatch
+        # if gather can't finish in time.
         try:
-            gathered = await self.group.gather(count_array, dst=0)
-        except Exception:
+            gathered = await asyncio.wait_for(
+                self.group.gather(count_array, dst=0), timeout=10.0,
+            )
+        except (asyncio.TimeoutError, Exception):
             gathered = None
 
         # Step 2: allreduce-sum (every rank participates BEFORE any raise).
