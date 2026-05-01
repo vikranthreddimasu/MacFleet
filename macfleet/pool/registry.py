@@ -147,19 +147,37 @@ class ClusterRegistry:
     ) -> None:
         """Atomically swap a peer's hardware profile and re-elect.
 
-        Used by the gossip HW refresh path so multiple writers can't tear
-        the (hardware, data_port) pair under concurrent reads. Preserves
-        the current thermal_pressure (registry tracks live state) and
-        re-runs coordinator election under the same lock acquisition.
+        Replaces the entire NodeRecord in self._nodes rather than mutating
+        fields on the existing object. Holders of stale references (e.g.
+        a reader iterating alive_nodes from before the swap) see a
+        consistent OLD state; subsequent get_node calls return the new
+        state. Field-level mutation would let a reader observe
+        (new_hardware, old_data_port) — the failure mode the stress
+        test caught.
         """
         with self._lock:
-            record = self._nodes.get(node_id)
-            if record is None:
+            old = self._nodes.get(node_id)
+            if old is None:
                 return
-            new_hw.thermal_pressure = record.hardware.thermal_pressure
-            record.hardware = new_hw
-            if new_data_port is not None and 0 < new_data_port < 65536:
-                record.data_port = new_data_port
+            new_hw.thermal_pressure = old.hardware.thermal_pressure
+            chosen_data_port = (
+                new_data_port
+                if new_data_port is not None and 0 < new_data_port < 65536
+                else old.data_port
+            )
+            self._nodes[node_id] = NodeRecord(
+                node_id=old.node_id,
+                hostname=old.hostname,
+                ip_address=old.ip_address,
+                port=old.port,
+                data_port=chosen_data_port,
+                hardware=new_hw,
+                status=old.status,
+                joined_at=old.joined_at,
+                last_heartbeat=old.last_heartbeat,
+                throughput_samples_sec=old.throughput_samples_sec,
+                current_weight=old.current_weight,
+            )
             self._elect_coordinator_locked()
 
     def get_node(self, node_id: str) -> Optional[NodeRecord]:
