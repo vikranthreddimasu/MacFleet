@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Optional
 
 from macfleet.comm.protocol import MessageType
 from macfleet.comm.transport import PeerTransport
@@ -122,8 +122,14 @@ class TaskDispatcher:
         spec = TaskSpec.from_call(fn, args, kwargs, timeout=timeout)
         future = TaskFuture(task_id=spec.task_id)
 
-        worker_id = self._workers[self._next_worker % len(self._workers)]
-        self._next_worker += 1
+        worker_id = self._pick_live_worker()
+        if worker_id is None:
+            from macfleet.compute.models import TaskResult
+            future.set_result(TaskResult(
+                task_id=spec.task_id, ok=False,
+                error="no live workers (all known workers are disconnected)",
+            ))
+            return future
 
         # Record the assignment BEFORE the send so that a send-side
         # failure can be cleaned up by callers if needed.
@@ -139,6 +145,21 @@ class TaskDispatcher:
             return future
         logger.debug("Dispatched task %s to %s", spec.task_id[:8], worker_id)
         return future
+
+    def _pick_live_worker(self) -> Optional[str]:
+        """Round-robin to the next worker with an active transport connection.
+
+        Skips entries in self._workers that no longer have a live
+        PeerConnection so a dead peer doesn't immediately strand the task.
+        Returns None when all workers are dead.
+        """
+        n = len(self._workers)
+        for _ in range(n):
+            candidate = self._workers[self._next_worker % n]
+            self._next_worker += 1
+            if self._transport.get_connection(candidate) is not None:
+                return candidate
+        return None
 
     async def map(
         self,
