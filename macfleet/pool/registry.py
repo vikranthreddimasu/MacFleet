@@ -31,8 +31,11 @@ class NodeRecord:
     hardware: HardwareProfile
     data_port: int = 0  # 0 = derive as port + 1 (backward compat)
     status: NodeStatus = NodeStatus.ALIVE
+    # joined_at is wall-clock (for display / external timestamps),
+    # last_heartbeat is monotonic (compared against time.monotonic()
+    # in liveness arithmetic — must not jump on NTP slews).
     joined_at: float = field(default_factory=time.time)
-    last_heartbeat: float = field(default_factory=time.time)
+    last_heartbeat: float = field(default_factory=time.monotonic)
     throughput_samples_sec: float = 0.0
     current_weight: float = 0.0  # assigned by scheduler
 
@@ -119,7 +122,9 @@ class ClusterRegistry:
         with self._lock:
             if node_id in self._nodes:
                 self._nodes[node_id].status = NodeStatus.ALIVE
-                self._nodes[node_id].last_heartbeat = time.time()
+                # Use monotonic to match GossipHeartbeat — wall-clock
+                # NTP slews can otherwise produce negative deltas.
+                self._nodes[node_id].last_heartbeat = time.monotonic()
         self._elect_coordinator()
 
     def update_throughput(self, node_id: str, throughput: float) -> None:
