@@ -124,3 +124,5 @@ class TestAtomicWriteVia:
 
         # old file intact
         assert target.read_bytes() == b"KEEP ME"
+        # partial temp file must not be left behind
+        assert not (tmp_path / "model.pt.tmp").exists()

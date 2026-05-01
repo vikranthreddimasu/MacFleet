@@ -70,10 +70,9 @@ def atomic_write_bytes(
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
-    except OSError:
-        # Clean up the temp file on failure (best effort — caller still
-        # gets the raised exception). If the cleanup fails, re-raise
-        # the original error, not the cleanup one.
+    except BaseException:
+        # Clean up the temp file on any failure (KeyboardInterrupt,
+        # MemoryError, etc.) so a retry doesn't load partial data.
         try:
             if tmp.exists():
                 tmp.unlink()
@@ -116,7 +115,10 @@ def atomic_write_via(
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
-    except OSError:
+    except BaseException:
+        # User writer can raise anything (PicklingError, RuntimeError,
+        # MemoryError, KeyboardInterrupt). Always remove the partial temp
+        # so a retry doesn't load it.
         try:
             if tmp.exists():
                 tmp.unlink()
