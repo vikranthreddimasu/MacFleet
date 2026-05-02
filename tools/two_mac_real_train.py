@@ -51,11 +51,13 @@ PEER_IP = os.environ.get("PEER_IP", "")
 WORLD_SIZE = 2
 
 # Sized so each Mac runs ~60-90s wall clock on a phone-hotspot link.
-EPOCHS = 12
-N_SAMPLES = 8000
+# Bumped epochs+model size after observing a 22s run on M4 hardware.
+EPOCHS = 30
+N_SAMPLES = 12000
+TEST_SAMPLES = 3000
 BATCH_SIZE = 64
 INPUT_DIM = 32
-HIDDEN = 128
+HIDDEN = 192
 N_CLASSES = 8
 
 CONFIG = TransportConfig(connect_timeout_sec=15.0, recv_timeout_sec=60.0)
@@ -76,10 +78,32 @@ class Classifier(nn.Module):
         return self.fc3(x)
 
 
+# Cluster centers are generated ONCE from a fixed seed. Train + test
+# splits draw fresh samples around the SAME centers, so the test set
+# is genuinely held-out (not seen during training) but lives in the
+# same distribution the model was trained on. Earlier version used
+# different center seeds — train hit 100% but test was ~3% because
+# the test distribution was a totally different problem.
+_CENTER_SEED = 4242
+_centers_cache = {}
+
+
+def _get_centers() -> torch.Tensor:
+    if "centers" not in _centers_cache:
+        g = torch.Generator().manual_seed(_CENTER_SEED)
+        _centers_cache["centers"] = torch.randn(N_CLASSES, INPUT_DIM, generator=g) * 2.5
+    return _centers_cache["centers"]
+
+
 def make_dataset(n_samples: int, seed: int) -> TensorDataset:
-    """Synthetic Gaussian-mixture classification — visibly separable."""
+    """Synthetic Gaussian-mixture classification — visibly separable.
+
+    Same cluster centers across train/test splits; only sample noise
+    differs. Ensures a held-out test set actually evaluates generalization
+    on the trained distribution.
+    """
     g = torch.Generator().manual_seed(seed)
-    centers = torch.randn(N_CLASSES, INPUT_DIM, generator=g) * 2.5
+    centers = _get_centers()
     per_class = n_samples // N_CLASSES
     X = torch.zeros(per_class * N_CLASSES, INPUT_DIM)
     y = torch.zeros(per_class * N_CLASSES, dtype=torch.long)
@@ -142,7 +166,8 @@ async def main() -> None:
     )
     train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, sampler=sampler)
 
-    test_set = make_dataset(2000, seed=99)
+    # Same cluster centers as train — fresh samples — proper held-out set.
+    test_set = make_dataset(TEST_SAMPLES, seed=999)
     test_loader = DataLoader(test_set, batch_size=128, shuffle=False)
 
     print(
