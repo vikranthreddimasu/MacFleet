@@ -33,7 +33,6 @@ import os
 import sys
 import time
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -129,7 +128,7 @@ async def main() -> None:
         print(f"[rank 0] listening on 0.0.0.0:{PORT} — waiting for rank 1...")
         while transport.connection_count < 1:
             await asyncio.sleep(0.5)
-        print(f"[rank 0] rank 1 connected — starting training")
+        print("[rank 0] rank 1 connected — starting training")
         rank_to_peer = {1: "node-1"}
         peer_id = "node-1"
     else:

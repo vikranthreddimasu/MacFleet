@@ -11,12 +11,10 @@ from __future__ import annotations
 
 import random
 import threading
-import time
 
 import pytest
 
 from macfleet.engines.base import HardwareProfile, ThermalPressure
-from macfleet.pool.heartbeat import NodeStatus
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
 
 

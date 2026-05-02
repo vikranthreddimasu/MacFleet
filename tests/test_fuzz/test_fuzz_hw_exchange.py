@@ -11,11 +11,11 @@ from __future__ import annotations
 import json
 
 import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from macfleet.comm.transport import HardwareExchange
 from macfleet.security.auth import HandshakeHwValidationError
-
 
 json_scalar = st.one_of(
     st.none(),

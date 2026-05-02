@@ -34,7 +34,6 @@ import hashlib
 import os
 import sys
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -68,12 +67,12 @@ async def main() -> None:
         # Block until rank 1 connects
         while transport.connection_count < 1:
             await asyncio.sleep(0.5)
-        print(f"[rank 0] rank 1 connected — starting training")
+        print("[rank 0] rank 1 connected — starting training")
         rank_to_peer = {1: "node-1"}
     else:
         print(f"[rank 1] connecting to {PEER_IP}:{PORT}...")
         await transport.connect("node-0", PEER_IP, PORT)
-        print(f"[rank 1] connected — starting training")
+        print("[rank 1] connected — starting training")
         rank_to_peer = {0: "node-0"}
 
     group = CollectiveGroup(

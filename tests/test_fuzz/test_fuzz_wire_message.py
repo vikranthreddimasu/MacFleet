@@ -16,7 +16,8 @@ import struct
 import zlib
 
 import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from macfleet.comm.protocol import (
     HEADER_FORMAT,

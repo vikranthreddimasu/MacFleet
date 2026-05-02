@@ -39,7 +39,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import TensorDataset
 
 # Configure logging BEFORE importing macfleet so its loggers inherit our level
 _LOG_LEVEL = os.environ.get("MACFLEET_LOG", "INFO").upper()
@@ -158,7 +158,7 @@ async def main() -> None:
         print(f"[rank 0] listening on 0.0.0.0:{PORT} — waiting for rank 1...")
         while transport.connection_count < 1:
             await asyncio.sleep(0.5)
-        print(f"[rank 0] rank 1 connected")
+        print("[rank 0] rank 1 connected")
         rank_to_peer = {1: "node-1"}
         peer_id = "node-1"
     else:
@@ -304,7 +304,7 @@ async def main() -> None:
     print(f"[rank {RANK}] steps logged: {global_step}")
     print(f"[rank {RANK}] wall-clock: {time.monotonic() - train_start:.1f}s")
     print(f"[rank {RANK}] copy this file to a single Mac then run:")
-    print(f"    python3 tools/compare_traces.py macfleet_trace_rank0.jsonl macfleet_trace_rank1.jsonl")
+    print("    python3 tools/compare_traces.py macfleet_trace_rank0.jsonl macfleet_trace_rank1.jsonl")
 
     await transport.disconnect_all()
 

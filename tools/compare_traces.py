@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 
 
 def load_trace(path: str) -> tuple[dict, list[dict], dict]:
@@ -70,7 +69,7 @@ def main() -> int:
         print(f"ERROR: {path1} is rank {h1['rank']}, expected 1")
         return 1
 
-    print(f"=== TRACE COMPARISON ===")
+    print("=== TRACE COMPARISON ===")
     print(f"  rank 0 file: {path0}  ({len(steps0)} step records)")
     print(f"  rank 1 file: {path1}  ({len(steps1)} step records)")
     print()

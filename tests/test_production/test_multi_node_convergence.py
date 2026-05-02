@@ -14,15 +14,18 @@ import asyncio
 
 import numpy as np
 import pytest
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 
-from macfleet.comm.collectives import CollectiveGroup
-from macfleet.comm.transport import PeerTransport, TransportConfig
-from macfleet.engines.torch_engine import TorchEngine
-from macfleet.training.data_parallel import DataParallel
-from macfleet.training.sampler import WeightedDistributedSampler
+torch = pytest.importorskip("torch", reason="torch not installed")
+nn = pytest.importorskip("torch.nn")
+_torch_data = pytest.importorskip("torch.utils.data")
+DataLoader = _torch_data.DataLoader
+TensorDataset = _torch_data.TensorDataset
+
+from macfleet.comm.collectives import CollectiveGroup  # noqa: E402
+from macfleet.comm.transport import PeerTransport, TransportConfig  # noqa: E402
+from macfleet.engines.torch_engine import TorchEngine  # noqa: E402
+from macfleet.training.data_parallel import DataParallel  # noqa: E402
+from macfleet.training.sampler import WeightedDistributedSampler  # noqa: E402
 
 CONFIG = TransportConfig(connect_timeout_sec=5.0, recv_timeout_sec=20.0)
 

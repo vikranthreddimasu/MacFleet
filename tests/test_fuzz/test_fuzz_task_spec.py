@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import msgpack
 import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from macfleet import task
 from macfleet.compute.models import (
@@ -22,7 +23,6 @@ from macfleet.compute.models import (
     TaskResult,
     TaskSpec,
 )
-
 
 # -----------------------------------------------------------------
 # Strategies: msgpack-native primitives + nested containers

@@ -19,7 +19,7 @@ import struct
 
 import pytest
 
-from macfleet.comm.protocol import HEADER_FORMAT, MessageFlags, MessageType, WireMessage
+from macfleet.comm.protocol import HEADER_FORMAT, MessageFlags, MessageType
 from macfleet.comm.transport import HardwareExchange, PeerTransport, TransportConfig
 from macfleet.pool.agent import HEARTBEAT_READ_TIMEOUT_SEC, PoolAgent
 from macfleet.security.auth import (
@@ -275,7 +275,7 @@ class TestOversizePayloadDoS:
 
         # Server should drop the connection without allocating 1 GB.
         try:
-            data = await asyncio.wait_for(reader.read(1024), timeout=2.0)
+            await asyncio.wait_for(reader.read(1024), timeout=2.0)
         except (asyncio.TimeoutError, asyncio.IncompleteReadError):
             pass
         writer.close()

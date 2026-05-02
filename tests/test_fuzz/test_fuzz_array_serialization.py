@@ -10,8 +10,8 @@ from __future__ import annotations
 import struct
 
 import numpy as np
-import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from hypothesis.extra.numpy import array_shapes, arrays
 
 from macfleet.comm.collectives import pack_array, unpack_array

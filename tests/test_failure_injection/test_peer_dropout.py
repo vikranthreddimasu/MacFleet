@@ -14,13 +14,14 @@ import asyncio
 
 import numpy as np
 import pytest
-import torch
-import torch.nn as nn
 
-from macfleet.comm.collectives import CollectiveGroup
-from macfleet.comm.transport import PeerTransport, TransportConfig
-from macfleet.engines.torch_engine import TorchEngine
-from macfleet.training.data_parallel import DataParallel
+torch = pytest.importorskip("torch", reason="torch not installed")
+nn = pytest.importorskip("torch.nn")
+
+from macfleet.comm.collectives import CollectiveGroup  # noqa: E402
+from macfleet.comm.transport import PeerTransport, TransportConfig  # noqa: E402
+from macfleet.engines.torch_engine import TorchEngine  # noqa: E402
+from macfleet.training.data_parallel import DataParallel  # noqa: E402
 
 CONFIG = TransportConfig(connect_timeout_sec=2.0, recv_timeout_sec=3.0)
 
@@ -175,7 +176,7 @@ class TestGracefulCleanupAfterDropout:
         n = 3
         transports, _ = await _setup_mesh(n)
         try:
-            groups = _make_groups(n, transports)
+            _make_groups(n, transports)
 
             # Kill rank 2.
             await transports[2].disconnect_all()

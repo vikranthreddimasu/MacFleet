@@ -10,10 +10,10 @@ from __future__ import annotations
 import asyncio
 import gc
 import os
+import resource
 
 import numpy as np
 import pytest
-import resource
 
 from macfleet.comm.collectives import CollectiveGroup
 from macfleet.comm.transport import PeerTransport, TransportConfig
