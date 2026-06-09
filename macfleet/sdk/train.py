@@ -12,12 +12,15 @@ def train(
     epochs: int = 10,
     batch_size: int = 128,
     engine: str = "torch",
-    compression: str = "adaptive",
+    compression: str = "none",
     **kwargs: Any,
 ) -> dict:
     """Train a model on the MacFleet pool.
 
-    Convenience wrapper that creates a Pool, joins, and trains.
+    Convenience wrapper that creates a Pool, joins, and trains single-node on
+    this Mac's best device. Multi-node data-parallel training (where
+    `compression` applies) is available via the programmatic API; see
+    docs/guides/train.md.
 
     Args:
         model: PyTorch nn.Module or MLX model.
@@ -25,7 +28,8 @@ def train(
         epochs: Number of training epochs.
         batch_size: Global batch size.
         engine: Engine type ("torch" or "mlx").
-        compression: Compression type.
+        compression: Gradient compression — only applies to the multi-node
+            DataParallel path; ignored by single-node training.
 
     Returns:
         Dict with training results: {loss, loss_history, epochs, time_sec, steps}.

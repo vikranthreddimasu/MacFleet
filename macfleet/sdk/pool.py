@@ -306,16 +306,18 @@ class Pool:
         loss_fn: Any = None,
         engine: Optional[str] = None,
         compression: str = "none",
+        device: str = "auto",
         **kwargs: Any,
     ) -> dict:
         """Train a model on the pool.
 
-        Handles engine setup, data loading, gradient sync, and training.
-        Currently supports single-node training directly and multi-node
-        via the Python programmatic API.
+        Handles engine setup, data loading, and the training loop. This runs
+        **single-node** (on this Mac's best device). Multi-node data-parallel
+        training is available via the programmatic API (PeerTransport +
+        CollectiveGroup + DataParallel); see docs/guides/train.md.
 
         Args:
-            model: PyTorch nn.Module (or MLX model in Phase 2).
+            model: PyTorch nn.Module (or MLX model).
             dataset: PyTorch Dataset or (X, y) tuple.
             epochs: Number of training epochs.
             batch_size: Global batch size.
@@ -323,7 +325,11 @@ class Pool:
             optimizer: Pre-configured optimizer (optional).
             loss_fn: Loss function (optional, defaults to model output).
             engine: Override engine type.
-            compression: Compression type.
+            compression: Gradient compression — only applies to the multi-node
+                DataParallel path; ignored by this single-node trainer.
+            device: Torch device ("auto", "mps", "cpu"). "auto" picks the
+                Apple Silicon GPU (MPS) when available. Ignored by the MLX
+                engine (unified memory).
 
         Returns:
             Dict with training results:
@@ -336,6 +342,23 @@ class Pool:
         if engine_type not in ("torch", "mlx"):
             raise ValueError(
                 f"Engine '{engine_type}' not supported. Use 'torch' or 'mlx'."
+            )
+
+        # Reality check: Pool.train is single-node. If the user paired Macs and
+        # expects gradient sync, say so loudly instead of silently training on
+        # one node — that mismatch is the most common source of confusion.
+        if self.is_distributed and self.world_size > 1:
+            console.print(
+                f"[yellow]Note:[/yellow] Pool.train() runs single-node; the "
+                f"{self.world_size} pool nodes will NOT share gradients. For "
+                "multi-node data-parallel training use the programmatic API "
+                "(see docs/guides/train.md)."
+            )
+        if compression not in (None, "none"):
+            console.print(
+                f"[yellow]Note:[/yellow] compression='{compression}' is ignored "
+                "by single-node Pool.train(); it only applies to the multi-node "
+                "DataParallel path."
             )
 
         # A4 preflight: reject empty / undersized datasets before we bring up
@@ -358,7 +381,8 @@ class Pool:
 
         if engine_type == "torch":
             return self._train_torch(
-                model, dataset, epochs, batch_size, lr, optimizer, loss_fn, **kwargs
+                model, dataset, epochs, batch_size, lr, optimizer, loss_fn,
+                device=device, **kwargs
             )
         return self._train_mlx(
             model, dataset, epochs, batch_size, lr, optimizer, loss_fn, **kwargs
@@ -373,6 +397,7 @@ class Pool:
         lr: float,
         optimizer: Any,
         loss_fn: Any,
+        device: str = "auto",
         **kwargs: Any,
     ) -> dict:
         """Single-node PyTorch training (multi-node via DataParallel in programmatic API)."""
@@ -381,7 +406,8 @@ class Pool:
 
         from macfleet.engines.torch_engine import TorchEngine
 
-        engine = TorchEngine(device="cpu")
+        engine = TorchEngine(device=device)
+        dev = engine.device
 
         # Setup optimizer
         if optimizer is None:
@@ -413,17 +439,14 @@ class Pool:
                 if loss_fn is not None:
                     # Separate input/target batches
                     if len(batch) >= 2:
-                        inputs, targets = batch[0], batch[1]
+                        inputs, targets = batch[0].to(dev), batch[1].to(dev)
                         outputs = model(inputs)
                         loss = loss_fn(outputs, targets)
                     else:
-                        loss = loss_fn(model(batch[0]))
+                        loss = loss_fn(model(batch[0].to(dev)))
                 else:
                     # Model returns loss directly
-                    if len(batch) >= 2:
-                        loss = model(batch[0]).sum()
-                    else:
-                        loss = model(batch[0]).sum()
+                    loss = model(batch[0].to(dev)).sum()
 
                 engine.backward(loss)
                 engine.step()

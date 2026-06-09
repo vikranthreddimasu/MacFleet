@@ -11,14 +11,15 @@ from typing import Any, Callable
 
 def distributed(
     engine: str = "torch",
-    compression: str = "adaptive",
+    compression: str = "none",
     **pool_kwargs: Any,
 ) -> Callable:
     """Decorator to run a training function on the MacFleet pool.
 
     Args:
         engine: Engine type ("torch" or "mlx").
-        compression: Compression type.
+        compression: Gradient compression — only applies to the multi-node
+            DataParallel path; ignored by single-node training.
     """
     def decorator(func: Callable) -> Callable:
         @wraps(func)
