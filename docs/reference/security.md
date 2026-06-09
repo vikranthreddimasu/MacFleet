@@ -11,12 +11,22 @@ is that an attacker on the same LAN can:
 - **See all mDNS broadcasts** — so we scope the service type by
   fleet hash (see [Fleet isolation](#fleet-isolation))
 - **Send arbitrary TCP packets to advertised ports** — so every
-  handshake requires HMAC proof of the fleet token (see [Authentication](#authentication))
+  handshake requires HMAC proof of the fleet token IN THE FIRST
+  MESSAGE; a secure server sends nothing — not even an HMAC response —
+  to an unauthenticated connector (see [Authentication](#authentication))
 - **Record TLS sessions and replay them** — so we use mandatory TLS
   (self-signed EC P-256, rotated per session) + nonces on every
-  heartbeat + handshake
+  heartbeat + handshake, and heartbeat responses are bound to the
+  request nonce
+- **Actively MITM connections (ARP spoofing, TLS termination)** — so
+  every handshake HMAC is bound to the server's TLS certificate
+  fingerprint; an attacker relaying the handshake through its own TLS
+  legs produces mismatched digests (see [TLS](#tls))
 - **Try to brute-force the fleet token** — so we rate-limit failed
-  auth attempts per IP with exponential backoff (see [Rate limiting](#rate-limiting))
+  auth attempts per IP with exponential backoff (see
+  [Rate limiting](#rate-limiting)), and the fleet key derives via
+  scrypt (memory-hard), making offline dictionary attacks from a
+  captured handshake expensive
 
 The attacker cannot:
 
@@ -41,35 +51,66 @@ members without the token.
 
 ## Authentication
 
-### HMAC challenge-response (v2.1 baseline)
+### Key derivation (v2.3)
 
-Peer A connects to peer B:
-1. A sends challenge `c_a` (random 32 bytes)
-2. B responds with `HMAC(fleet_key, c_a)` + its own challenge `c_b`
-3. A verifies B's response, sends `HMAC(fleet_key, c_b)`
-4. B verifies A's response
+The fleet key is `scrypt(token, salt="macfleet-v3:"+fleet_id, n=2^14,
+r=8, p=1)` — memory-hard, ~50 ms one-time cost at startup. An attacker
+who captures a full handshake can attempt offline guesses against it,
+but each guess costs ~16 MB of memory and ~50 ms; GPU farms don't help
+the way they do against plain HMAC-SHA256. The auto-generated token
+(64 random hex chars) is beyond any offline attack regardless; the KDF
+exists to protect human-chosen tokens. Tokens shorter than 16 chars log
+a warning.
 
-Both sides now have mutual proof of token possession without either
-side sending the token itself.
+### Handshake v3 (client proves first, v2.3)
+
+Peer A connects to peer B over TLS:
+
+1. A sends `node_id || c_a || proof` where `proof =
+   HMAC(fleet_key, label_C1 || node_id || ':' || c_a || cert_fp)` and
+   `cert_fp` is the SHA-256 of B's TLS certificate as A sees it.
+2. B verifies `proof` FIRST. On failure B closes the connection
+   without sending a byte — no HMAC response, no hardware profile.
+   (Before v2.3, B answered any connector with
+   `HMAC(fleet_key, attacker_chosen_challenge)` plus its signed HW
+   profile: a free offline brute-force oracle and hardware recon.)
+3. B responds with `HMAC(fleet_key, label_S || c_a || cert_fp)` + its
+   own challenge `c_b` + its signed HW profile.
+4. A verifies, sends `HMAC(fleet_key, label_C2 || c_b || cert_fp)` +
+   its signed HW profile.
+5. B verifies.
+
+Every digest carries a distinct domain-separation label (a step-2
+digest can't be replayed as a step-4 digest) and the TLS cert
+fingerprint (see [TLS](#tls)). Replaying a captured hello yields only
+the byte-identical ACK the attacker already has — completing the
+handshake requires answering the fresh `c_b`.
+
+**Version compatibility:** secure fleets require every node on the
+same MacFleet version (>= 2.3). Pre-v2.3 secure hellos carry no proof
+and are rejected — answering them would reopen the oracle.
 
 ### HW profile exchange (v2.2 PR 4 addition)
 
 Piggy-backed on the handshake: both sides also send a signed hardware
 profile (GPU cores, RAM, chip name, MPS/MLX availability, data port).
 The signature binds the profile to the peer's challenge, so the payload
-can't be replayed from a previous session.
+can't be replayed from a previous session. Since v2.3 it is only ever
+sent to peers that have already proven token knowledge.
 
-A separate wire version byte lets v2.1 and v2.2 peers coexist — if
-a v2.2 server sees a v2.1 client, it falls back to the bare handshake.
+### Authenticated heartbeat
 
-### APING v2 heartbeat (v2.2 PR 5 addition)
-
-Heartbeat pings now carry the same signed HW profile (Issue 6):
+Heartbeat pings carry a signed HW profile (Issue 6):
 
 ```
-APING v1 (4 fields): APING {node_id} {nonce_hex} {sig_hex}
-APING v2 (5 fields): APING {node_id} {nonce_hex} {sig_hex} {hw_json_hex}
+APING (4 fields): APING {node_id} {nonce_hex} {sig_hex}
+APING (5 fields): APING {node_id} {nonce_hex} {sig_hex} {hw_json_hex}
 ```
+
+The client signs first (the responder never answers unauthenticated
+pings), and since v2.3 the APONG response signature is bound to the
+REQUEST nonce — a captured APONG cannot be replayed as the answer to
+any later APING.
 
 This is what makes `--peer host:port` work correctly — a manually-added
 peer no longer registers with a zero-score placeholder; the APONG v2
@@ -85,10 +126,15 @@ TLS is mandatory. The cert is:
 - Ephemeral temp file written with mode 0o600 + `try/finally` unlink
 - CN = `localhost`, SAN = `DNS:localhost`
 
-**No mutual TLS** — cert validation is disabled. The HMAC challenge-
-response *is* the authentication; TLS only provides confidentiality.
-This is a deliberate choice: self-signed certs with a stable CA would
-require a PKI, and pairing UX would be much more complex.
+**No PKI, but channel-bound** — cert chain validation is disabled
+(self-signed certs with a stable CA would require a PKI and a much
+more complex pairing UX). Instead, every handshake HMAC mixes in the
+SHA-256 fingerprint of the server's certificate as each side sees it
+(v2.3). A MITM that terminates TLS on both legs necessarily shows the
+client a different certificate than the server's own, so the digests
+the two victims compute disagree and the handshake fails on both
+sides. The HMAC challenge-response *is* the authentication; TLS
+provides confidentiality; the fingerprint binding welds them together.
 
 The `--tls` flag on `Pool(token=..., tls=True)` is redundant when
 token is set (forced true); it exists only to document intent.

@@ -365,24 +365,14 @@ class TestTransportBruteForce:
 
         await server.disconnect_all()
 
-    @pytest.mark.xfail(
-        reason=(
-            "Known gap: a v2 client that fails its own HW-suffix verify "
-            "gives up before sending response_b, so the server's "
-            "record_failure paths (lines 462/476/486 of transport.py) "
-            "never fire. The handshake heartbeat protocol DOES record, "
-            "covering the same brute-force vector via a different layer. "
-            "Filed as a future hardening item — tighten the transport "
-            "outer exception handler to record on IncompleteReadError "
-            "after the initial CONTROL message succeeded."
-        ),
-        strict=False,
-    )
     async def test_failure_recorded_per_wrong_token(self):
         """Each wrong-token connection records exactly one failure.
 
-        Currently fails because of the documented gap above. Kept as
-        xfail so the gap stays visible in the test report.
+        Closed by handshake v3: the server verifies the client's hello
+        proof BEFORE responding, so a wrong-token connect hits
+        record_failure immediately (this was an xfail-documented gap when
+        the server answered first and the client gave up before sending
+        response_b).
         """
         sec_correct = SecurityConfig(token="correct-token-very-long-string")
         server = PeerTransport(local_id="server", config=CONFIG, security=sec_correct)

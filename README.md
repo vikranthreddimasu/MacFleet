@@ -64,8 +64,10 @@ python my_macfleet_demo.py
 On Mac #1:
 
 ```bash
-macfleet join --bootstrap
-# prints a QR code + pairing URL, also copies URL to pasteboard
+macfleet join
+# first run auto-generates a fleet token and prints a QR code +
+# pairing URL (also copied to the pasteboard). Use --bootstrap to
+# re-print pairing info later.
 ```
 
 On Mac #2 (same Apple ID → Handoff pasteboard sync):
@@ -94,8 +96,10 @@ Macs when the fleet stayed in sync.
   Issue 3)
 - **Heterogeneous scheduling** — faster Macs get bigger batches,
   adjusts for thermal throttling
-- **Secure by default** — auto-generated fleet tokens, HMAC mutual
-  auth, mandatory TLS, per-IP rate limiting
+- **Secure by default** — auto-generated fleet tokens (scrypt-derived
+  keys), client-first HMAC mutual auth (servers reveal nothing to
+  unauthenticated peers), mandatory TLS with channel-bound handshakes
+  (MITM-relay resistant), per-IP rate limiting
 - **Framework-agnostic core** — communication layer uses only numpy,
   never imports torch or mlx
 

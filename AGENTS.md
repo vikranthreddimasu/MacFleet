@@ -205,6 +205,7 @@ MLX tests auto-skip if MLX is not installed (`pytest.importorskip`).
 - **Compression pipeline split**: `macfleet/compression/pipeline.py` (torch tensors, v1) vs `macfleet/compression/adaptive.py` (numpy arrays, v2). DataParallel uses the numpy-native adaptive compressor.
 - **Distributed Pool.train() is SPMD**: every Mac must run the SAME training script. Each Pool joins the fleet, waits for quorum, then `train()` forms a mesh over the data ports (`macfleet/training/mesh.py`), broadcasts rank 0's weights, and allreduces gradients every step. Ranks come from sorted node_id order (NOT compute_score — score views can transiently disagree across nodes, ids cannot). Equal shards with drop_last keep per-epoch step counts identical on every rank; mismatched step counts would strand the final allreduce.
 - **asyncio everywhere**: Transport, collectives, and heartbeat are all async. Tests use `pytest-asyncio` with `asyncio_mode = "auto"`.
+- **Handshake v3 (v2.3) is client-proves-first**: a secure server must NEVER send bytes (HMAC responses, HW profiles) to a connector that hasn't proven token knowledge — that would reopen the offline brute-force oracle. All handshake HMACs are domain-labeled and bound to the server's TLS cert fingerprint (MITM-relay defense); APONG heartbeat signatures are bound to the request nonce. Fleet keys derive via scrypt. Secure fleets require all nodes on the same version.
 
 ## Don'ts
 

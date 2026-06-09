@@ -36,9 +36,10 @@ from macfleet.security.auth import (
     SecurityConfig,
     create_client_ssl_context,
     create_server_ssl_context,
-    sign_heartbeat,
+    sign_heartbeat_response,
     sign_heartbeat_with_hw,
     verify_heartbeat,
+    verify_heartbeat_response,
     verify_heartbeat_with_hw,
 )
 
@@ -491,9 +492,13 @@ class PoolAgent:
                         return
                     if verify_heartbeat(fleet_key, peer_node_id, nonce, sig):
                         self._heartbeat_rate_limiter.record_success(peer_ip)
-                        # Send authenticated PONG (v2.1 legacy format)
+                        # Send authenticated PONG. v2.3: the response signature
+                        # is bound to the REQUEST nonce, so a captured APONG
+                        # can't be replayed as the answer to a later APING.
                         resp_nonce = secrets_mod.token_bytes(16)
-                        resp_sig = sign_heartbeat(fleet_key, self.node_id, resp_nonce)
+                        resp_sig = sign_heartbeat_response(
+                            fleet_key, self.node_id, resp_nonce, req_nonce=nonce,
+                        )
                         writer.write(
                             f"APONG {self.node_id} {resp_nonce.hex()} {resp_sig.hex()}\n".encode()
                         )
@@ -531,15 +536,18 @@ class PoolAgent:
                         logger.debug("APING v2 auth failed from peer %s", peer_node_id)
                         return
                     self._heartbeat_rate_limiter.record_success(peer_ip)
-                    # Reply with APONG v2 (5-field) carrying local HW
+                    # Reply with APONG v2 (5-field) carrying local HW. The
+                    # signature is bound to the request nonce (v2.3) — replay
+                    # of a stale APONG against a later APING fails.
                     resp_nonce = secrets_mod.token_bytes(16)
                     try:
                         local_hw_json = self._local_hw_exchange().to_json_bytes()
                     except Exception as e:
                         logger.debug("APING v2 reply: local HW serialization failed: %s", e)
                         return
-                    resp_sig = sign_heartbeat_with_hw(
-                        fleet_key, self.node_id, resp_nonce, local_hw_json,
+                    resp_sig = sign_heartbeat_response(
+                        fleet_key, self.node_id, resp_nonce,
+                        req_nonce=nonce, hw_json=local_hw_json,
                     )
                     writer.write(
                         (
@@ -679,12 +687,15 @@ class PoolAgent:
                             f"{len(peer_hw_json)}B exceeds max[/red]"
                         )
                         return
-                    if not verify_heartbeat_with_hw(
-                        fleet_key, peer_node_id, resp_nonce, peer_hw_json, resp_sig,
+                    if not verify_heartbeat_response(
+                        fleet_key, peer_node_id, resp_nonce, nonce, resp_sig,
+                        hw_json=peer_hw_json,
                     ):
                         console.print(
                             f"[red]Peer {peer_addr}: authentication failed "
-                            f"(wrong token?)[/red]"
+                            f"(wrong token, replayed response, or version "
+                            f"mismatch — secure fleets need all nodes on the "
+                            f"same MacFleet version)[/red]"
                         )
                         return
                     try:
@@ -695,19 +706,21 @@ class PoolAgent:
                     if peer_hw.data_port > 0:
                         peer_data_port = peer_hw.data_port
                 elif len(parts) == 4:
-                    # APONG v1: v2.1 peer — fall back to zero-HW placeholder
+                    # APONG without HW — fall back to zero-HW placeholder
                     _, peer_node_id, resp_nonce_hex, resp_sig_hex = parts
-                    if not verify_heartbeat(
+                    if not verify_heartbeat_response(
                         fleet_key, peer_node_id,
-                        bytes.fromhex(resp_nonce_hex), bytes.fromhex(resp_sig_hex),
+                        bytes.fromhex(resp_nonce_hex), nonce,
+                        bytes.fromhex(resp_sig_hex),
                     ):
                         console.print(
                             f"[red]Peer {peer_addr}: authentication failed "
-                            f"(wrong token?)[/red]"
+                            f"(wrong token, replayed response, or version "
+                            f"mismatch)[/red]"
                         )
                         return
                     logger.info(
-                        "Peer %s responded with APONG v1 (no HW) — likely v2.1. "
+                        "Peer %s responded with APONG without HW. "
                         "Registering with zero compute_score.", peer_node_id,
                     )
                 else:

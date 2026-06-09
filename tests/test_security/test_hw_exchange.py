@@ -19,7 +19,6 @@ from macfleet.comm.transport import (
     _peel_hw_suffix,
 )
 from macfleet.security.auth import (
-    CHALLENGE_SIZE,
     HW_HANDSHAKE_MAX_JSON_BYTES,
     HW_HANDSHAKE_WIRE_VERSION,
     HandshakeHwValidationError,
@@ -284,16 +283,16 @@ class TestTransportV2Handshake:
             await client.disconnect_all()
             await server.disconnect_all()
 
-    async def test_v1_client_v2_server_falls_back_gracefully(self):
-        """A v2.1-style client (no HANDSHAKE_V2 flag) can still connect to a v2.2 server.
+    async def test_legacy_v21_client_rejected_by_v3_server(self):
+        """v2.3 security: a pre-v2.3 secure hello (no proof, no v2 flag) is
+        rejected WITHOUT any server response.
 
-        The server logs a warning and skips HW exchange, but the connection
-        succeeds so mixed-version fleets stay connected during upgrade rollout.
-
-        Secure mode forces TLS, so this test has to speak TLS to the server
-        while hand-rolling the v2.1-style plaintext handshake payload.
+        Before v2.3 the server answered such hellos with
+        HMAC(fleet_key, attacker_chosen_challenge) plus its signed HW
+        profile — a free offline brute-force oracle. Now the server must
+        close silently and the peer must not register.
         """
-        from macfleet.security.auth import compute_response, create_client_ssl_context
+        from macfleet.security.auth import create_client_ssl_context
 
         sec = SecurityConfig(token="fleet-token-long-enough")
         server = PeerTransport(local_id="server", config=CONFIG, security=sec)
@@ -301,8 +300,8 @@ class TestTransportV2Handshake:
         port = server._server.sockets[0].getsockname()[1]
 
         try:
-            # Hand-roll a v2.1-style client handshake: no HANDSHAKE_V2 flag.
-            # Use TLS since SecurityConfig forced tls=True on the server.
+            # Hand-roll a v2.1-style client handshake: node_id + challenge,
+            # no proof, no HANDSHAKE_V2 flag. TLS because the server has it.
             ssl_ctx = create_client_ssl_context()
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", port, ssl=ssl_ctx,
@@ -316,26 +315,13 @@ class TestTransportV2Handshake:
             writer.write(msg.pack())
             await writer.drain()
 
-            # Server ACK (legacy format — no HW suffix)
-            ack = await asyncio.wait_for(WireMessage.read_from_stream(reader), timeout=2.0)
-            assert ack.flags == MessageFlags.NONE, "server should reply with v1 flags"
-            # ACK base: server_id + response_a(32) + challenge_b(32)
-            assert len(ack.payload) >= 64 + 1
-            challenge_b = ack.payload[-CHALLENGE_SIZE:]
-
-            # Send v2.1-style RESP: just response_b
-            response_b = compute_response(sec.fleet_key, challenge_b)
-            resp = WireMessage(
-                stream_id=0, msg_type=MessageType.CONTROL, flags=MessageFlags.NONE,
-                sequence=0, payload=response_b,
+            # Server must close without sending a single byte.
+            data = await asyncio.wait_for(reader.read(1024), timeout=3.0)
+            assert data == b"", (
+                f"secure server must stay silent to proof-less hellos, "
+                f"sent {len(data)} bytes"
             )
-            writer.write(resp.pack())
-            await writer.drain()
-            await asyncio.sleep(0.1)
-
-            # Server accepts the connection without HW
-            assert "legacy-client" in server.peer_ids
-            assert server.get_connection("legacy-client").peer_hw is None
+            assert "legacy-client" not in server.peer_ids
 
             try:
                 writer.close()

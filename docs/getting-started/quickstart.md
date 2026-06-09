@@ -45,10 +45,12 @@ Good baseline.
 ### Mac #1 — the first on the fleet
 
 ```bash
-macfleet join --bootstrap
+macfleet join
 ```
 
-That starts the agent and prints a QR code:
+The first run auto-generates a fleet token, starts the agent, and
+prints a QR code (later runs reuse the saved token; pass `--bootstrap`
+to re-print pairing info):
 
 ```
 Fleet pairing URL: macfleet://pair?token=...&fleet=default

@@ -131,7 +131,13 @@ class TestAPingV2ServerHandler:
         resp_nonce = bytes.fromhex(resp_nonce_hex)
         resp_sig = bytes.fromhex(resp_sig_hex)
         peer_hw_json = bytes.fromhex(peer_hw_hex)
-        assert verify_heartbeat_with_hw(
+        # v2.3: the APONG signature is bound to OUR request nonce.
+        from macfleet.security.auth import verify_heartbeat_response
+        assert verify_heartbeat_response(
+            fleet_key, peer_id, resp_nonce, nonce, resp_sig, hw_json=peer_hw_json,
+        )
+        # An unbound (pre-v2.3) verification must NOT accept it.
+        assert not verify_heartbeat_with_hw(
             fleet_key, peer_id, resp_nonce, peer_hw_json, resp_sig,
         )
         peer_hw = HardwareExchange.from_json_bytes(peer_hw_json)
@@ -357,37 +363,26 @@ class TestAddManualPeerCapabilityExchange:
         bob_server.close()
         await bob_server.wait_closed()
 
-    async def test_manual_peer_falls_back_when_bob_is_v2_1(self):
-        """If Bob responds with 4-field APONG v1, Alice registers zero-HW placeholder."""
-        from macfleet.security.auth import sign_heartbeat
+    async def test_manual_peer_accepts_request_bound_apong_without_hw(self):
+        """A 4-field APONG with a request-bound signature registers a zero-HW
+        placeholder (HW arrives later via gossip)."""
+        from macfleet.security.auth import sign_heartbeat_response
 
         sec = SecurityConfig(token="fleet-token")
         fleet_key = sec.fleet_key
 
-        # Fake v2.1 Bob: only understands 4-field APING
-        async def v2_1_bob(reader, writer):
+        # Bob answers the (5-field) APING with a 4-field APONG whose
+        # signature is correctly bound to Alice's request nonce.
+        async def hw_less_bob(reader, writer):
             data = await asyncio.wait_for(reader.readline(), timeout=2.0)
             if data.startswith(b"APING"):
                 parts = data.decode().strip().split(" ")
-                # v2.1 server: only accepts 4-field, silently drops 5-field as
-                # "unknown format" and responds v1 when it sees 4-field.
-                # We simulate the worst case: Bob doesn't parse the 5-field
-                # ping at all, but for the sake of testing Alice's fallback
-                # path we emulate a Bob that IS on v2.1 and trims to 4 fields.
                 if len(parts) >= 4:
-                    peer_id = parts[1]
-                    nonce = bytes.fromhex(parts[2])
-                    sig_bytes = bytes.fromhex(parts[3])
-                    # v2.1 Bob would verify without HW — which won't match our
-                    # v2 signature. But per the PR 5 compat story we ALSO accept
-                    # a graceful-degrade where Bob treats the 5-field ping as
-                    # "valid enough to respond v1". We emulate that branch here.
-                    # (If the client sent a v1 ping, Bob's verify would pass.)
-                    _ = nonce, sig_bytes, peer_id
-                    # Regardless of verification, emit v1 APONG so Alice exercises
-                    # her v1 fallback branch.
+                    req_nonce = bytes.fromhex(parts[2])
                     resp_nonce = secrets.token_bytes(16)
-                    resp_sig = sign_heartbeat(fleet_key, "bob-v21", resp_nonce)
+                    resp_sig = sign_heartbeat_response(
+                        fleet_key, "bob-v21", resp_nonce, req_nonce,
+                    )
                     writer.write(
                         f"APONG bob-v21 {resp_nonce.hex()} {resp_sig.hex()}\n".encode()
                     )
@@ -395,7 +390,7 @@ class TestAddManualPeerCapabilityExchange:
             writer.close()
             await writer.wait_closed()
 
-        server = await asyncio.start_server(v2_1_bob, "127.0.0.1", 0)
+        server = await asyncio.start_server(hw_less_bob, "127.0.0.1", 0)
         bob_port = server.sockets[0].getsockname()[1]
 
         alice = _start_agent("fleet-token")
@@ -422,13 +417,71 @@ class TestAddManualPeerCapabilityExchange:
 
         await alice._add_manual_peer(f"127.0.0.1:{bob_port}")
 
-        # Alice should have registered Bob with the zero-HW v2.1 fallback
+        # Alice should have registered Bob with the zero-HW fallback
         bob_record = alice._registry.get_node("bob-v21")
-        assert bob_record is not None, "v2.1 Bob not registered in Alice's registry"
+        assert bob_record is not None, "HW-less Bob not registered in Alice's registry"
         assert bob_record.hardware.gpu_cores == 0
         assert bob_record.hardware.chip_name == "unknown (manual peer)"
         # data_port defaults to port + 1 when no HW payload is available
         assert bob_record.data_port == bob_port + 1
+
+        server.close()
+        await server.wait_closed()
+
+    async def test_manual_peer_rejects_legacy_unbound_apong(self):
+        """v2.3 security: an APONG signed with the OLD (request-unbound)
+        scheme — e.g. a replayed response or a pre-v2.3 peer — is rejected
+        and the peer is NOT registered."""
+        from macfleet.security.auth import sign_heartbeat
+
+        sec = SecurityConfig(token="fleet-token")
+        fleet_key = sec.fleet_key
+
+        async def legacy_bob(reader, writer):
+            data = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            if data.startswith(b"APING"):
+                # Old-style signature: covers only Bob's own nonce, not the
+                # request nonce. Exactly what a captured/replayed APONG or a
+                # pre-v2.3 peer would produce.
+                resp_nonce = secrets.token_bytes(16)
+                resp_sig = sign_heartbeat(fleet_key, "legacy-bob", resp_nonce)
+                writer.write(
+                    f"APONG legacy-bob {resp_nonce.hex()} {resp_sig.hex()}\n".encode()
+                )
+                await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(legacy_bob, "127.0.0.1", 0)
+        bob_port = server.sockets[0].getsockname()[1]
+
+        alice = _start_agent("fleet-token")
+        alice._security.tls = False
+        alice.hardware.node_id = "alice-bbbbbbbb"
+
+        from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig
+        from macfleet.pool.registry import ClusterRegistry, NodeRecord
+
+        alice._registry = ClusterRegistry(alice.hardware.node_id)
+        alice._registry.register(NodeRecord(
+            node_id=alice.hardware.node_id,
+            hostname=alice.hardware.hostname,
+            ip_address="127.0.0.1",
+            port=alice.port,
+            data_port=alice.data_port,
+            hardware=alice.hardware,
+        ))
+        alice._heartbeat = GossipHeartbeat(
+            node_id=alice.hardware.node_id,
+            config=HeartbeatConfig(interval_sec=60.0),
+            security=sec,
+        )
+
+        await alice._add_manual_peer(f"127.0.0.1:{bob_port}")
+
+        assert alice._registry.get_node("legacy-bob") is None, (
+            "request-unbound APONG must be rejected, peer must not register"
+        )
 
         server.close()
         await server.wait_closed()

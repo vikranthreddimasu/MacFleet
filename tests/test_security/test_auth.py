@@ -430,9 +430,12 @@ class TestCertGeneration:
 
         from macfleet.security.auth import _generate_cert_bytes
 
-        cert_pem, key_pem = _generate_cert_bytes()
+        cert_pem, key_pem, cert_der = _generate_cert_bytes()
         assert cert_pem.startswith(b"-----BEGIN CERTIFICATE-----")
         assert key_pem.startswith(b"-----BEGIN PRIVATE KEY-----")
+        # DER form parses to the same certificate (feeds channel binding)
+        assert x509.load_der_x509_certificate(cert_der).serial_number == \
+            x509.load_pem_x509_certificate(cert_pem).serial_number
 
         # Cert parses and has expected CN
         cert = x509.load_pem_x509_certificate(cert_pem)
@@ -448,8 +451,8 @@ class TestCertGeneration:
         """Every call produces a fresh key pair (no key reuse across instances)."""
         from macfleet.security.auth import _generate_cert_bytes
 
-        _, key_a = _generate_cert_bytes()
-        _, key_b = _generate_cert_bytes()
+        _, key_a, _ = _generate_cert_bytes()
+        _, key_b, _ = _generate_cert_bytes()
         assert key_a != key_b
 
     def test_server_ssl_context_cleans_up_tempfiles(self, tmp_path, monkeypatch):

@@ -34,6 +34,26 @@ def cli():
     pass
 
 
+def _show_pairing_block(token: str, fleet_id: str | None) -> None:
+    """Print the pairing URL + QR. Degrades gracefully when `qrcode`
+    isn't installed (URL only, with an install hint)."""
+    from macfleet.security.bootstrap import print_pairing_info, token_to_url
+
+    try:
+        print_pairing_info(token, fleet_id=fleet_id, out=sys.stdout)
+    except ImportError:
+        url = token_to_url(token, fleet_id=fleet_id)
+        console.print(
+            "\nFleet pairing URL (run `macfleet pair` on the other Mac "
+            "after copying it):"
+        )
+        console.print(f"  {url}")
+        console.print(
+            "[dim]Install `qrcode` for a scannable QR code: "
+            "pip install qrcode[/dim]\n"
+        )
+
+
 @cli.command()
 @click.option("--name", default=None, help="Custom node name")
 @click.option("--port", default=50051, help="Heartbeat / discovery port")
@@ -77,8 +97,10 @@ def join(
         Mac B: macfleet pair                 # reads URL from pasteboard
         Mac B: macfleet join                 # uses the token just written
     """
+    import os
+
     from macfleet.pool.agent import PoolAgent
-    from macfleet.security.auth import TOKEN_FILE, resolve_token_with_file
+    from macfleet.security.auth import TOKEN_ENV_VAR, TOKEN_FILE, resolve_token_with_file
 
     if open_fleet:
         if token:
@@ -89,6 +111,15 @@ def join(
             sys.exit(1)
         resolved_token = None
     else:
+        # First run on this Mac? (No explicit token, no env var, no saved
+        # file → resolve_token_with_file is about to mint a fresh token.)
+        # Show the pairing block automatically so pairing a second Mac
+        # needs zero extra flags.
+        first_run = (
+            token is None
+            and os.environ.get(TOKEN_ENV_VAR) is None
+            and not os.path.exists(TOKEN_FILE)
+        )
         resolved_token = resolve_token_with_file(token, auto_generate=True)
         if use_tls:
             console.print(
@@ -99,14 +130,17 @@ def join(
             # Token was auto-generated or loaded from file — show it
             console.print(f"\n[bold green]Fleet token:[/bold green] {resolved_token}")
             console.print(f"[dim]Saved to {TOKEN_FILE}[/dim]")
-            console.print("[dim]Copy this token to other Macs: macfleet join --token <token>[/dim]\n")
 
-        if bootstrap:
-            from macfleet.security.bootstrap import print_pairing_info
+        if bootstrap or first_run:
             if resolved_token is None:
                 console.print("[red]Cannot show pairing info: no fleet token available.[/red]")
                 raise SystemExit(1)
-            print_pairing_info(resolved_token, fleet_id=fleet_id, out=sys.stdout)
+            _show_pairing_block(resolved_token, fleet_id)
+        elif token is None:
+            console.print(
+                "[dim]Pair another Mac: run `macfleet join --bootstrap` here, "
+                "then `macfleet pair` there.[/dim]\n"
+            )
 
     agent = PoolAgent(
         name=name, port=port, data_port=data_port,
@@ -265,6 +299,42 @@ def diagnose():
     check("Network interfaces found", len(links) > 0, f"{len(links)} interfaces")
     has_non_loopback = any(l.link_type.value != "loopback" for l in links)
     check("Non-loopback interface", has_non_loopback)
+
+    # Security
+    console.print("\n[bold]Security[/bold]")
+    import os
+    import stat as stat_mod
+
+    from macfleet.security.auth import (
+        RECOMMENDED_TOKEN_LENGTH,
+        TOKEN_FILE,
+        resolve_token_with_file,
+    )
+
+    tok = resolve_token_with_file(None)
+    check(
+        "Fleet token configured",
+        tok is not None,
+        "" if tok else "run 'macfleet join' once to auto-generate",
+    )
+    if tok is not None:
+        check(
+            f"Token length >= {RECOMMENDED_TOKEN_LENGTH}",
+            len(tok) >= RECOMMENDED_TOKEN_LENGTH,
+            f"{len(tok)} chars" + (
+                "" if len(tok) >= RECOMMENDED_TOKEN_LENGTH
+                else " — short tokens are dictionary-attackable"
+            ),
+        )
+    if os.path.exists(TOKEN_FILE):
+        mode = stat_mod.S_IMODE(os.stat(TOKEN_FILE).st_mode)
+        check(
+            "Token file private (0600)",
+            (mode & 0o077) == 0,
+            f"mode {oct(mode)}" + (
+                "" if (mode & 0o077) == 0 else f" — fix: chmod 600 {TOKEN_FILE}"
+            ),
+        )
 
     # Summary
     console.print(f"\n[bold]{checks_passed}/{checks_total} checks passed[/bold]")
