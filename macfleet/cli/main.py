@@ -701,7 +701,9 @@ Written by `macfleet quickstart`. Run it:
     python {filename}
 
 If you've paired a second Mac via `macfleet join --bootstrap` + `macfleet pair`,
-set `enable_pool_distributed=True` below to spread training across both Macs.
+set `enable_pool_distributed=True` below and run THIS SAME SCRIPT on both Macs
+to spread training across them (each Mac becomes one rank; gradients are
+averaged every step).
 """
 
 import macfleet

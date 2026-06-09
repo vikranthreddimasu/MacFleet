@@ -4,6 +4,42 @@ All notable changes to MacFleet. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Distributed `Pool.train()`** — when the pool is distributed with
+  live peers, `pool.train(...)` automatically runs multi-node
+  data-parallel training: SPMD (run the same script on every Mac),
+  gradient mesh over the data ports, rank-0 weight broadcast,
+  allreduce every step. Single-node behavior is unchanged when there
+  are no peers; `distributed=True/False` forces either mode.
+  Distributed results gain `rank`, `world_size`, `avg_sync_time_sec`,
+  and `params_sha256` (identical across ranks iff the fleet stayed in
+  sync). Works for both engines (torch + MLX); `compression=` now
+  actually applies to training started from the SDK.
+- **`macfleet/training/mesh.py`** — SPMD rendezvous: `form_mesh()`
+  turns a registry snapshot into a connected `PeerTransport` +
+  `CollectiveGroup`. Ranks derive from sorted node ids (immune to
+  transient compute-score disagreement between registries). Outbound
+  connects retry until `rendezvous_timeout_sec` (Pool kwarg, default
+  60s) so Macs don't need a synchronized start; missing peers produce
+  a `MeshFormationError` naming exactly who never showed up.
+- **`PeerAuthError`** (subclass of `ConnectionError`) — wrong-token
+  handshakes now fail fast during mesh formation instead of retrying
+  until the deadline and tripping the peer's rate limiter.
+
+### Tests
+
+- `tests/test_comm/test_mesh.py` — 2-node and 3-node (ring) mesh
+  formation, staggered starts, token-secured mesh over TLS,
+  wrong-token fail-fast, rendezvous-timeout remediation.
+  Framework-agnostic.
+- `tests/test_sdk/test_distributed_train.py` — 2-rank end-to-end torch
+  training over loopback: byte-identical final params across ranks,
+  decreasing loss, matching step counts, compression path, routing
+  guards. MLX twin auto-skips when MLX is absent.
+
 ## [2.2.0] — 2026-05-01
 
 Graduates v2.2.0-rc1 to stable. Same shipped features (Phase B

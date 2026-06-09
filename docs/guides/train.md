@@ -12,11 +12,17 @@ pool.train(
     optimizer=None,           # default: Adam(lr)
     loss_fn=None,             # default: model returns loss directly
     engine=None,              # "torch" or "mlx"; None → Pool's default
-    compression="none",       # "none" | "topk" | "fp8" (auto-picked from link)
+    compression="none",       # "none" | "light" | "moderate" | "aggressive" | "adaptive"
+    distributed=None,         # None=auto (multi-node iff pool has peers),
+                              # True=require peers, False=force single-node
 )
 ```
 
 Returns a dict: `{"loss": ..., "epochs": ..., "time_sec": ..., "steps": ...}`.
+In distributed mode it also includes `rank`, `world_size`,
+`avg_sync_time_sec`, and `params_sha256` — the hash matches across
+ranks iff the fleet stayed in sync (same check
+`tools/two_mac_real_train.py` uses).
 
 ## Mutation semantics
 
@@ -110,6 +116,27 @@ with macfleet.Pool(
 ) as pool:
     pool.train(...)     # ring allreduce across pool.world_size nodes
 ```
+
+Distributed training is **SPMD: run the same script on every Mac.**
+Each Pool joins the fleet and waits for quorum; `pool.train()` then
+forms a gradient mesh over the data ports, broadcasts rank 0's
+initial weights, and allreduces gradients after every backward pass.
+Ranks are derived from sorted node ids, so no extra coordination
+round is needed.
+
+The Macs don't have to call `pool.train()` at the same instant — the
+mesh rendezvous retries for `rendezvous_timeout_sec` (Pool kwarg,
+default 60s) while you start the script on each machine. If a peer
+never shows up:
+
+```
+MeshFormationError: Could not connect to peer mac-mini-9f2e at
+192.168.1.10:50052 within 60s. Check that the peer is running the
+same training script, and that 'macfleet status' shows it as alive.
+```
+
+A wrong fleet token fails immediately (`PeerAuthError`) instead of
+retrying until the deadline.
 
 In distributed mode, `pool.join()` blocks until quorum is met. If the
 timeout expires, you get:

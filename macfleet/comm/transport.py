@@ -44,6 +44,17 @@ from macfleet.security.auth import (
 logger = logging.getLogger(__name__)
 
 
+class PeerAuthError(ConnectionError):
+    """Raised when a handshake fails because the peer does not hold the
+    correct fleet token (or its HW payload fails HMAC verification, which
+    is symptomatically identical).
+
+    Subclasses ConnectionError so existing callers that catch
+    ConnectionError keep working. Mesh formation catches this specifically
+    to fail fast instead of retrying a hopeless connection until timeout.
+    """
+
+
 @dataclass
 class TransportConfig:
     """Transport layer configuration."""
@@ -658,7 +669,7 @@ class PeerTransport:
                     # so surface the same diagnostic. The underlying error is
                     # chained for debugging.
                     await conn.close()
-                    raise ConnectionError(
+                    raise PeerAuthError(
                         f"Auth handshake failed: peer {peer_id} does not have the correct token"
                     ) from e
                 if len(base_ack) < CHALLENGE_SIZE * 2 + 1:
@@ -677,7 +688,7 @@ class PeerTransport:
             # Verify server proved it knows the token
             if not verify_response(fleet_key, challenge_a, response_a):
                 await conn.close()
-                raise ConnectionError(
+                raise PeerAuthError(
                     f"Auth handshake failed: peer {peer_id} does not have the correct token"
                 )
 

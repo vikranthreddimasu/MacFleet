@@ -77,8 +77,11 @@ macfleet pair && macfleet join
 Or: scan the QR from Mac #1 with your iPhone camera. Tap the link.
 Done.
 
-**4. Set `enable_pool_distributed=True` in your script** — training now
-spans both Macs.
+**4. Set `enable_pool_distributed=True` and run the same script on both
+Macs** — training now spans both: the pool forms a gradient mesh, rank 0
+broadcasts initial weights, and every step's gradients are averaged
+across the fleet. The result dict's `params_sha256` matches on both
+Macs when the fleet stayed in sync.
 
 ## Features
 
