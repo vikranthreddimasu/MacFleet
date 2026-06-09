@@ -96,6 +96,7 @@ class NumpyTopKCompressor:
                 "the gradient shape stabilizes.",
                 self._residuals.shape, flat.shape,
             )
+            self._residuals = None
 
         k = max(1, int(flat.size * self.ratio))
         abs_vals = np.abs(flat)
@@ -339,7 +340,7 @@ class AdaptiveCompressor:
             values = (
                 self._fp16.decompress(ca.topk_values, ca.scale)
                 if self._fp16
-                else ca.topk_values.astype(np.float32)
+                else ca.topk_values.astype(np.float32) * ca.scale
             )
         elif ca.topk_values is not None:
             values = ca.topk_values.astype(np.float32)

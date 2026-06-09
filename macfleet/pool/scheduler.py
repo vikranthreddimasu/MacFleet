@@ -104,8 +104,12 @@ class Scheduler:
             rank = ranks.get(node_id, i)
 
             if i == len(sorted_nodes) - 1:
-                # Last node gets remainder
-                batch = remaining
+                # Last node gets remainder (clamped: when global_batch_size <
+                # node count, earlier max(1, ...) bumps can exhaust the budget).
+                batch = max(0, remaining)
+            elif remaining <= 0:
+                # Budget already exhausted — don't hand out batches we can't back.
+                batch = 0
             else:
                 batch = max(1, int(global_batch_size * weight))
                 remaining -= batch

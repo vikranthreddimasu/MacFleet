@@ -486,6 +486,11 @@ def validate_gradients(
     Raises:
         GradientValidationError: If gradients contain invalid values.
     """
+    # Empty arrays vacuously pass isfinite().all() and then crash .max() with a
+    # ValueError (not GradientValidationError) — reject them explicitly so a peer
+    # cannot bypass the validator with a zero-length payload.
+    if gradients.size == 0:
+        raise GradientValidationError("Received empty gradient array — rejecting.")
     # Single pass for NaN+Inf (avoids 2 separate scans + temp arrays)
     if not np.isfinite(gradients).all():
         if np.isnan(gradients).any():

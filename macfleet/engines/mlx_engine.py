@@ -170,53 +170,40 @@ class MLXEngine:
         mx.eval(model.parameters())
 
     def forward(self, batch: dict[str, Any]) -> Any:
-        """Run forward pass. Stores batch for backward().
+        """Run forward pass AND compute gradients in one value_and_grad call.
 
-        In MLX, forward and backward are computed together via
-        value_and_grad, but we split them to match the Engine protocol.
-        Forward stores the batch; backward computes gradients.
+        MLX returns loss and gradients together, so we compute both here (the
+        gradients are stored for backward()/get_flat_gradients()) and return
+        the loss. Doing it in a single pass guarantees the reported loss and
+        the gradients come from the SAME forward evaluation — critical for
+        models with stochastic layers (dropout, batchnorm), where the old
+        two-pass approach (loss-only here, recompute in backward) drew
+        different randomness and produced mismatched loss/gradients.
         """
         self._last_batch = batch
 
-        # Run forward-only for loss value (no grad computation)
-        if self._loss_fn is not None:
-            if isinstance(batch, dict):
-                loss = self._loss_fn(self._model, **batch)
-            elif isinstance(batch, (tuple, list)):
-                loss = self._loss_fn(self._model, *batch)
-            else:
-                loss = self._loss_fn(self._model, batch)
+        if isinstance(batch, dict):
+            loss, self._grads = self._loss_and_grad_fn(self._model, **batch)
+        elif isinstance(batch, (tuple, list)):
+            loss, self._grads = self._loss_and_grad_fn(self._model, *batch)
         else:
-            if isinstance(batch, dict):
-                loss = self._model(**batch)
-            elif isinstance(batch, (tuple, list)):
-                loss = self._model(*batch)
-            else:
-                loss = self._model(batch)
+            loss, self._grads = self._loss_and_grad_fn(self._model, batch)
 
-        mx.eval(loss)
+        mx.eval(loss, self._grads)
         self._last_loss = loss
         return loss
 
     def backward(self, loss: Any) -> None:
-        """Compute gradients using MLX's value_and_grad.
+        """Validate that forward() computed gradients.
 
-        Uses the batch stored by the last forward() call.
-        MLX computes forward+backward together, so this re-evaluates
-        the forward pass to get gradients.
+        Gradients are produced together with the loss in forward() (MLX
+        value_and_grad returns both), so there is no second pass to run here.
+        This keeps the Engine protocol's forward()/backward() split while
+        avoiding a redundant — and, for stochastic models, inconsistent —
+        recomputation.
         """
-        batch = self._last_batch
-        if batch is None:
+        if self._grads is None:
             raise RuntimeError("backward() called without prior forward()")
-
-        if isinstance(batch, dict):
-            _, self._grads = self._loss_and_grad_fn(self._model, **batch)
-        elif isinstance(batch, (tuple, list)):
-            _, self._grads = self._loss_and_grad_fn(self._model, *batch)
-        else:
-            _, self._grads = self._loss_and_grad_fn(self._model, batch)
-
-        mx.eval(self._grads)
 
     def step(self) -> None:
         """Apply optimizer update using computed gradients."""
@@ -265,7 +252,7 @@ class MLXEngine:
         so optimizer.update() works correctly.
         """
         if self._grads is None:
-            return
+            raise RuntimeError("apply_flat_gradients() called before backward()")
 
         flat_params = _flatten_params(self._grads)
         offset = 0
@@ -312,23 +299,33 @@ class MLXEngine:
     # ------------------------------------------------------------------ #
 
     def state_dict(self) -> bytes:
-        """Serialize model state for checkpointing.
+        """Serialize model + optimizer state for checkpointing.
 
-        Uses numpy serialization for cross-framework compatibility.
+        Uses numpy serialization for cross-framework compatibility. Model
+        params are stored under their bare names (backward compatible with
+        older checkpoints); optimizer state (Adam moments etc.) is stored
+        under an "__opt__." prefix so resuming preserves the optimizer
+        instead of cold-starting its moment estimates.
         """
-        params = self._model.parameters()
-        flat = _flatten_params(params)
-
         state = {}
-        for name, arr in flat:
+        for name, arr in _flatten_params(self._model.parameters()):
             state[name] = np.array(arr)
+
+        if self._optimizer is not None:
+            try:
+                for name, arr in _flatten_params(self._optimizer.state):
+                    state[f"__opt__.{name}"] = np.array(arr)
+            except Exception:
+                # Optimizer state not serializable on this MLX version — fall
+                # back to model-only checkpoint rather than failing the save.
+                pass
 
         buffer = io.BytesIO()
         np.savez(buffer, **state)
         return buffer.getvalue()
 
     def load_state_dict(self, data: bytes) -> None:
-        """Load model state from checkpoint bytes."""
+        """Load model (and optimizer, if checkpointed) state from bytes."""
         buffer = io.BytesIO(data)
         state = np.load(buffer, allow_pickle=False)
 
@@ -345,6 +342,24 @@ class MLXEngine:
         new_params = _unflatten_params(new_flat, params)
         self._model.update(new_params)
         mx.eval(self._model.parameters())
+
+        # Restore optimizer state if present (best-effort; old checkpoints and
+        # MLX versions without serializable state simply skip this).
+        if self._optimizer is not None:
+            try:
+                opt_template = self._optimizer.state
+                opt_flat = _flatten_params(opt_template)
+                if opt_flat and any(f"__opt__.{n}" in state for n, _ in opt_flat):
+                    restored = [
+                        (n, mx.array(state[f"__opt__.{n}"]))
+                        if f"__opt__.{n}" in state
+                        else (n, a)
+                        for n, a in opt_flat
+                    ]
+                    self._optimizer.state = _unflatten_params(restored, opt_template)
+                    mx.eval(self._optimizer.state)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ #
     # Engine protocol: introspection                                     #

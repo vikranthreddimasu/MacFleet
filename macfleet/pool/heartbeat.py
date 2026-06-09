@@ -165,7 +165,6 @@ class GossipHeartbeat:
 
     async def _gossip_round(self) -> None:
         """Single gossip round: select peers, ping, update status."""
-        now = time.monotonic()
         candidates = [
             p for p in self._peers.values()
             if p.status in (NodeStatus.ALIVE, NodeStatus.SUSPECTED)
@@ -191,10 +190,14 @@ class GossipHeartbeat:
                     peer.status = NodeStatus.SUSPECTED
                     if self._on_suspected:
                         self._on_suspected(peer.node_id)
-
-                if (
+                # elif (not if): a peer promoted ALIVE→SUSPECTED this round must
+                # serve its grace period before it can be failed. Only peers that
+                # were ALREADY suspected before this iteration are eligible. Use a
+                # fresh timestamp — pings above can take seconds, and the stale
+                # round-start `now` would shorten the effective failure timeout.
+                elif (
                     peer.status == NodeStatus.SUSPECTED
-                    and (now - peer.last_seen) > self.config.failure_timeout_sec
+                    and (time.monotonic() - peer.last_seen) > self.config.failure_timeout_sec
                 ):
                     peer.status = NodeStatus.FAILED
                     if self._on_failed:

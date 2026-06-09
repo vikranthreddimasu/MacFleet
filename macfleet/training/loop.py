@@ -130,7 +130,7 @@ async def training_loop(
                 step=global_step,
             )
 
-            if config.on_step and global_step % config.log_every_n_steps == 0:
+            if config.on_step and config.log_every_n_steps > 0 and global_step % config.log_every_n_steps == 0:
                 config.on_step(global_step, step_result)
 
         epoch_result = EpochResult(

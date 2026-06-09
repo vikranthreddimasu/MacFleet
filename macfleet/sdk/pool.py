@@ -283,6 +283,15 @@ class Pool:
                 pass
             if self._loop_thread is not None:
                 self._loop_thread.join(timeout=2.0)
+            # Release the selector/epoll fd (stop() alone leaks it), but only
+            # once the loop has actually stopped — close() raises
+            # "Cannot close a running event loop" if the join above timed out
+            # while the loop was still draining tasks.
+            if not self._loop.is_running() and not self._loop.is_closed():
+                try:
+                    self._loop.close()
+                except RuntimeError:
+                    pass
         self._loop = None
         self._loop_thread = None
 

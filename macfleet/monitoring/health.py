@@ -23,6 +23,24 @@ class HealthStatus(Enum):
     UNKNOWN = "unknown"
 
 
+def classify_health(score: float) -> HealthStatus:
+    """Map a 0.0..1.0 health score to a HealthStatus bucket.
+
+    Single source of truth for score → status classification, used by both
+    HealthMonitor.check() and the agent_adapter snapshot path so the same
+    node is never classified two different ways.
+
+        >= 0.8 → HEALTHY (green)
+        >= 0.5 → DEGRADED (yellow)
+        else   → UNHEALTHY (red)
+    """
+    if score >= 0.8:
+        return HealthStatus.HEALTHY
+    if score >= 0.5:
+        return HealthStatus.DEGRADED
+    return HealthStatus.UNHEALTHY
+
+
 @dataclass
 class MemoryInfo:
     """System memory information."""
@@ -253,14 +271,8 @@ class HealthMonitor:
             is_plugged_in=is_plugged,
         )
 
-        # Classify status
-        score = health.health_score
-        if score >= 0.7:
-            health.status = HealthStatus.HEALTHY
-        elif score >= 0.4:
-            health.status = HealthStatus.DEGRADED
-        else:
-            health.status = HealthStatus.UNHEALTHY
+        # Classify status (shared thresholds — see classify_health)
+        health.status = classify_health(health.health_score)
 
         self._history.append(health)
         if len(self._history) > self._max_history:

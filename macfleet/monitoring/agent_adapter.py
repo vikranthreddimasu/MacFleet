@@ -22,7 +22,12 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Optional
 
-from macfleet.monitoring.health import HealthStatus, MemoryInfo, NodeHealth
+from macfleet.monitoring.health import (
+    HealthStatus,
+    MemoryInfo,
+    NodeHealth,
+    classify_health,
+)
 from macfleet.monitoring.thermal import get_thermal_state
 
 if TYPE_CHECKING:
@@ -122,21 +127,6 @@ def build_node_health_for_peers(agent: PoolAgent) -> list[NodeHealth]:
         health.status = classify_health(health.health_score)
         out.append(health)
     return out
-
-
-def classify_health(score: float) -> HealthStatus:
-    """Map a 0.0..1.0 health score to a HealthStatus bucket.
-
-    Thresholds match the Dashboard panels' coloring:
-        >= 0.8 → HEALTHY (green)
-        >= 0.5 → DEGRADED (yellow)
-        else   → UNHEALTHY (red)
-    """
-    if score >= 0.8:
-        return HealthStatus.HEALTHY
-    if score >= 0.5:
-        return HealthStatus.DEGRADED
-    return HealthStatus.UNHEALTHY
 
 
 def snapshot_all(

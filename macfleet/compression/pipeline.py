@@ -175,7 +175,11 @@ class FP16Stage(Compressor):
             values = self._quantizer.dequantize(
                 compressed.values, compressed.scale, compressed.original_dtype
             )
-            dense = torch.zeros(compressed.original_numel, dtype=compressed.original_dtype)
+            dense = torch.zeros(
+                compressed.original_numel,
+                dtype=compressed.original_dtype,
+                device=compressed.values.device,
+            )
             dense.scatter_(0, compressed.indices.long(), values)
             if compressed.original_shape:
                 dense = dense.view(compressed.original_shape)
@@ -210,7 +214,11 @@ class NoOpStage(Compressor):
 
     def decompress(self, compressed: CompressedGradient) -> torch.Tensor:
         if compressed.is_sparse:
-            dense = torch.zeros(compressed.original_numel, dtype=compressed.original_dtype)
+            dense = torch.zeros(
+                compressed.original_numel,
+                dtype=compressed.original_dtype,
+                device=compressed.values.device,
+            )
             dense.scatter_(
                 0, compressed.indices.long(), compressed.values.to(compressed.original_dtype)
             )

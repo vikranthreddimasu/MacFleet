@@ -798,8 +798,10 @@ class PoolAgent:
             hardware=hw,
         ))
 
-        # Use locally-computed score, not the broadcast one
-        self._heartbeat.add_peer(node.node_id, node.ip_address, node.port, hw.compute_score)
+        # Use locally-computed score, not the broadcast one. Guard against the
+        # discovery callback firing before _heartbeat is constructed in start().
+        if self._heartbeat is not None:
+            self._heartbeat.add_peer(node.node_id, node.ip_address, node.port, hw.compute_score)
 
         console.print(f"[cyan]Discovered[/cyan] {node.hostname} ({node.chip_name}, {node.gpu_cores} GPU cores)")
 

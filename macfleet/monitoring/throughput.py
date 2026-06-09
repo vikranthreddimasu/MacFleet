@@ -21,7 +21,7 @@ class StepMetrics:
     compute_time_sec: float     # forward + backward
     sync_time_sec: float        # gradient allreduce
     step_time_sec: float        # total step time
-    loss: float = 0.0
+    loss: Optional[float] = None   # None = not recorded (distinct from a real 0.0 loss)
     timestamp: float = 0.0
 
     @property
@@ -153,7 +153,7 @@ class ThroughputTracker:
     @property
     def loss_history(self) -> list[float]:
         """Recent loss values."""
-        return [m.loss for m in self._history if m.loss > 0]
+        return [m.loss for m in self._history if m.loss is not None]
 
     @property
     def throughput_history(self) -> list[float]:
@@ -182,7 +182,7 @@ class StepContext:
         self._start = 0.0
         self._compute_end = 0.0
         self._sync_end = 0.0
-        self._loss = 0.0
+        self._loss: Optional[float] = None
 
     def __enter__(self) -> StepContext:
         self._start = time.monotonic()

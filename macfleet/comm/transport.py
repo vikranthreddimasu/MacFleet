@@ -225,10 +225,21 @@ class PeerConnection:
     async def recv_message(self, timeout: float = 120.0) -> WireMessage:
         """Receive a WireMessage with CRC32 verification."""
         async with self._recv_lock:
-            msg = await asyncio.wait_for(
-                WireMessage.read_from_stream(self.reader),
-                timeout=timeout,
-            )
+            try:
+                msg = await asyncio.wait_for(
+                    WireMessage.read_from_stream(self.reader),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                # A cancelled readexactly may have consumed a partial frame,
+                # leaving the StreamReader mid-message. Invalidate the
+                # connection rather than reusing a corrupt stream.
+                self.writer.close()
+                try:
+                    await self.writer.wait_closed()
+                except (OSError, asyncio.TimeoutError):
+                    pass
+                raise
             self.bytes_received += HEADER_SIZE + len(msg.payload)
             return msg
 
@@ -369,6 +380,7 @@ class PeerTransport:
                 if self._rate_limiter.is_banned(peer_ip):
                     logger.warning("Rate limit: rejecting banned IP %s", peer_ip)
                     writer.close()
+                    await writer.wait_closed()
                     return
 
                 # Apply backoff delay for IPs with recent failures
@@ -383,6 +395,7 @@ class PeerTransport:
                 )
                 if msg.msg_type != MessageType.CONTROL:
                     writer.close()
+                    await writer.wait_closed()
                     return
 
                 payload = msg.payload
@@ -506,6 +519,7 @@ class PeerTransport:
                             peer_ip,
                         )
                         writer.close()
+                        await writer.wait_closed()
                         return
 
                     peer_id = payload.decode("utf-8")
@@ -531,7 +545,13 @@ class PeerTransport:
             self._tune_socket(writer, conn.link_type)
 
             async with self._lock:
+                old_conn = self._connections.get(peer_id)
                 self._connections[peer_id] = conn
+
+            # Close any stale connection for this peer_id outside the lock to
+            # avoid leaking its socket on reconnect/duplicate handshake.
+            if old_conn is not None and old_conn is not conn:
+                await old_conn.close()
 
             if self._on_connect:
                 self._on_connect(peer_id, conn)

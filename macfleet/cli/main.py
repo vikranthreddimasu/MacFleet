@@ -103,6 +103,9 @@ def join(
 
         if bootstrap:
             from macfleet.security.bootstrap import print_pairing_info
+            if resolved_token is None:
+                console.print("[red]Cannot show pairing info: no fleet token available.[/red]")
+                raise SystemExit(1)
             print_pairing_info(resolved_token, fleet_id=fleet_id, out=sys.stdout)
 
     agent = PoolAgent(
@@ -680,10 +683,12 @@ def pair(from_stdin: bool):
 # v2.2 PR 16 (D10): `macfleet doctor` is a friendlier alias for `diagnose`.
 # Users trained by `brew doctor` / `rustup doctor` look for this name first.
 @cli.command()
-def doctor():
+@click.pass_context
+def doctor(ctx):
     """System health check (alias for `diagnose`)."""
-    # Delegate to the existing diagnose implementation — they do the same thing.
-    diagnose.callback()
+    # Delegate through Click's context so diagnose runs with a proper context
+    # (obj, exception handling) instead of a bare callback() call.
+    ctx.invoke(diagnose)
 
 
 # v2.2 PR 16 (D10): `macfleet quickstart` scaffolds a demo training script.
