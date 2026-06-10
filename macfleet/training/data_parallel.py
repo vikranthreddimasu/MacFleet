@@ -28,6 +28,9 @@ from macfleet.compression.adaptive import (
     AdaptiveCompressor,
     CompressedArray,
     CompressionLevel,
+    decompress_to_dense,
+    pack_compressed,
+    unpack_compressed,
 )
 from macfleet.engines.base import TrainingMetrics
 from macfleet.pool.network import LinkType
@@ -81,10 +84,10 @@ class DataParallel:
         self._step_count = 0
         self._sync_time_sec = 0.0
         self._bytes_sent = 0
-        # _bytes_saved is reserved for the future sparse-on-wire path
-        # (TODOS Issue 3). v2.2 transmits dense gradients, so it stays
-        # 0. Kept on the instance so the existing compression_ratio
-        # property stays defined; remove together with Issue 3 wiring.
+        # Bytes that compression kept OFF the wire. Non-zero on the
+        # 2-node sparse-on-wire path (v2.3); stays 0 for N>=3 where the
+        # ring still transmits dense gradients (TODOS Issue 3 second
+        # half: sparse ring merge).
         self._bytes_saved = 0
         self._expected_grad_size: Optional[int] = None
 
@@ -114,11 +117,11 @@ class DataParallel:
     def compression_ratio(self) -> float:
         """Overall compression ratio (bytes sent / bytes uncompressed).
 
-        v2.2 transmits dense gradients on the wire (sparse-on-wire is
-        TODOS Issue 3). This property therefore returns 1.0 in v2.2 —
-        compression is applied locally but the wire payload size is
-        unchanged. Once sparse-on-wire lands, _bytes_saved will track
-        the real reduction and this ratio will go below 1.0.
+        Below 1.0 when the 2-node sparse-on-wire path is active (v2.3):
+        the wire carries packed TopK/FP16 payloads instead of dense
+        float32. For N>=3 the ring still transmits dense gradients
+        (sparse ring merge is TODOS Issue 3 second half) and this stays
+        at 1.0.
         """
         total = self._bytes_sent + self._bytes_saved
         if total == 0:
@@ -261,21 +264,34 @@ class DataParallel:
 
         original_bytes = flat_grads.nbytes
 
-        # Compress if active. NOTE: until sparse-on-wire (TODOS Issue 3),
-        # compressed gradients are decompressed locally before allreduce,
-        # so the wire payload is dense regardless. _bytes_sent therefore
-        # reflects ACTUAL wire bytes, not the compressed size of the
-        # local sparsification. _bytes_saved stays 0 in v2.2.
+        # Compress if active.
+        #
+        # World size 2 (v2.3): sparse-on-wire. The packed TopK/FP16
+        # payload itself crosses the network — this is where the
+        # 20-200x WiFi bandwidth reduction actually happens. Both ranks
+        # average decompress(own) + decompress(remote), which is the
+        # same two arrays on both sides, so parameters stay
+        # byte-identical. Requires both ranks to run the same
+        # compression setting (a mismatch is detected via the wire
+        # magic and degrades to local gradients for the step).
+        #
+        # World size >= 3: the ring allreduce needs aligned dense
+        # chunks, so compressed gradients are decompressed locally and
+        # the wire stays dense (sparse ring merge is TODOS Issue 3
+        # second half). _bytes_sent always reflects ACTUAL wire bytes.
         try:
             if self._compressor is not None:
                 compressed = self._compressor.compress(flat_grads)
 
-                if isinstance(compressed, CompressedArray):
+                if isinstance(compressed, CompressedArray) and self.world_size == 2:
+                    averaged = await self._sparse_exchange_n2(compressed)
+                elif isinstance(compressed, CompressedArray):
                     sparse_grads = self._compressor.decompress(compressed)
                     averaged = await self.group.allreduce(sparse_grads, op="mean")
+                    self._bytes_sent += original_bytes
                 else:
                     averaged = await self.group.allreduce(compressed, op="mean")
-                self._bytes_sent += original_bytes
+                    self._bytes_sent += original_bytes
             else:
                 # No compression
                 averaged = await self.group.allreduce(flat_grads, op="mean")
@@ -330,6 +346,36 @@ class DataParallel:
         self._step_count += 1
         self._sync_time_sec += elapsed
         return elapsed
+
+    async def _sparse_exchange_n2(self, compressed: CompressedArray) -> np.ndarray:
+        """2-node sparse-on-wire gradient exchange.
+
+        Sends the packed compressed payload, receives the peer's, and
+        averages the two DECOMPRESSED arrays. Using decompress(own) —
+        not the raw local gradients — on both ranks is what keeps
+        parameters byte-identical across the fleet: each rank averages
+        the exact same pair of arrays (float addition of two operands
+        is commutative).
+
+        Raises GradientValidationError if the peer's payload fails
+        structural validation; the caller falls back to local gradients
+        for the step.
+        """
+        payload = pack_compressed(compressed)
+        remote_payload = await self.group.exchange_bytes(1 - self.rank, payload)
+
+        remote = unpack_compressed(remote_payload)  # fail-closed validation
+        local_dense = self._compressor.decompress(compressed)
+        remote_dense = decompress_to_dense(remote)
+        if remote_dense.size != local_dense.size:
+            raise GradientValidationError(
+                f"peer compressed gradient numel {remote_dense.size} != "
+                f"local {local_dense.size} — model mismatch?"
+            )
+
+        self._bytes_sent += len(payload)
+        self._bytes_saved += max(0, compressed.original_size - len(payload))
+        return (local_dense.flatten() + remote_dense.flatten()) / 2.0
 
     async def broadcast_parameters(self, src: int = 0) -> None:
         """Broadcast model parameters from src rank to all nodes.

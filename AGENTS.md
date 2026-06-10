@@ -152,6 +152,8 @@ restored = compressor.decompress(compressed)
 
 TopK compressor has error feedback (residual accumulation) for convergence.
 
+Sparse-on-wire (v2.3, N=2 only): `pack_compressed`/`unpack_compressed`/`decompress_to_dense` serialize a CompressedArray so the packed payload itself crosses the network (`DataParallel._sparse_exchange_n2`). Both ranks average `decompress(own) + decompress(remote)` — the same two arrays on each side — so parameters stay byte-identical; the fp16 scale travels as float64 for bitwise-equal dequantization. Unpacking is fail-closed (validated before any allocation). N>=3 rings still transmit dense chunks.
+
 ### PeerTransport (`macfleet/comm/transport.py`)
 
 TCP transport with handshake-based peer identification:
