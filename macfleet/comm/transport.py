@@ -27,21 +27,37 @@ from macfleet.comm.protocol import (
 from macfleet.pool.network import LinkType
 from macfleet.security.auth import (
     CHALLENGE_SIZE,
+    HS_LABEL_CLIENT_RESP,
+    HS_LABEL_SERVER_RESP,
     HW_HANDSHAKE_MAX_JSON_BYTES,
     HW_HANDSHAKE_WIRE_VERSION,
     AuthRateLimiter,
     HandshakeHwValidationError,
     SecurityConfig,
+    compute_client_hello_proof,
     compute_response,
     create_client_ssl_context,
-    create_server_ssl_context,
+    create_server_tls_context,
     generate_challenge,
     sign_hw_profile,
+    tls_channel_binding_from_writer,
+    verify_client_hello_proof,
     verify_hw_profile,
     verify_response,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class PeerAuthError(ConnectionError):
+    """Raised when a handshake fails because the peer does not hold the
+    correct fleet token (or its HW payload fails HMAC verification, which
+    is symptomatically identical).
+
+    Subclasses ConnectionError so existing callers that catch
+    ConnectionError keep working. Mesh formation catches this specifically
+    to fail fast instead of retrying a hopeless connection until timeout.
+    """
 
 
 @dataclass
@@ -225,10 +241,21 @@ class PeerConnection:
     async def recv_message(self, timeout: float = 120.0) -> WireMessage:
         """Receive a WireMessage with CRC32 verification."""
         async with self._recv_lock:
-            msg = await asyncio.wait_for(
-                WireMessage.read_from_stream(self.reader),
-                timeout=timeout,
-            )
+            try:
+                msg = await asyncio.wait_for(
+                    WireMessage.read_from_stream(self.reader),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                # A cancelled readexactly may have consumed a partial frame,
+                # leaving the StreamReader mid-message. Invalidate the
+                # connection rather than reusing a corrupt stream.
+                self.writer.close()
+                try:
+                    await self.writer.wait_closed()
+                except (OSError, asyncio.TimeoutError):
+                    pass
+                raise
             self.bytes_received += HEADER_SIZE + len(msg.payload)
             return msg
 
@@ -271,24 +298,30 @@ class PeerTransport:
     are v2.2+, also exchanges HMAC-signed hardware profiles (for coordinator
     election by real compute score instead of mDNS-broadcast zeros).
 
-    Handshake when `security.fleet_key` is set and `local_hw` is provided:
+    Handshake (v3, since v2.3) when `security.fleet_key` is set:
 
-        1. Client sends CONTROL{HANDSHAKE_V2} with `local_id || challenge_a`.
-        2. Server verifies fleet key by checking the HANDSHAKE_V2 flag, builds
-           an ACK payload: `local_id || response_a || challenge_b || hw_block_s`
-           where `hw_block_s` is the structured + HMAC-signed HW exchange
-           bound to `challenge_a` (the client's challenge).
-        3. Client verifies `response_a` and parses+verifies `hw_block_s` against
-           the challenge it originally sent. Then sends RESP:
-           `response_b || hw_block_c` with `hw_block_c` bound to `challenge_b`.
-        4. Server verifies `response_b` and parses+verifies `hw_block_c`.
+        1. Client sends CONTROL{HANDSHAKE_V2} with
+           `local_id || challenge_a || hello_proof` where `hello_proof =
+           HMAC(key, label_C1 || local_id || ':' || challenge_a || binding)`
+           and `binding` is SHA-256 of the server's TLS cert as seen by the
+           client. The client proves token knowledge FIRST.
+        2. Server verifies `hello_proof` — on failure it closes without
+           sending a byte (no HMAC oracle, no HW disclosure to
+           unauthenticated peers). On success it sends ACK:
+           `local_id || response_a || challenge_b || hw_block_s` with
+           `response_a` domain-labeled and channel-bound, and `hw_block_s`
+           the HMAC-signed HW exchange bound to `challenge_a`.
+        3. Client verifies `response_a` (channel binding defeats TLS-relay
+           MITM) and `hw_block_s`, then sends RESP:
+           `response_b || hw_block_c` bound to `challenge_b`.
+        4. Server verifies `response_b` and `hw_block_c`.
 
-    Fallback:
-        - v2.1 client (no HANDSHAKE_V2 flag) → server uses legacy parsing and
-          DOES NOT exchange HW. Logs a warning noting the mixed-version fleet
-          will have degraded coordinator election.
-        - Open fleet (no fleet_key) → handshake is just `local_id` ↔ `local_id`
-          unchanged. No HW exchange (nothing to HMAC-sign with).
+    Compatibility:
+        - Secure fleets require every node on the same MacFleet version
+          (>= 2.3). Pre-v2.3 secure clients are rejected (their hello has
+          no proof — answering it would reopen the brute-force oracle).
+        - Open fleet (no fleet_key) → handshake is just `local_id` ↔
+          `local_id` unchanged. No HW exchange (nothing to HMAC-sign with).
     """
 
     def __init__(
@@ -312,8 +345,11 @@ class PeerTransport:
         self._on_connect: Optional[Callable] = None
         self._rate_limiter = AuthRateLimiter()
         self._server_ssl_ctx = None
+        # SHA-256 of this server's TLS cert (DER) — the channel binding mixed
+        # into every handshake HMAC. Empty when TLS is off (open fleets).
+        self._server_cert_binding = b""
         if self._security.tls:
-            self._server_ssl_ctx = create_server_ssl_context()
+            self._server_ssl_ctx, self._server_cert_binding = create_server_tls_context()
 
     @property
     def local_hw(self) -> HardwareExchange:
@@ -369,6 +405,7 @@ class PeerTransport:
                 if self._rate_limiter.is_banned(peer_ip):
                     logger.warning("Rate limit: rejecting banned IP %s", peer_ip)
                     writer.close()
+                    await writer.wait_closed()
                     return
 
                 # Apply backoff delay for IPs with recent failures
@@ -383,59 +420,81 @@ class PeerTransport:
                 )
                 if msg.msg_type != MessageType.CONTROL:
                     writer.close()
+                    await writer.wait_closed()
                     return
 
                 payload = msg.payload
                 fleet_key = self._security.fleet_key
 
                 if fleet_key:
-                    # SECURITY: Downgrade protection — secure server rejects
-                    # open handshakes (payload without challenge appended)
-                    if len(payload) < CHALLENGE_SIZE + 1:
+                    # v2.3 handshake (v3): the client proves token knowledge in
+                    # its FIRST message. The server sends NOTHING — no HMAC
+                    # response, no HW profile — until that proof verifies.
+                    # Payload: node_id || challenge_a(32) || hello_proof(32).
+                    #
+                    # SECURITY: Downgrade protection — reject open handshakes
+                    # and pre-v2.3 secure handshakes (no proof appended). A
+                    # server that answered proof-less hellos would be an
+                    # offline brute-force oracle for anyone on the LAN.
+                    if len(payload) < 2 * CHALLENGE_SIZE + 1:
                         logger.warning(
                             "Auth handshake: payload too short from %s "
-                            "(possible downgrade attack or misconfigured peer)",
+                            "(open/pre-v2.3 client, downgrade attack, or "
+                            "misconfigured peer)",
                             peer_ip,
                         )
                         self._rate_limiter.record_failure(peer_ip)
                         writer.close()
                         return
-                    peer_id = payload[:-CHALLENGE_SIZE].decode("utf-8")
-                    challenge_a = payload[-CHALLENGE_SIZE:]
+                    if not (msg.flags & MessageFlags.HANDSHAKE_V2):
+                        logger.warning(
+                            "Auth handshake: client %s did not send the v2+ "
+                            "handshake flag. Secure fleets require all nodes "
+                            "on the same MacFleet version (>= 2.3).",
+                            peer_ip,
+                        )
+                        self._rate_limiter.record_failure(peer_ip)
+                        writer.close()
+                        return
+                    hello_proof = payload[-CHALLENGE_SIZE:]
+                    challenge_a = payload[-2 * CHALLENGE_SIZE:-CHALLENGE_SIZE]
+                    peer_id = payload[:-2 * CHALLENGE_SIZE].decode("utf-8")
 
-                    # v2.2 PR 4: distinguish v2.2 client from v2.1 client via
-                    # the HANDSHAKE_V2 flag. v2.2 gets a signed-HW ACK; v2.1
-                    # gets the legacy ACK (no HW) — this keeps mixed-fleet
-                    # connections alive during upgrade rollout.
-                    v2_handshake = bool(msg.flags & MessageFlags.HANDSHAKE_V2)
-                    if not v2_handshake:
-                        logger.info(
-                            "Auth handshake with v2.1 client %s (%s): no HW "
-                            "exchange, coordinator election will treat peer "
-                            "as zero-compute until both sides upgrade to v2.2",
+                    # Verify the client knows the token BEFORE revealing
+                    # anything. The proof is bound to this server's TLS cert,
+                    # so a MITM relaying a hello it obtained on its own TLS
+                    # leg fails here.
+                    if not verify_client_hello_proof(
+                        fleet_key, peer_id, challenge_a, hello_proof,
+                        self._server_cert_binding,
+                    ):
+                        logger.warning(
+                            "Auth handshake: hello proof from %s (%s) invalid "
+                            "(wrong token, MITM, or version mismatch)",
                             peer_id, peer_ip,
                         )
+                        self._rate_limiter.record_failure(peer_ip)
+                        writer.close()
+                        return
 
-                    # Compute response to peer's challenge + send our own challenge
-                    response_a = compute_response(fleet_key, challenge_a)
-                    challenge_b = generate_challenge()
-                    base_ack = (
-                        self.local_id.encode("utf-8") + response_a + challenge_b
+                    # Client is authentic — now prove ourselves and challenge
+                    # them. Both digests are channel-bound and domain-labeled.
+                    response_a = compute_response(
+                        fleet_key, challenge_a,
+                        label=HS_LABEL_SERVER_RESP,
+                        channel_binding=self._server_cert_binding,
                     )
-                    if v2_handshake:
-                        # Append HW suffix bound to the client's challenge, so
-                        # this payload can't be replayed against another session.
-                        ack_payload = base_ack + _pack_hw_suffix(
+                    challenge_b = generate_challenge()
+                    ack_payload = (
+                        self.local_id.encode("utf-8") + response_a + challenge_b
+                        + _pack_hw_suffix(
                             fleet_key, self.local_id, self._local_hw, challenge_a,
                         )
-                        ack_flags = MessageFlags.HANDSHAKE_V2
-                    else:
-                        ack_payload = base_ack
-                        ack_flags = MessageFlags.NONE
+                    )
                     ack = WireMessage(
                         stream_id=0,
                         msg_type=MessageType.CONTROL,
-                        flags=ack_flags,
+                        flags=MessageFlags.HANDSHAKE_V2,
                         sequence=0,
                         payload=ack_payload,
                     )
@@ -447,26 +506,20 @@ class PeerTransport:
                         WireMessage.read_from_stream(reader),
                         timeout=self.config.connect_timeout_sec,
                     )
-                    # v2.2: peel HW suffix off the RESP before verifying response_b.
-                    # v2.1: RESP is just response_b.
-                    if v2_handshake:
-                        try:
-                            base_resp, peer_hw = _peel_hw_suffix(
-                                fleet_key, peer_id, msg2.payload, challenge_b,
-                            )
-                        except HandshakeHwValidationError as e:
-                            logger.warning(
-                                "Auth handshake: HW suffix from %s (%s) failed: %s",
-                                peer_id, peer_ip, e,
-                            )
-                            self._rate_limiter.record_failure(peer_ip)
-                            writer.close()
-                            await writer.wait_closed()
-                            return
-                        response_b = base_resp
-                    else:
-                        response_b = msg2.payload
-                        peer_hw = None
+                    try:
+                        base_resp, peer_hw = _peel_hw_suffix(
+                            fleet_key, peer_id, msg2.payload, challenge_b,
+                        )
+                    except HandshakeHwValidationError as e:
+                        logger.warning(
+                            "Auth handshake: HW suffix from %s (%s) failed: %s",
+                            peer_id, peer_ip, e,
+                        )
+                        self._rate_limiter.record_failure(peer_ip)
+                        writer.close()
+                        await writer.wait_closed()
+                        return
+                    response_b = base_resp
                     if len(response_b) != CHALLENGE_SIZE:
                         logger.warning(
                             "Auth handshake: RESP response_b wrong size from %s "
@@ -477,7 +530,11 @@ class PeerTransport:
                         writer.close()
                         await writer.wait_closed()
                         return
-                    if not verify_response(fleet_key, challenge_b, response_b):
+                    if not verify_response(
+                        fleet_key, challenge_b, response_b,
+                        label=HS_LABEL_CLIENT_RESP,
+                        channel_binding=self._server_cert_binding,
+                    ):
                         logger.warning(
                             "Auth handshake: peer %s (%s) failed challenge "
                             "(wrong token or attack)",
@@ -506,6 +563,7 @@ class PeerTransport:
                             peer_ip,
                         )
                         writer.close()
+                        await writer.wait_closed()
                         return
 
                     peer_id = payload.decode("utf-8")
@@ -531,7 +589,13 @@ class PeerTransport:
             self._tune_socket(writer, conn.link_type)
 
             async with self._lock:
+                old_conn = self._connections.get(peer_id)
                 self._connections[peer_id] = conn
+
+            # Close any stale connection for this peer_id outside the lock to
+            # avoid leaking its socket on reconnect/duplicate handshake.
+            if old_conn is not None and old_conn is not conn:
+                await old_conn.close()
 
             if self._on_connect:
                 self._on_connect(peer_id, conn)
@@ -586,11 +650,27 @@ class PeerTransport:
         fleet_key = self._security.fleet_key
 
         if fleet_key:
-            # v2.2 PR 4 authenticated handshake: flag the initial CONTROL message
-            # with HANDSHAKE_V2 so the server knows to include a signed HW block
-            # in its ACK. Payload layout (step 1) is unchanged: node_id + challenge.
+            # v2.3 handshake (v3): prove token knowledge in the FIRST message,
+            # bound to the server's TLS certificate. Payload:
+            #   node_id || challenge_a(32) || hello_proof(32)
+            # The server reveals nothing until the proof verifies.
+            channel_binding = tls_channel_binding_from_writer(writer)
+            if self._security.tls and not channel_binding:
+                # Fail closed: secure mode mandates TLS; a missing ssl_object
+                # means the channel is not what we think it is.
+                await conn.close()
+                raise ConnectionError(
+                    f"Auth handshake: expected a TLS channel to {peer_id} but "
+                    f"none was negotiated"
+                )
+
             challenge_a = generate_challenge()
-            handshake_payload = self.local_id.encode("utf-8") + challenge_a
+            hello_proof = compute_client_hello_proof(
+                fleet_key, self.local_id, challenge_a, channel_binding,
+            )
+            handshake_payload = (
+                self.local_id.encode("utf-8") + challenge_a + hello_proof
+            )
 
             handshake = WireMessage(
                 stream_id=0,
@@ -601,81 +681,87 @@ class PeerTransport:
             )
             await conn.send_message(handshake)
 
-            # Read ack. In v2.2 the server ACK is:
+            # Read ack. The server ACK is:
             #   base: peer_id + response_a(32) + challenge_b(32)
             #   then: hw_block = wire_version(1) + hw_len(2) + hw_json + hmac(32)
-            # In v2.1 the ACK is just the base.
-            ack = await asyncio.wait_for(
-                conn.recv_message(),
-                timeout=self.config.connect_timeout_sec,
-            )
+            # A server that finds our hello proof invalid closes WITHOUT
+            # replying (it must not act as an HMAC oracle), so EOF here
+            # almost always means a token mismatch.
+            try:
+                ack = await asyncio.wait_for(
+                    conn.recv_message(),
+                    timeout=self.config.connect_timeout_sec,
+                )
+            except (asyncio.IncompleteReadError, ConnectionResetError, EOFError) as e:
+                await conn.close()
+                raise PeerAuthError(
+                    f"Auth handshake failed: peer {peer_id} rejected our hello "
+                    f"— this node likely does not have the correct token "
+                    f"(secure servers stay silent to unauthenticated peers)"
+                ) from e
             ack_payload = ack.payload
             if len(ack_payload) < CHALLENGE_SIZE * 2 + 1:
                 await conn.close()
                 raise ConnectionError("Auth handshake: server response too short")
 
-            server_v2 = bool(ack.flags & MessageFlags.HANDSHAKE_V2)
-            # Verify token (response_a) FIRST. If tokens mismatch, surface
-            # that error cleanly — without it, a wrong-token client would
-            # blame "HW suffix invalid" instead of "wrong token" because the
-            # HW HMAC uses the same fleet_key and fails for the same reason.
-            # Trailing challenge_b is the last 32B of the ack for v2.1; for
-            # v2.2 it's the last 32B of the base section (before the HW suffix).
-            # We don't know the base boundary yet, but we DO know response_a
-            # ends immediately before challenge_b. In both versions, response_a
-            # is located by finding the structural boundary — simpler: peel
-            # HW first if v2, then verify response_a. On mismatch, raise the
-            # legacy token-error message so existing callers/tests see the
-            # familiar diagnostic regardless of whether the server is v2.1 or v2.2.
-            if server_v2:
-                try:
-                    base_ack, peer_hw = _peel_hw_suffix(
-                        fleet_key, peer_id, ack_payload, challenge_a,
-                    )
-                except HandshakeHwValidationError as e:
-                    # A HW suffix HMAC failure is symptomatically identical
-                    # to a wrong-token failure (same fleet_key, same challenge),
-                    # so surface the same diagnostic. The underlying error is
-                    # chained for debugging.
-                    await conn.close()
-                    raise ConnectionError(
-                        f"Auth handshake failed: peer {peer_id} does not have the correct token"
-                    ) from e
-                if len(base_ack) < CHALLENGE_SIZE * 2 + 1:
-                    await conn.close()
-                    raise ConnectionError(
-                        "Auth handshake v2: ACK base section too short after HW peel"
-                    )
-                response_a = base_ack[-(CHALLENGE_SIZE * 2):-CHALLENGE_SIZE]
-                challenge_b = base_ack[-CHALLENGE_SIZE:]
-                conn.peer_hw = peer_hw
-            else:
-                # Legacy / v2.1 ACK: peer_id + response_a(32) + challenge_b(32)
-                response_a = ack_payload[-(CHALLENGE_SIZE * 2):-CHALLENGE_SIZE]
-                challenge_b = ack_payload[-CHALLENGE_SIZE:]
+            if not (ack.flags & MessageFlags.HANDSHAKE_V2):
+                await conn.close()
+                raise PeerAuthError(
+                    f"Auth handshake failed: peer {peer_id} did not complete "
+                    f"the authenticated handshake (pre-2.3 version or open "
+                    f"fleet — secure fleets need every node on the same "
+                    f"MacFleet version)"
+                )
 
-            # Verify server proved it knows the token
-            if not verify_response(fleet_key, challenge_a, response_a):
+            # Peel the HW suffix first, then verify response_a. A HW-suffix
+            # HMAC failure is symptomatically identical to a wrong-token
+            # failure (same fleet_key, same challenge), so surface the same
+            # diagnostic; the underlying error is chained for debugging.
+            try:
+                base_ack, peer_hw = _peel_hw_suffix(
+                    fleet_key, peer_id, ack_payload, challenge_a,
+                )
+            except HandshakeHwValidationError as e:
+                await conn.close()
+                raise PeerAuthError(
+                    f"Auth handshake failed: peer {peer_id} does not have the correct token"
+                ) from e
+            if len(base_ack) < CHALLENGE_SIZE * 2 + 1:
                 await conn.close()
                 raise ConnectionError(
+                    "Auth handshake v2: ACK base section too short after HW peel"
+                )
+            response_a = base_ack[-(CHALLENGE_SIZE * 2):-CHALLENGE_SIZE]
+            challenge_b = base_ack[-CHALLENGE_SIZE:]
+            conn.peer_hw = peer_hw
+
+            # Verify server proved it knows the token over THIS TLS channel.
+            # A MITM that terminated TLS on both legs shows us a different
+            # cert than the real server signed against → mismatch → reject.
+            if not verify_response(
+                fleet_key, challenge_a, response_a,
+                label=HS_LABEL_SERVER_RESP,
+                channel_binding=channel_binding,
+            ):
+                await conn.close()
+                raise PeerAuthError(
                     f"Auth handshake failed: peer {peer_id} does not have the correct token"
                 )
 
-            # Respond to server's challenge (prove we know the token too).
-            # v2.2: append a HW suffix bound to server's challenge_b. v2.1: just the response.
-            response_b = compute_response(fleet_key, challenge_b)
-            if server_v2:
-                resp_payload = response_b + _pack_hw_suffix(
-                    fleet_key, self.local_id, self._local_hw, challenge_b,
-                )
-                resp_flags = MessageFlags.HANDSHAKE_V2
-            else:
-                resp_payload = response_b
-                resp_flags = MessageFlags.NONE
+            # Respond to server's challenge (prove we know the token too),
+            # with a HW suffix bound to the server's challenge_b.
+            response_b = compute_response(
+                fleet_key, challenge_b,
+                label=HS_LABEL_CLIENT_RESP,
+                channel_binding=channel_binding,
+            )
+            resp_payload = response_b + _pack_hw_suffix(
+                fleet_key, self.local_id, self._local_hw, challenge_b,
+            )
             resp_msg = WireMessage(
                 stream_id=0,
                 msg_type=MessageType.CONTROL,
-                flags=resp_flags,
+                flags=MessageFlags.HANDSHAKE_V2,
                 sequence=0,
                 payload=resp_payload,
             )

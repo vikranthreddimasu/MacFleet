@@ -4,6 +4,81 @@ All notable changes to MacFleet. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security (v3 handshake — all nodes in a secure fleet must upgrade together)
+
+- **Closed the unauthenticated HMAC oracle.** A secure server used to
+  answer ANY connector with `HMAC(fleet_key, attacker_chosen_challenge)`
+  plus its signed hardware profile — free offline brute-force material
+  and hardware recon for anyone on the LAN. The client now proves token
+  knowledge in its FIRST message; the server stays byte-silent (and
+  rate-limits) otherwise.
+- **TLS channel binding (MITM relay defeat).** Handshake HMACs now mix
+  in the SHA-256 fingerprint of the server's TLS certificate as each
+  side sees it. An active attacker terminating TLS on both legs (easy
+  against self-signed + CERT_NONE) produces mismatched digests and the
+  handshake fails on both sides.
+- **Domain-separated handshake digests.** Each handshake step's HMAC
+  carries a distinct label — a digest from one step can never be
+  replayed as another step's.
+- **scrypt fleet-key derivation.** `fleet_key = scrypt(token,
+  salt="macfleet-v3:"+fleet_id, n=2^14, r=8, p=1)` replaces the single
+  HMAC-SHA256 derivation, making offline dictionary attacks against
+  captured handshakes memory-hard. Tokens under 16 chars log a warning.
+- **Heartbeat APONG bound to request nonce.** A captured APONG can no
+  longer be replayed as the answer to a later APING; stale/relayed
+  responses fail verification and the peer is not registered.
+- **Compatibility:** pre-v2.3 secure clients are rejected by v2.3
+  servers (their hello carries no proof — answering it would reopen
+  the oracle). Open fleets (`--open`) are unaffected. Run the same
+  MacFleet version on every node of a secure fleet.
+
+### Setup UX
+
+- **First `macfleet join` auto-prints the pairing QR + URL** (and
+  copies the URL to the pasteboard) when it generates a fresh fleet
+  token — pairing a second Mac needs zero extra flags: Mac #1
+  `macfleet join`, Mac #2 `macfleet pair && macfleet join`.
+  `--bootstrap` still re-prints pairing info for an existing token.
+  Degrades to URL-only (with an install hint) when `qrcode` is absent.
+- **`macfleet doctor` gained a Security section**: fleet token
+  configured, token length, token file permissions (0600).
+
+### Added
+
+- **Distributed `Pool.train()`** — when the pool is distributed with
+  live peers, `pool.train(...)` automatically runs multi-node
+  data-parallel training: SPMD (run the same script on every Mac),
+  gradient mesh over the data ports, rank-0 weight broadcast,
+  allreduce every step. Single-node behavior is unchanged when there
+  are no peers; `distributed=True/False` forces either mode.
+  Distributed results gain `rank`, `world_size`, `avg_sync_time_sec`,
+  and `params_sha256` (identical across ranks iff the fleet stayed in
+  sync). Works for both engines (torch + MLX); `compression=` now
+  actually applies to training started from the SDK.
+- **`macfleet/training/mesh.py`** — SPMD rendezvous: `form_mesh()`
+  turns a registry snapshot into a connected `PeerTransport` +
+  `CollectiveGroup`. Ranks derive from sorted node ids (immune to
+  transient compute-score disagreement between registries). Outbound
+  connects retry until `rendezvous_timeout_sec` (Pool kwarg, default
+  60s) so Macs don't need a synchronized start; missing peers produce
+  a `MeshFormationError` naming exactly who never showed up.
+- **`PeerAuthError`** (subclass of `ConnectionError`) — wrong-token
+  handshakes now fail fast during mesh formation instead of retrying
+  until the deadline and tripping the peer's rate limiter.
+
+### Tests
+
+- `tests/test_comm/test_mesh.py` — 2-node and 3-node (ring) mesh
+  formation, staggered starts, token-secured mesh over TLS,
+  wrong-token fail-fast, rendezvous-timeout remediation.
+  Framework-agnostic.
+- `tests/test_sdk/test_distributed_train.py` — 2-rank end-to-end torch
+  training over loopback: byte-identical final params across ranks,
+  decreasing loss, matching step counts, compression path, routing
+  guards. MLX twin auto-skips when MLX is absent.
+
 ## [2.2.0] — 2026-05-01
 
 Graduates v2.2.0-rc1 to stable. Same shipped features (Phase B

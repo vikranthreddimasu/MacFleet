@@ -152,7 +152,7 @@ class TaskWorker:
 
     async def _execute_and_reply(self, spec: TaskSpec) -> None:
         """Execute a task in the thread pool and send the result back."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             value = await asyncio.wait_for(
                 loop.run_in_executor(

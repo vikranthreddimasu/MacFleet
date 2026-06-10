@@ -104,6 +104,9 @@ class PoolServiceListener(ServiceListener):
             if ip_address is None:
                 return None
 
+            if info.server is None:
+                return None
+
             props = info.properties
             hostname = info.server.rstrip(".")
             node_id = props.get(b"node_id", b"").decode() or hostname

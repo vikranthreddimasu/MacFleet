@@ -59,6 +59,29 @@ TOKEN_ENV_VAR = "MACFLEET_TOKEN"
 # Minimum token length to prevent trivially bruteforceable keys
 MIN_TOKEN_LENGTH = 8
 
+# Tokens shorter than this get a logged warning: with scrypt the keyspace
+# of a random 8-char token is still expensive to brute-force, but short
+# HUMAN-CHOSEN tokens are dictionary-attackable from one captured handshake.
+RECOMMENDED_TOKEN_LENGTH = 16
+
+# scrypt parameters for fleet-key derivation (v2.3 security hardening).
+# Memory-hard KDF makes offline dictionary attacks against captured
+# handshakes ~10^4-10^5x more expensive than the previous single
+# HMAC-SHA256 derivation. n=2^14, r=8 → ~16 MB, ~30-80 ms one-time cost
+# per SecurityConfig construction.
+SCRYPT_N = 2**14
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_MAXMEM = 64 * 1024 * 1024
+
+# Domain-separation labels for the v3 authenticated handshake (v2.3).
+# Each HMAC in the handshake covers a distinct label so a digest from one
+# protocol step can never be replayed as another step's digest.
+HS_LABEL_CLIENT_HELLO = b"MFHSv3-C1:"
+HS_LABEL_SERVER_RESP = b"MFHSv3-S:"
+HS_LABEL_CLIENT_RESP = b"MFHSv3-C2:"
+HB_LABEL_RESPONSE = b"MFHBv3-R:"
+
 # Token file location
 TOKEN_DIR = os.path.expanduser("~/.macfleet")
 TOKEN_FILE = os.path.join(TOKEN_DIR, "fleet-token")
@@ -185,13 +208,30 @@ class SecurityConfig:
                     f"Token must be at least {MIN_TOKEN_LENGTH} characters "
                     f"(got {len(resolved)}). Short tokens are trivially bruteforceable."
                 )
-            # Derive fleet key immediately, then discard raw token
+            if len(resolved) < RECOMMENDED_TOKEN_LENGTH:
+                logger.warning(
+                    "Fleet token is only %d characters. Human-chosen short "
+                    "tokens are dictionary-attackable offline from one captured "
+                    "handshake. Prefer the auto-generated token (delete any "
+                    "--token/MACFLEET_TOKEN override and re-run 'macfleet join') "
+                    "or use %d+ random characters.",
+                    len(resolved), RECOMMENDED_TOKEN_LENGTH,
+                )
+            # Derive fleet key immediately, then discard raw token.
+            # v2.3: scrypt (memory-hard) replaces the single-HMAC derivation —
+            # a captured handshake no longer permits cheap offline dictionary
+            # attacks. NOTE: this changes the derived key for a given token,
+            # so all nodes in a secure fleet must run the same MacFleet version.
             effective_fleet_id = fleet_id or "default"
-            self._fleet_key: Optional[bytes] = hmac_mod.new(
+            self._fleet_key: Optional[bytes] = hashlib.scrypt(
                 resolved.encode("utf-8"),
-                f"macfleet-v2:{effective_fleet_id}".encode("utf-8"),
-                hashlib.sha256,
-            ).digest()
+                salt=f"macfleet-v3:{effective_fleet_id}".encode("utf-8"),
+                n=SCRYPT_N,
+                r=SCRYPT_R,
+                p=SCRYPT_P,
+                maxmem=SCRYPT_MAXMEM,
+                dklen=32,
+            )
             # TLS is mandatory when auth is enabled — never send
             # authenticated handshakes or gradients over plaintext
             self.tls = True
@@ -292,32 +332,103 @@ def generate_challenge() -> bytes:
     return secrets.token_bytes(CHALLENGE_SIZE)
 
 
-def compute_response(fleet_key: bytes, challenge: bytes) -> bytes:
+def compute_response(
+    fleet_key: bytes,
+    challenge: bytes,
+    *,
+    label: bytes = b"",
+    channel_binding: bytes = b"",
+) -> bytes:
     """Compute HMAC-SHA256 response to a challenge.
 
     Args:
         fleet_key: The derived fleet key (from SecurityConfig.fleet_key).
         challenge: The random challenge bytes to respond to.
+        label: Domain-separation label (HS_LABEL_*). Distinct labels mean a
+            digest produced for one handshake step can never be replayed as
+            another step's digest.
+        channel_binding: SHA-256 of the server's TLS certificate (DER), or
+            b"" when TLS is off. Binding the response to the TLS channel
+            defeats MITM relays: an attacker that terminates TLS on both
+            legs presents a different certificate to the client, so digests
+            computed by the two victims disagree and the handshake fails.
 
     Returns:
         32-byte HMAC-SHA256 digest.
     """
-    return hmac_mod.new(fleet_key, challenge, hashlib.sha256).digest()
+    msg = label + challenge + channel_binding
+    return hmac_mod.new(fleet_key, msg, hashlib.sha256).digest()
 
 
-def verify_response(fleet_key: bytes, challenge: bytes, response: bytes) -> bool:
+def verify_response(
+    fleet_key: bytes,
+    challenge: bytes,
+    response: bytes,
+    *,
+    label: bytes = b"",
+    channel_binding: bytes = b"",
+) -> bool:
     """Verify an HMAC challenge response using constant-time comparison.
 
     Args:
         fleet_key: The derived fleet key.
         challenge: The original challenge that was sent.
         response: The response received from the peer.
+        label: Domain-separation label (must match the signer's).
+        channel_binding: TLS channel binding (must match the signer's).
 
     Returns:
         True if the response is valid (peer knows the token).
     """
-    expected = compute_response(fleet_key, challenge)
+    expected = compute_response(
+        fleet_key, challenge, label=label, channel_binding=channel_binding,
+    )
     return hmac_mod.compare_digest(expected, response)
+
+
+def compute_client_hello_proof(
+    fleet_key: bytes,
+    local_id: str,
+    challenge: bytes,
+    channel_binding: bytes = b"",
+) -> bytes:
+    """Proof of token knowledge carried in the FIRST handshake message.
+
+    v2.3 security hardening: before this existed, a secure server would
+    compute and send HMAC(fleet_key, attacker_chosen_challenge) — plus its
+    signed hardware profile — to ANY unauthenticated connector. That was a
+    free offline brute-force oracle and hardware reconnaissance for anyone
+    on the LAN. With the hello proof, the server verifies the client knows
+    the token BEFORE revealing anything.
+
+    The proof covers `label || local_id || ':' || challenge || binding`.
+    Replaying a captured hello against the same server process yields only
+    the byte-identical ACK the attacker already captured (the HW suffix is
+    bound to the replayed challenge); it cannot complete the handshake
+    because step 3 requires answering the server's fresh challenge_b.
+    """
+    msg = (
+        HS_LABEL_CLIENT_HELLO
+        + local_id.encode("utf-8")
+        + b":"
+        + challenge
+        + channel_binding
+    )
+    return hmac_mod.new(fleet_key, msg, hashlib.sha256).digest()
+
+
+def verify_client_hello_proof(
+    fleet_key: bytes,
+    local_id: str,
+    challenge: bytes,
+    proof: bytes,
+    channel_binding: bytes = b"",
+) -> bool:
+    """Verify a client hello proof (constant-time)."""
+    expected = compute_client_hello_proof(
+        fleet_key, local_id, challenge, channel_binding,
+    )
+    return hmac_mod.compare_digest(expected, proof)
 
 
 # ------------------------------------------------------------------ #
@@ -459,6 +570,53 @@ def verify_heartbeat_with_hw(
     return hmac_mod.compare_digest(expected, signature)
 
 
+def sign_heartbeat_response(
+    fleet_key: bytes,
+    node_id: str,
+    resp_nonce: bytes,
+    req_nonce: bytes,
+    hw_json: Optional[bytes] = None,
+) -> bytes:
+    """Sign an APONG heartbeat response, bound to the request's nonce.
+
+    v2.3 security hardening: the old APONG signature covered only the
+    responder's own fresh nonce, so a captured APONG from one exchange was
+    a valid-looking response to ANY later APING. Binding `req_nonce` (the
+    nonce from the APING being answered) pins each response to exactly one
+    request — a relay or replay of a stale APONG fails verification.
+
+    HMAC covers `label || node_id || ':' || resp_nonce || ':' || req_nonce
+    [|| ':' || hw_json]` with the v3 response label, so a response digest
+    can never double as a request digest.
+    """
+    msg = (
+        HB_LABEL_RESPONSE
+        + node_id.encode("utf-8")
+        + b":"
+        + resp_nonce
+        + b":"
+        + req_nonce
+    )
+    if hw_json is not None:
+        msg += b":" + hw_json
+    return hmac_mod.new(fleet_key, msg, hashlib.sha256).digest()
+
+
+def verify_heartbeat_response(
+    fleet_key: bytes,
+    node_id: str,
+    resp_nonce: bytes,
+    req_nonce: bytes,
+    signature: bytes,
+    hw_json: Optional[bytes] = None,
+) -> bool:
+    """Verify a request-bound APONG signature (constant-time)."""
+    expected = sign_heartbeat_response(
+        fleet_key, node_id, resp_nonce, req_nonce, hw_json=hw_json,
+    )
+    return hmac_mod.compare_digest(expected, signature)
+
+
 # ------------------------------------------------------------------ #
 # Gradient Validation (anti-poisoning)                                #
 # ------------------------------------------------------------------ #
@@ -486,6 +644,11 @@ def validate_gradients(
     Raises:
         GradientValidationError: If gradients contain invalid values.
     """
+    # Empty arrays vacuously pass isfinite().all() and then crash .max() with a
+    # ValueError (not GradientValidationError) — reject them explicitly so a peer
+    # cannot bypass the validator with a zero-length payload.
+    if gradients.size == 0:
+        raise GradientValidationError("Received empty gradient array — rejecting.")
     # Single pass for NaN+Inf (avoids 2 separate scans + temp arrays)
     if not np.isfinite(gradients).all():
         if np.isnan(gradients).any():
@@ -537,11 +700,18 @@ def validate_gradient_metadata(
 # ------------------------------------------------------------------ #
 
 
-def create_server_ssl_context() -> ssl.SSLContext:
-    """Create a server-side TLS context with an ephemeral self-signed cert.
+def create_server_tls_context() -> tuple[ssl.SSLContext, bytes]:
+    """Create a server TLS context plus its certificate fingerprint.
+
+    Returns (ctx, sha256_of_der_cert). The fingerprint is the channel
+    binding mixed into every handshake HMAC (v2.3): both peers commit to
+    the SAME TLS channel, so a MITM that terminates TLS on both legs — easy
+    against self-signed certs with CERT_NONE — produces mismatched digests
+    and the handshake fails.
 
     Authentication is handled by HMAC challenge-response, not certificates.
-    TLS is used purely for encryption of gradient data in transit.
+    TLS provides encryption; the fingerprint binding upgrades it from
+    passive-only protection to active-MITM resistance.
 
     Cert + private key are generated in-process via the `cryptography` library.
     They are written to user-only temp files ($TMPDIR is user-scoped on macOS)
@@ -553,7 +723,7 @@ def create_server_ssl_context() -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
-    cert_pem, key_pem = _generate_cert_bytes()
+    cert_pem, key_pem, cert_der = _generate_cert_bytes()
     certfile, keyfile = _write_ephemeral_pem(cert_pem, key_pem)
     try:
         ctx.load_cert_chain(certfile, keyfile)
@@ -563,7 +733,35 @@ def create_server_ssl_context() -> ssl.SSLContext:
                 os.unlink(path)
             except OSError:
                 pass
+    return ctx, hashlib.sha256(cert_der).digest()
+
+
+def create_server_ssl_context() -> ssl.SSLContext:
+    """Create a server-side TLS context with an ephemeral self-signed cert.
+
+    Compatibility wrapper around create_server_tls_context() for callers
+    that don't need the certificate fingerprint (e.g. the heartbeat
+    server, where channel binding is provided by request-nonce binding).
+    """
+    ctx, _ = create_server_tls_context()
     return ctx
+
+
+def tls_channel_binding_from_writer(writer) -> bytes:
+    """Extract the channel binding (peer-cert SHA-256) from a TLS stream.
+
+    Returns b"" when the connection is not TLS (open fleets) — both sides
+    then mix an empty binding into their HMACs, which stays consistent.
+    For a client connected via `asyncio.open_connection(ssl=...)`, the
+    peer certificate is the server's ephemeral self-signed cert.
+    """
+    ssl_obj = writer.get_extra_info("ssl_object")
+    if ssl_obj is None:
+        return b""
+    der = ssl_obj.getpeercert(binary_form=True)
+    if not der:
+        return b""
+    return hashlib.sha256(der).digest()
 
 
 def create_client_ssl_context() -> ssl.SSLContext:
@@ -578,12 +776,13 @@ def create_client_ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def _generate_cert_bytes() -> tuple[bytes, bytes]:
+def _generate_cert_bytes() -> tuple[bytes, bytes, bytes]:
     """Generate an ephemeral self-signed EC (P-256) cert + private key.
 
-    Returns (cert_pem, key_pem) — both as PEM-encoded bytes, never touches
-    disk. SHA-256 signature, 25-hour validity (5-min clock-skew leeway on
-    the not-before bound so agents behind slightly-off clocks still accept
+    Returns (cert_pem, key_pem, cert_der) — all as bytes, never touches
+    disk. cert_der feeds the channel-binding fingerprint. SHA-256
+    signature, 25-hour validity (5-min clock-skew leeway on the
+    not-before bound so agents behind slightly-off clocks still accept
     the cert), SubjectAlternativeName=localhost for server-name checks if
     the client ever enables them.
     """
@@ -607,12 +806,13 @@ def _generate_cert_bytes() -> tuple[bytes, bytes]:
         .sign(private_key, hashes.SHA256())
     )
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    cert_der = cert.public_bytes(serialization.Encoding.DER)
     key_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    return cert_pem, key_pem
+    return cert_pem, key_pem, cert_der
 
 
 def _write_ephemeral_pem(cert_pem: bytes, key_pem: bytes) -> tuple[str, str]:
@@ -641,5 +841,5 @@ def _generate_self_signed_cert() -> tuple[str, str]:
     avoid breaking anything outside this module that imported the private
     helper; `create_server_ssl_context` no longer uses it.
     """
-    cert_pem, key_pem = _generate_cert_bytes()
+    cert_pem, key_pem, _ = _generate_cert_bytes()
     return _write_ephemeral_pem(cert_pem, key_pem)

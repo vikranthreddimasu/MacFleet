@@ -193,10 +193,10 @@ class ThermalPauseController:
             return True
         deadline = (time.monotonic() + timeout_sec) if timeout_sec else float("inf")
         while self.is_paused():
-            time.sleep(self.config.poll_interval_sec)
-            self.tick()
             if time.monotonic() > deadline:
                 return False
+            time.sleep(self.config.poll_interval_sec)
+            self.tick()
         return True
 
     async def async_wait_for_resume(
@@ -208,10 +208,10 @@ class ThermalPauseController:
             return True
         deadline = (time.monotonic() + timeout_sec) if timeout_sec else float("inf")
         while self.is_paused():
-            await asyncio.sleep(self.config.poll_interval_sec)
-            self.tick()
             if time.monotonic() > deadline:
                 return False
+            await asyncio.sleep(self.config.poll_interval_sec)
+            self.tick()
         return True
 
     def last_thermal(self) -> Optional[ThermalState]:

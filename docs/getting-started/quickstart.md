@@ -45,10 +45,12 @@ Good baseline.
 ### Mac #1 — the first on the fleet
 
 ```bash
-macfleet join --bootstrap
+macfleet join
 ```
 
-That starts the agent and prints a QR code:
+The first run auto-generates a fleet token, starts the agent, and
+prints a QR code (later runs reuse the saved token; pass `--bootstrap`
+to re-print pairing info):
 
 ```
 Fleet pairing URL: macfleet://pair?token=...&fleet=default
@@ -82,7 +84,9 @@ macbook-pro             192.168.1.11      Apple M1 Pro     16
 
 ### From Python
 
-Now your Python code can use `enable_pool_distributed=True`:
+Now your Python code can use `enable_pool_distributed=True`. Run the
+**same script on both Macs** (distributed training is SPMD — each Mac
+is one rank):
 
 ```python
 with macfleet.Pool(
@@ -94,8 +98,13 @@ with macfleet.Pool(
     for n in pool.nodes:
         print(f"  {n['hostname']}: {n['chip_name']}, {n['gpu_cores']} GPU cores")
 
-    pool.train(model, dataset, epochs=3)
+    result = pool.train(model, dataset, epochs=3)
+    # result["params_sha256"] is identical on both Macs when in sync
 ```
+
+You don't need to hit Enter at the same moment — the gradient mesh
+waits up to 60s (`rendezvous_timeout_sec`) for the other Mac's script
+to reach `pool.train()`.
 
 ## Dispatching one-off tasks
 

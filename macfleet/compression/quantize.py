@@ -33,7 +33,7 @@ class FP16Quantizer:
         else:
             max_val = t.abs().max().item()
             if max_val > 0:
-                scale = min(1.0, 60000.0 / max_val)
+                scale = 60000.0 / max_val
             else:
                 scale = 1.0
             self._dynamic_scale = scale

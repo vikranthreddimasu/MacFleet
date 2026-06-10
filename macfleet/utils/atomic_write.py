@@ -68,12 +68,18 @@ def atomic_write_bytes(
         os.replace(tmp, path)
 
         if fsync_dir:
-            # Durably record the directory entry itself
-            dir_fd = os.open(parent, os.O_RDONLY)
+            # Durably record the directory entry itself. Best-effort: the data
+            # is already atomically renamed into place, so a dir-fsync failure
+            # must NOT surface as a write failure (the except below would also
+            # wrongly try to unlink the already-renamed temp).
             try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+                dir_fd = os.open(parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
     except BaseException:
         # Clean up the temp file on any failure (KeyboardInterrupt,
         # MemoryError, etc.) so a retry doesn't load partial data.
@@ -106,19 +112,24 @@ def atomic_write_via(
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         writer(tmp)
-        # fsync the file itself for durability
-        fd = os.open(tmp, os.O_RDONLY)
+        # fsync the file itself for durability. Open O_RDWR (not O_RDONLY):
+        # fsync on a read-only fd fails with EBADF/EINVAL on Linux.
+        fd = os.open(tmp, os.O_RDWR)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
         os.replace(tmp, path)
         if fsync_dir:
-            dir_fd = os.open(path.parent, os.O_RDONLY)
+            # Best-effort (see atomic_write_bytes): data is already renamed in.
             try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+                dir_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
     except BaseException:
         # User writer can raise anything (PicklingError, RuntimeError,
         # MemoryError, KeyboardInterrupt). Always remove the partial temp

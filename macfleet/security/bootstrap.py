@@ -34,6 +34,8 @@ import subprocess
 from typing import Optional, TextIO
 from urllib.parse import parse_qs, quote, urlparse
 
+from macfleet.security.auth import MIN_TOKEN_LENGTH
+
 
 class PairingError(ValueError):
     """Raised when a pairing URL can't be parsed or is invalid."""
@@ -87,6 +89,10 @@ def parse_pairing_url(url: str) -> tuple[str, Optional[str]]:
         raise PairingError("URL missing required 'token' parameter")
 
     token = token_values[0]
+    if len(token) < MIN_TOKEN_LENGTH:
+        raise PairingError(
+            f"token is too short ({len(token)} chars); minimum is {MIN_TOKEN_LENGTH}"
+        )
     fleet_values = params.get("fleet") or []
     fleet_id = fleet_values[0] if fleet_values else None
 

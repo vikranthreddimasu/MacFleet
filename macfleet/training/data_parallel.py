@@ -267,7 +267,7 @@ class DataParallel:
         # reflects ACTUAL wire bytes, not the compressed size of the
         # local sparsification. _bytes_saved stays 0 in v2.2.
         try:
-            if self._compressor is not None and self._compressor.active:
+            if self._compressor is not None:
                 compressed = self._compressor.compress(flat_grads)
 
                 if isinstance(compressed, CompressedArray):

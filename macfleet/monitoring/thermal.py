@@ -87,7 +87,7 @@ def get_thermal_state() -> ThermalState:
                                 pressure = ThermalPressure.FAIR
                         except (ValueError, IndexError):
                             pass
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
         pass
 
     # Method 2: IOKit battery temperature (no sudo)
@@ -105,7 +105,7 @@ def get_thermal_state() -> ThermalState:
                         cpu_temp = temp_val / 100.0
                     except (ValueError, IndexError):
                         pass
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
         pass
 
     # Method 3: sysctl CPU thermal level
@@ -126,7 +126,7 @@ def get_thermal_state() -> ThermalState:
                     pressure = ThermalPressure.FAIR
             except ValueError:
                 pass
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
         pass
 
     if not any_succeeded:

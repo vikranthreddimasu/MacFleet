@@ -72,6 +72,7 @@ macfleet/
   training/
     data_parallel.py       # N-node gradient sync with optional adaptive compression
     loop.py                # Composable training loop
+    mesh.py                # SPMD rendezvous: registry snapshot -> PeerTransport mesh + CollectiveGroup
     sampler.py             # Weighted distributed sampler
   utils/
     __init__.py            # Shared utilities
@@ -122,6 +123,8 @@ await dp.sync_gradients()     # allreduce after backward, before step
 ```
 
 Config options: `compression` ("none", "light", "moderate", "aggressive", "adaptive"), `compression_warmup_steps`, `broadcast_params_on_start`.
+
+`Pool.train()` wires this automatically when the pool is distributed with peers (see `_distributed_train_torch` / `_distributed_train_mlx` in `macfleet/sdk/pool.py`). The mesh underneath comes from `form_mesh()` in `macfleet/training/mesh.py`.
 
 ### CollectiveGroup (`macfleet/comm/collectives.py`)
 
@@ -200,8 +203,9 @@ MLX tests auto-skip if MLX is not installed (`pytest.importorskip`).
 
 - **MLX backward pass**: MLX uses functional `nn.value_and_grad()`, not imperative `loss.backward()`. The MLXEngine stores the batch in `forward()` and recomputes with gradients in `backward()`.
 - **Compression pipeline split**: `macfleet/compression/pipeline.py` (torch tensors, v1) vs `macfleet/compression/adaptive.py` (numpy arrays, v2). DataParallel uses the numpy-native adaptive compressor.
-- **Single-node Pool.train()**: The `Pool.train()` SDK method currently runs single-node training. Multi-node requires the programmatic API (PeerTransport + CollectiveGroup + DataParallel).
+- **Distributed Pool.train() is SPMD**: every Mac must run the SAME training script. Each Pool joins the fleet, waits for quorum, then `train()` forms a mesh over the data ports (`macfleet/training/mesh.py`), broadcasts rank 0's weights, and allreduces gradients every step. Ranks come from sorted node_id order (NOT compute_score — score views can transiently disagree across nodes, ids cannot). Equal shards with drop_last keep per-epoch step counts identical on every rank; mismatched step counts would strand the final allreduce.
 - **asyncio everywhere**: Transport, collectives, and heartbeat are all async. Tests use `pytest-asyncio` with `asyncio_mode = "auto"`.
+- **Handshake v3 (v2.3) is client-proves-first**: a secure server must NEVER send bytes (HMAC responses, HW profiles) to a connector that hasn't proven token knowledge — that would reopen the offline brute-force oracle. All handshake HMACs are domain-labeled and bound to the server's TLS cert fingerprint (MITM-relay defense); APONG heartbeat signatures are bound to the request nonce. Fleet keys derive via scrypt. Secure fleets require all nodes on the same version.
 
 ## Don'ts
 

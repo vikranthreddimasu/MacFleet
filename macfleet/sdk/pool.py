@@ -8,6 +8,15 @@
 The Pool handles discovery, cluster formation, engine setup,
 and gradient synchronization. Users just provide a model and data,
 or any Python function for general-purpose compute.
+
+Distributed training is SPMD: run the SAME script on every Mac. Each
+Pool joins the fleet, waits for quorum, and `pool.train(...)` forms a
+training mesh over the data ports, broadcasts rank 0's initial weights,
+and allreduces gradients every step:
+
+    # identical script on each Mac
+    with macfleet.Pool(enable_pool_distributed=True, quorum_size=2) as pool:
+        pool.train(model=MyModel(), dataset=(X, y), epochs=10)
 """
 
 from __future__ import annotations
@@ -78,6 +87,264 @@ def _run_pickled(fn_bytes: bytes, args_bytes: bytes, kwargs_bytes: bytes) -> Any
     return fn(*args, **kwargs)
 
 
+# --------------------------------------------------------------------------- #
+# Distributed training runners (module-level: testable without a Pool/agent)  #
+# --------------------------------------------------------------------------- #
+
+
+async def _distributed_train_torch(
+    *,
+    local_id: str,
+    nodes: list,
+    security: Any = None,
+    local_hw: Any = None,
+    model: Any,
+    dataset: Any,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    optimizer: Any = None,
+    loss_fn: Any = None,
+    device: str = "auto",
+    compression: str = "none",
+    link_type: Any = None,
+    rendezvous_timeout_sec: float = 60.0,
+    seed: int = 0,
+) -> dict:
+    """N-node data-parallel PyTorch training over a freshly formed mesh.
+
+    SPMD: every node calls this with the SAME `nodes` list and its own
+    `local_id`. Ranks come from sorted node_id order (see mesh.derive_ranks).
+
+    `batch_size` is the GLOBAL batch size — each rank processes
+    `batch_size // world_size` samples per step, and gradient averaging
+    makes the effective update equivalent to one global batch.
+
+    Sharding uses equal weights with drop_last=True so every rank runs an
+    IDENTICAL number of allreduce steps per epoch — mismatched step counts
+    would strand the last allreduce until the recv timeout.
+    """
+    import hashlib
+
+    import torch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from macfleet.engines.torch_engine import TorchEngine
+    from macfleet.pool.network import LinkType
+    from macfleet.training.data_parallel import DataParallel, DataParallelConfig
+    from macfleet.training.mesh import form_mesh
+    from macfleet.training.sampler import WeightedDistributedSampler
+
+    mesh = await form_mesh(
+        local_id,
+        nodes,
+        security=security,
+        local_hw=local_hw,
+        rendezvous_timeout_sec=rendezvous_timeout_sec,
+    )
+    try:
+        engine = TorchEngine(device=device)
+        if optimizer is None:
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        engine.load_model(model, optimizer)
+        dev = engine.device
+
+        if isinstance(dataset, (tuple, list)) and len(dataset) == 2:
+            X, y = dataset
+            if not isinstance(X, torch.Tensor):
+                X = torch.tensor(X, dtype=torch.float32)
+            if not isinstance(y, torch.Tensor):
+                y = torch.tensor(y, dtype=torch.long)
+            dataset = TensorDataset(X, y)
+
+        per_rank_batch = max(1, batch_size // mesh.world_size)
+        # drop_last=True → floor(N/world) samples on EVERY rank, so the
+        # per-epoch step count is identical across the fleet.
+        sampler = WeightedDistributedSampler(
+            dataset,
+            num_replicas=mesh.world_size,
+            rank=mesh.rank,
+            shuffle=True,
+            seed=seed,
+            drop_last=True,
+        )
+        dataloader = DataLoader(dataset, batch_size=per_rank_batch, sampler=sampler)
+
+        dp = DataParallel(
+            engine,
+            mesh.group,
+            config=DataParallelConfig(compression=compression),
+            link_type=link_type if link_type is not None else LinkType.UNKNOWN,
+        )
+        await dp.setup()  # validates architecture, broadcasts rank 0's weights
+
+        total_start = time.time()
+        history: list[float] = []
+
+        for epoch in range(epochs):
+            sampler.set_epoch(epoch)
+            epoch_loss = 0.0
+            steps = 0
+            for batch in dataloader:
+                engine.zero_grad()
+
+                if loss_fn is not None:
+                    if len(batch) >= 2:
+                        inputs, targets = batch[0].to(dev), batch[1].to(dev)
+                        outputs = model(inputs)
+                        loss = loss_fn(outputs, targets)
+                    else:
+                        loss = loss_fn(model(batch[0].to(dev)))
+                else:
+                    loss = model(batch[0].to(dev)).sum()
+
+                engine.backward(loss)
+                await dp.sync_gradients()
+                engine.step()
+                epoch_loss += loss.item()
+                steps += 1
+
+            history.append(epoch_loss / max(steps, 1))
+
+        total_time = time.time() - total_start
+        # SHA of final flat params: identical across ranks iff sync held.
+        params_sha = hashlib.sha256(
+            engine.get_flat_parameters().tobytes()
+        ).hexdigest()
+
+        return {
+            "loss": history[-1] if history else 0.0,
+            "loss_history": history,
+            "epochs": epochs,
+            "time_sec": total_time,
+            "steps": epochs * len(dataloader),
+            "rank": mesh.rank,
+            "world_size": mesh.world_size,
+            "avg_sync_time_sec": dp.avg_sync_time_sec,
+            "params_sha256": params_sha,
+        }
+    finally:
+        await mesh.close()
+
+
+async def _distributed_train_mlx(
+    *,
+    local_id: str,
+    nodes: list,
+    security: Any = None,
+    local_hw: Any = None,
+    model: Any,
+    dataset: Any,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    optimizer: Any = None,
+    loss_fn: Any = None,
+    compression: str = "none",
+    link_type: Any = None,
+    rendezvous_timeout_sec: float = 60.0,
+    seed: int = 0,
+) -> dict:
+    """N-node data-parallel MLX training over a freshly formed mesh.
+
+    Same SPMD/sharding contract as _distributed_train_torch: equal
+    floor(N/world) shards per rank so step counts match exactly.
+    """
+    import hashlib
+
+    import mlx.core as mx
+    import mlx.optimizers as optim
+    import numpy as np
+
+    from macfleet.engines.mlx_engine import MLXEngine
+    from macfleet.pool.network import LinkType
+    from macfleet.training.data_parallel import DataParallel, DataParallelConfig
+    from macfleet.training.mesh import form_mesh
+
+    if not (isinstance(dataset, (tuple, list)) and len(dataset) == 2):
+        raise ValueError("MLX training expects dataset as (X, y) tuple")
+
+    mesh = await form_mesh(
+        local_id,
+        nodes,
+        security=security,
+        local_hw=local_hw,
+        rendezvous_timeout_sec=rendezvous_timeout_sec,
+    )
+    try:
+        engine = MLXEngine()
+        if optimizer is None:
+            optimizer = optim.Adam(learning_rate=lr)
+        engine.load_model(model, optimizer, loss_fn=loss_fn)
+
+        X, y = dataset
+        if not isinstance(X, mx.array):
+            X = mx.array(X if not hasattr(X, "numpy") else X.numpy(), dtype=mx.float32)
+        if not isinstance(y, mx.array):
+            y = mx.array(y if not hasattr(y, "numpy") else y.numpy(), dtype=mx.int32)
+
+        n_samples = X.shape[0]
+        shard = n_samples // mesh.world_size  # equal on every rank
+        per_rank_batch = max(1, batch_size // mesh.world_size)
+
+        dp = DataParallel(
+            engine,
+            mesh.group,
+            config=DataParallelConfig(compression=compression),
+            link_type=link_type if link_type is not None else LinkType.UNKNOWN,
+        )
+        await dp.setup()
+
+        total_start = time.time()
+        history: list[float] = []
+
+        for epoch in range(epochs):
+            # Same permutation on every rank (seeded identically), then
+            # disjoint contiguous slices — the numpy analogue of
+            # WeightedDistributedSampler with drop_last=True.
+            rng = np.random.default_rng(seed + epoch)
+            perm = rng.permutation(n_samples)
+            my_idx = perm[mesh.rank * shard : (mesh.rank + 1) * shard]
+
+            epoch_loss = 0.0
+            steps = 0
+            for i in range(0, shard, per_rank_batch):
+                batch_idx = my_idx[i : i + per_rank_batch].tolist()
+                bx = X[batch_idx]
+                by = y[batch_idx]
+
+                engine.zero_grad()
+                loss = engine.forward((bx, by))
+                engine.backward(loss)
+                await dp.sync_gradients()
+                engine.step()
+
+                epoch_loss += float(loss)
+                steps += 1
+
+            history.append(epoch_loss / max(steps, 1))
+
+        total_time = time.time() - total_start
+        steps_per_epoch = (shard + per_rank_batch - 1) // per_rank_batch
+        params_sha = hashlib.sha256(
+            engine.get_flat_parameters().tobytes()
+        ).hexdigest()
+
+        return {
+            "loss": history[-1] if history else 0.0,
+            "loss_history": history,
+            "epochs": epochs,
+            "time_sec": total_time,
+            "steps": epochs * steps_per_epoch,
+            "rank": mesh.rank,
+            "world_size": mesh.world_size,
+            "avg_sync_time_sec": dp.avg_sync_time_sec,
+            "params_sha256": params_sha,
+        }
+    finally:
+        await mesh.close()
+
+
 class Pool:
     """Context manager for a MacFleet compute pool.
 
@@ -108,6 +375,10 @@ class Pool:
         quorum_size: int = 1,
         quorum_timeout_sec: float = 10.0,
         peers: Optional[list[str]] = None,
+        # Budget for all peers to reach pool.train() and connect their
+        # data-plane transports (SPMD scripts are started by hand on each
+        # Mac, so allow a human-scale delay between starts).
+        rendezvous_timeout_sec: float = 60.0,
     ):
         from macfleet.security.auth import resolve_token_with_file
 
@@ -125,6 +396,7 @@ class Pool:
         self.enable_pool_distributed = enable_pool_distributed
         self.quorum_size = quorum_size
         self.quorum_timeout_sec = quorum_timeout_sec
+        self.rendezvous_timeout_sec = rendezvous_timeout_sec
         self._manual_peers = peers or []
         self._joined = False
         self._agent = None
@@ -283,6 +555,15 @@ class Pool:
                 pass
             if self._loop_thread is not None:
                 self._loop_thread.join(timeout=2.0)
+            # Release the selector/epoll fd (stop() alone leaks it), but only
+            # once the loop has actually stopped — close() raises
+            # "Cannot close a running event loop" if the join above timed out
+            # while the loop was still draining tasks.
+            if not self._loop.is_running() and not self._loop.is_closed():
+                try:
+                    self._loop.close()
+                except RuntimeError:
+                    pass
         self._loop = None
         self._loop_thread = None
 
@@ -297,28 +578,46 @@ class Pool:
         loss_fn: Any = None,
         engine: Optional[str] = None,
         compression: str = "none",
+        device: str = "auto",
+        distributed: Optional[bool] = None,
         **kwargs: Any,
     ) -> dict:
         """Train a model on the pool.
 
-        Handles engine setup, data loading, gradient sync, and training.
-        Currently supports single-node training directly and multi-node
-        via the Python programmatic API.
+        Handles engine setup, data loading, and the training loop. When the
+        pool is distributed with live peers, training is automatically
+        multi-node data-parallel: every Mac runs the SAME script, the pool
+        forms a gradient mesh over the data ports, rank 0 broadcasts initial
+        weights, and gradients are allreduced every step. Otherwise training
+        runs single-node on this Mac's best device.
 
         Args:
-            model: PyTorch nn.Module (or MLX model in Phase 2).
-            dataset: PyTorch Dataset or (X, y) tuple.
+            model: PyTorch nn.Module (or MLX model).
+            dataset: PyTorch Dataset or (X, y) tuple. (MLX requires (X, y).)
             epochs: Number of training epochs.
-            batch_size: Global batch size.
+            batch_size: GLOBAL batch size. In distributed mode each rank
+                processes batch_size // world_size samples per step.
             lr: Learning rate (used if optimizer is None).
             optimizer: Pre-configured optimizer (optional).
             loss_fn: Loss function (optional, defaults to model output).
             engine: Override engine type.
-            compression: Compression type.
+            compression: Gradient compression for the distributed path —
+                "none", "light", "moderate", "aggressive", "adaptive".
+                Ignored by single-node training.
+            device: Torch device ("auto", "mps", "cpu"). "auto" picks the
+                Apple Silicon GPU (MPS) when available. Ignored by the MLX
+                engine (unified memory).
+            distributed: Force the training mode. None (default) = auto:
+                multi-node when the pool is distributed with peers, else
+                single-node. True = require multi-node (raises if the pool
+                has no peers). False = force single-node even with peers.
 
         Returns:
             Dict with training results:
-            ``{loss, loss_history, epochs, time_sec, steps}``.
+            ``{loss, loss_history, epochs, time_sec, steps}``, plus
+            ``{rank, world_size, avg_sync_time_sec, params_sha256}`` in
+            distributed mode (params_sha256 matches across ranks iff the
+            fleet stayed in sync).
         """
         if not self._joined:
             raise RuntimeError("Must join pool before training. Use Pool as context manager.")
@@ -327,6 +626,24 @@ class Pool:
         if engine_type not in ("torch", "mlx"):
             raise ValueError(
                 f"Engine '{engine_type}' not supported. Use 'torch' or 'mlx'."
+            )
+
+        has_peers = self.is_distributed and self.world_size > 1
+        if distributed is None:
+            distributed = has_peers
+        elif distributed and not has_peers:
+            raise RuntimeError(
+                "distributed=True but this pool has no live peers. Construct "
+                "Pool(enable_pool_distributed=True, quorum_size=N) and run the "
+                "same training script on every Mac (see docs/guides/train.md), "
+                "or drop distributed=True to train single-node."
+            )
+
+        if not distributed and compression not in (None, "none"):
+            console.print(
+                f"[yellow]Note:[/yellow] compression='{compression}' is ignored "
+                "by single-node training; it only applies to the multi-node "
+                "data-parallel path."
             )
 
         # A4 preflight: reject empty / undersized datasets before we bring up
@@ -344,16 +661,97 @@ class Pool:
             check_dataset_sufficient(
                 dataset_len=dataset_len,
                 batch_size=batch_size,
-                world_size=self.world_size,
+                world_size=self.world_size if distributed else 1,
+            )
+
+        if distributed:
+            return self._train_distributed(
+                model, dataset, epochs, batch_size, lr, optimizer, loss_fn,
+                engine_type=engine_type, compression=compression,
+                device=device, **kwargs,
             )
 
         if engine_type == "torch":
             return self._train_torch(
-                model, dataset, epochs, batch_size, lr, optimizer, loss_fn, **kwargs
+                model, dataset, epochs, batch_size, lr, optimizer, loss_fn,
+                device=device, **kwargs
             )
         return self._train_mlx(
             model, dataset, epochs, batch_size, lr, optimizer, loss_fn, **kwargs
         )
+
+    def _train_distributed(
+        self,
+        model: Any,
+        dataset: Any,
+        epochs: int,
+        batch_size: int,
+        lr: float,
+        optimizer: Any,
+        loss_fn: Any,
+        engine_type: str,
+        compression: str,
+        device: str = "auto",
+        **kwargs: Any,
+    ) -> dict:
+        """Multi-node data-parallel training across the live pool members.
+
+        Snapshots the agent's registry, derives the mesh spec, and runs the
+        async training runner on a fresh event loop in THIS thread. The
+        agent's background loop keeps gossiping heartbeats untouched —
+        training compute must never starve liveness detection.
+        """
+        from macfleet.pool.network import LinkType, get_network_topology
+        from macfleet.training.mesh import NodeSpec, derive_ranks
+
+        agent = self._agent
+        if agent is None or agent.registry is None:
+            raise RuntimeError("Distributed training requires a running pool agent.")
+
+        records = agent.registry.alive_nodes
+        nodes = [
+            NodeSpec(node_id=r.node_id, ip_address=r.ip_address, data_port=r.data_port)
+            for r in records
+        ]
+        local_id = agent.node_id
+        if local_id not in {n.node_id for n in nodes}:
+            raise RuntimeError(
+                "Local node missing from its own registry snapshot — "
+                "agent is mid-shutdown? Re-join the pool and retry."
+            )
+
+        try:
+            best = get_network_topology().best_link
+            link_type = best.link_type if best else LinkType.UNKNOWN
+        except Exception:
+            link_type = LinkType.UNKNOWN
+
+        rank = derive_ranks(nodes)[local_id]
+        console.print(
+            f"[bold blue]MacFleet[/bold blue] distributed training: "
+            f"{len(nodes)} nodes, this Mac is rank {rank} "
+            f"(engine={engine_type}, compression={compression})"
+        )
+
+        common: dict[str, Any] = dict(
+            local_id=local_id,
+            nodes=nodes,
+            security=agent._security,
+            local_hw=agent._local_hw_exchange(),
+            model=model,
+            dataset=dataset,
+            epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            optimizer=optimizer,
+            loss_fn=loss_fn,
+            compression=compression,
+            link_type=link_type,
+            rendezvous_timeout_sec=self.rendezvous_timeout_sec,
+        )
+        if engine_type == "torch":
+            return asyncio.run(_distributed_train_torch(device=device, **common))
+        return asyncio.run(_distributed_train_mlx(**common))
 
     def _train_torch(
         self,
@@ -364,6 +762,7 @@ class Pool:
         lr: float,
         optimizer: Any,
         loss_fn: Any,
+        device: str = "auto",
         **kwargs: Any,
     ) -> dict:
         """Single-node PyTorch training (multi-node via DataParallel in programmatic API)."""
@@ -372,7 +771,8 @@ class Pool:
 
         from macfleet.engines.torch_engine import TorchEngine
 
-        engine = TorchEngine(device="cpu")
+        engine = TorchEngine(device=device)
+        dev = engine.device
 
         # Setup optimizer
         if optimizer is None:
@@ -404,17 +804,14 @@ class Pool:
                 if loss_fn is not None:
                     # Separate input/target batches
                     if len(batch) >= 2:
-                        inputs, targets = batch[0], batch[1]
+                        inputs, targets = batch[0].to(dev), batch[1].to(dev)
                         outputs = model(inputs)
                         loss = loss_fn(outputs, targets)
                     else:
-                        loss = loss_fn(model(batch[0]))
+                        loss = loss_fn(model(batch[0].to(dev)))
                 else:
                     # Model returns loss directly
-                    if len(batch) >= 2:
-                        loss = model(batch[0]).sum()
-                    else:
-                        loss = model(batch[0]).sum()
+                    loss = model(batch[0].to(dev)).sum()
 
                 engine.backward(loss)
                 engine.step()

@@ -225,7 +225,7 @@ class Dashboard:
             self._live = Live(
                 self._render(),
                 console=self._console,
-                refresh_per_second=1.0 / self._refresh_rate,
+                refresh_per_second=self._refresh_rate,
                 transient=True,
             )
             self._live.start()
