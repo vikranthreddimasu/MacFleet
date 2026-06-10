@@ -214,4 +214,7 @@ class TestDispatcherEdgeCases:
             with pytest.raises(RuntimeError, match="No workers"):
                 await dispatcher.submit(times_two, 42)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        # asyncio.run, not get_event_loop(): a prior test that called
+        # asyncio.run() leaves the main thread without a current loop,
+        # making get_event_loop() raise on py3.10+ (CI-order dependent).
+        asyncio.run(run())

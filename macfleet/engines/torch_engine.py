@@ -10,6 +10,7 @@ layer, while model computation stays in PyTorch/MPS for maximum performance.
 from __future__ import annotations
 
 import io
+import logging
 import socket
 from typing import Any, Optional
 
@@ -23,11 +24,45 @@ from macfleet.engines.base import (
     HardwareProfile,
 )
 
+logger = logging.getLogger(__name__)
+
+# Cached result of the one-time MPS allocation probe. None = not probed yet.
+_MPS_PROBE_RESULT: Optional[bool] = None
+
+
+def _mps_actually_works() -> bool:
+    """True iff MPS is advertised AND can really allocate.
+
+    Virtualized macOS (GitHub Actions runners, some VMs) reports
+    `torch.backends.mps.is_available() == True` but the very first
+    allocation fails with "MPS backend out of memory (MPS allocated:
+    0 bytes)". Probe once with a 1-element tensor and cache the answer
+    so `device="auto"` falls back to CPU instead of crashing training.
+    """
+    global _MPS_PROBE_RESULT
+    if _MPS_PROBE_RESULT is None:
+        try:
+            torch.ones(1, device="mps")
+            _MPS_PROBE_RESULT = True
+        except RuntimeError as e:
+            logger.warning(
+                "MPS is advertised but unusable on this machine (%s) — "
+                "falling back to CPU. Pass device='mps' explicitly to "
+                "override.", e,
+            )
+            _MPS_PROBE_RESULT = False
+    return _MPS_PROBE_RESULT
+
 
 def _detect_best_device(preference: str = "auto") -> torch.device:
-    """Select the best available device."""
+    """Select the best available device.
+
+    "auto" picks MPS only when it passes a real allocation probe —
+    an explicit preference (e.g. "mps") is honored as-is so genuine
+    failures surface loudly instead of being silently rerouted.
+    """
     if preference == "auto":
-        if torch.backends.mps.is_available():
+        if torch.backends.mps.is_available() and _mps_actually_works():
             return torch.device("mps")
         return torch.device("cpu")
     return torch.device(preference)
