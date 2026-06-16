@@ -1,7 +1,9 @@
 """Tests for gradient compression. Ported from MacFleet v1."""
 
 import pytest
-import torch
+
+# Skip entire module if torch is not available (Linux CI, non-torch installs).
+torch = pytest.importorskip("torch", reason="torch not installed")
 
 from macfleet.compression.pipeline import (
     CompressionPipeline,
