@@ -93,8 +93,8 @@ class TestPoolTrainRegression:
 
     def test_train_still_works(self):
         """ML training path is unaffected by compute additions."""
-        import torch
-        import torch.nn as nn
+        torch = pytest.importorskip("torch")
+        nn = pytest.importorskip("torch.nn")
 
         model = nn.Sequential(nn.Linear(4, 2))
         X = torch.randn(50, 4)

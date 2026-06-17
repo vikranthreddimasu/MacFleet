@@ -1,7 +1,8 @@
 """Tests for the weighted distributed sampler."""
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 from torch.utils.data import TensorDataset
 
 from macfleet.training.sampler import (
