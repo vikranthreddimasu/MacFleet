@@ -1,7 +1,8 @@
 """Tests for gradient compression. Ported from MacFleet v1."""
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from macfleet.compression.pipeline import (
     CompressionPipeline,

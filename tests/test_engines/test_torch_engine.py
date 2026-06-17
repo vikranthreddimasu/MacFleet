@@ -1,7 +1,9 @@
 """Tests for the PyTorch training engine."""
 
 import numpy as np
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 import torch.nn as nn
 
 from macfleet.engines.base import EngineType
