@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from macfleet.engines.base import Engine
 from macfleet.training.data_parallel import DataParallel
 
 
@@ -71,7 +72,7 @@ class TrainingResult:
 
 
 async def training_loop(
-    engine: object,
+    engine: Engine,
     dp: DataParallel,
     dataloader: Any,
     config: Optional[TrainingConfig] = None,

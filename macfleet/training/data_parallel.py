@@ -29,7 +29,7 @@ from macfleet.compression.adaptive import (
     CompressedArray,
     CompressionLevel,
 )
-from macfleet.engines.base import TrainingMetrics
+from macfleet.engines.base import Engine, TrainingMetrics
 from macfleet.pool.network import LinkType
 from macfleet.security.auth import GradientValidationError, validate_gradients
 
@@ -70,7 +70,7 @@ class DataParallel:
 
     def __init__(
         self,
-        engine: object,  # Engine protocol (TorchEngine or MLXEngine)
+        engine: Engine,
         group: CollectiveGroup,
         config: Optional[DataParallelConfig] = None,
         link_type: LinkType = LinkType.UNKNOWN,
