@@ -261,7 +261,7 @@ class ServiceRegistry:
             properties=properties,
             server=f"{hostname}.local.",
         )
-        self._zeroconf.register_service(self._service_info, ttl=DEFAULT_TTL)
+        self._zeroconf.register_service(self._service_info, ttl=DEFAULT_TTL)  # type: ignore[union-attr]
 
     async def async_register_node(
         self,
@@ -299,7 +299,7 @@ class ServiceRegistry:
             properties=properties,
             server=f"{hostname}.local.",
         )
-        await self._async_zeroconf.async_register_service(
+        await self._async_zeroconf.async_register_service(  # type: ignore[union-attr]
             self._service_info, ttl=DEFAULT_TTL,
         )
 

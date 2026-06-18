@@ -80,7 +80,7 @@ def _pick_ephemeral_port(exclude: int = 0) -> int:
             s.close()
         last_seen = port
         if port != exclude:
-            return port
+            return port  # type: ignore[no-any-return]
     raise RuntimeError(
         f"could not pick an ephemeral port distinct from {exclude} after 32 tries "
         f"(last kernel-assigned port: {last_seen})"
@@ -152,7 +152,7 @@ def _check_mps_available() -> bool:
     """Check if MPS (Metal Performance Shaders) backend is available."""
     try:
         import torch
-        return torch.backends.mps.is_available()
+        return torch.backends.mps.is_available()  # type: ignore[no-any-return]
     except (ImportError, AttributeError):
         return False
 
@@ -752,7 +752,7 @@ class PoolAgent:
                     has_ane=True,
                     chip_name="unknown (manual peer)",
                 )
-            self._registry.register(NodeRecord(
+            self._registry.register(NodeRecord(  # type: ignore[union-attr]
                 node_id=peer_node_id,
                 hostname=peer_node_id,
                 ip_address=host,
@@ -760,7 +760,7 @@ class PoolAgent:
                 data_port=peer_data_port,
                 hardware=hw,
             ))
-            self._heartbeat.add_peer(peer_node_id, host, port, hw.compute_score)
+            self._heartbeat.add_peer(peer_node_id, host, port, hw.compute_score)  # type: ignore[union-attr]
 
             hw_label = (
                 f"{hw.chip_name}, {hw.gpu_cores} GPU cores, {hw.ram_gb:.0f} GB"
@@ -802,7 +802,7 @@ class PoolAgent:
             chip_name=node.chip_name,
         )
 
-        self._registry.register(NodeRecord(
+        self._registry.register(NodeRecord(  # type: ignore[union-attr]
             node_id=node.node_id,
             hostname=node.hostname,
             ip_address=node.ip_address,
@@ -818,10 +818,10 @@ class PoolAgent:
 
         console.print(f"[cyan]Discovered[/cyan] {node.hostname} ({node.chip_name}, {node.gpu_cores} GPU cores)")
 
-        if self._registry.is_coordinator:
+        if self._registry.is_coordinator:  # type: ignore[union-attr]
             console.print(
                 f"[bold yellow]This node is the coordinator[/bold yellow] "
-                f"(world_size={self._registry.world_size})"
+                f"(world_size={self._registry.world_size})"  # type: ignore[union-attr]
             )
 
     def _on_peer_removed(self, hostname: str) -> None:
@@ -834,12 +834,12 @@ class PoolAgent:
 
     def _on_peer_failed(self, node_id: str) -> None:
         """Called when a peer is confirmed failed."""
-        self._registry.mark_failed(node_id)
-        console.print(f"[red]Peer failed:[/red] {node_id} (world_size={self._registry.world_size})")
+        self._registry.mark_failed(node_id)  # type: ignore[union-attr]
+        console.print(f"[red]Peer failed:[/red] {node_id} (world_size={self._registry.world_size})")  # type: ignore[union-attr]
 
     def _on_peer_recovered(self, node_id: str) -> None:
         """Called when a suspected peer recovers."""
-        self._registry.mark_alive(node_id)
+        self._registry.mark_alive(node_id)  # type: ignore[union-attr]
         console.print(f"[green]Peer recovered:[/green] {node_id}")
 
     def _gossip_local_hw_bytes(self) -> Optional[bytes]:

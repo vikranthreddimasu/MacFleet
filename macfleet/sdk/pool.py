@@ -26,7 +26,10 @@ import logging
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
-from typing import Any, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
+
+if TYPE_CHECKING:
+    from macfleet.pool.agent import PoolAgent
 
 import cloudpickle
 from rich.console import Console
@@ -399,8 +402,8 @@ class Pool:
         self.rendezvous_timeout_sec = rendezvous_timeout_sec
         self._manual_peers = peers or []
         self._joined = False
-        self._agent = None
-        self._peers = []
+        self._agent: Optional[PoolAgent] = None
+        self._peers: list[str] = []
 
         # Background event loop — keeps the async PoolAgent alive across
         # sync Pool method calls. Started lazily in join() when the
@@ -470,13 +473,14 @@ class Pool:
         """
         from macfleet.pool.agent import PoolAgent
 
-        self._loop = asyncio.new_event_loop()
+        new_loop = asyncio.new_event_loop()
+        self._loop = new_loop
         ready = threading.Event()
 
         def _run_loop() -> None:
-            asyncio.set_event_loop(self._loop)
+            asyncio.set_event_loop(new_loop)
             ready.set()
-            self._loop.run_forever()
+            new_loop.run_forever()
 
         self._loop_thread = threading.Thread(
             target=_run_loop, name="macfleet-pool-loop", daemon=True,

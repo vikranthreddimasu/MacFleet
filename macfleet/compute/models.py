@@ -135,7 +135,7 @@ class TaskSpec:
 
     def pack(self) -> bytes:
         """Serialize to msgpack bytes for wire transport."""
-        return msgpack.packb({
+        return msgpack.packb({  # type: ignore[no-any-return]
             "task_id": self.task_id,
             "name": self.task_name,
             "args": self.args,
@@ -235,7 +235,7 @@ class TaskResult:
 
     def pack(self) -> bytes:
         """Serialize to msgpack bytes for wire transport."""
-        return msgpack.packb({
+        return msgpack.packb({  # type: ignore[no-any-return]
             "task_id": self.task_id,
             "ok": self.ok,
             "value": self.value,

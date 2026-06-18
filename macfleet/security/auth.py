@@ -319,7 +319,7 @@ class AuthRateLimiter:
         if count == 0:
             return 0.0
         delay = RATE_LIMIT_BASE_DELAY_SEC * (2 ** min(count - 1, 10))
-        return min(delay, RATE_LIMIT_MAX_DELAY_SEC)
+        return min(delay, RATE_LIMIT_MAX_DELAY_SEC)  # type: ignore[no-any-return]
 
 
 # ------------------------------------------------------------------ #

@@ -89,7 +89,7 @@ def _unflatten_params(flat: list[tuple[str, Any]], template: dict) -> dict:
             return obj
         return obj
 
-    return _rebuild("", template)
+    return _rebuild("", template)  # type: ignore[no-any-return]
 
 
 class MLXEngine:
@@ -169,7 +169,7 @@ class MLXEngine:
 
         mx.eval(model.parameters())
 
-    def forward(self, batch: dict[str, Any]) -> Any:
+    def forward(self, batch: Any) -> Any:
         """Run forward pass AND compute gradients in one value_and_grad call.
 
         MLX returns loss and gradients together, so we compute both here (the
@@ -180,6 +180,7 @@ class MLXEngine:
         two-pass approach (loss-only here, recompute in backward) drew
         different randomness and produced mismatched loss/gradients.
         """
+        assert self._loss_and_grad_fn is not None, "No model loaded — call load_model() first"
         self._last_batch = batch
 
         if isinstance(batch, dict):
@@ -423,7 +424,7 @@ class MLXEngine:
             for _, arr in _flatten_params(self._model.parameters())
         )
         # MLX unified memory is more efficient; ~3x for Adam optimizer
-        return param_bytes * 3.0 / (1024**3)
+        return param_bytes * 3.0 / (1024**3)  # type: ignore[no-any-return]
 
     @property
     def capabilities(self) -> EngineCapabilities:

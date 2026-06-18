@@ -138,7 +138,7 @@ def detect_interfaces() -> list[NetworkLink]:
     Returns:
         List of NetworkLink objects with IP and link type.
     """
-    links = []
+    links: list[NetworkLink] = []
     try:
         # Use socket to get all interfaces with IPs
         hostname = socket.gethostname()
@@ -147,7 +147,7 @@ def detect_interfaces() -> list[NetworkLink]:
         seen_ips = set()
 
         for addr_info in addrs:
-            ip = addr_info[4][0]
+            ip = str(addr_info[4][0])  # stubs type this as str|int; AF_INET always yields str
             if ip in seen_ips or ip == "127.0.0.1":
                 continue
             seen_ips.add(ip)
@@ -195,7 +195,7 @@ def _ip_to_interface(ip: str) -> Optional[str]:
 
 def _parse_ifconfig() -> list[NetworkLink]:
     """Parse ifconfig output to get all interfaces (IPv4 + IPv6)."""
-    links = []
+    links: list[NetworkLink] = []
     try:
         result = subprocess.run(
             ["ifconfig"],
