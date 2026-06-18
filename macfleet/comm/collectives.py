@@ -38,7 +38,7 @@ def pack_array(array: np.ndarray) -> bytes:
     dtype_str = str(array.dtype).encode("utf-8")
     ndims = len(array.shape)
     header = struct.pack(f"!HH{'I' * ndims}", len(dtype_str), ndims, *array.shape)
-    return header + dtype_str + array.tobytes()
+    return header + dtype_str + array.tobytes()  # type: ignore[no-any-return]
 
 
 def unpack_array(data: bytes) -> np.ndarray:

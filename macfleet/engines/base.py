@@ -95,7 +95,7 @@ class Engine(Protocol):
         """Load a model and optional optimizer into the engine."""
         ...
 
-    def forward(self, batch: dict[str, Any]) -> Any:
+    def forward(self, batch: Any) -> Any:
         """Run forward pass on a batch. Returns loss (framework-specific)."""
         ...
 

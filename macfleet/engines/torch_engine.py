@@ -119,8 +119,9 @@ class TorchEngine:
             return []
         return [p for p in self._model.parameters() if p.requires_grad]
 
-    def forward(self, batch: dict[str, Any]) -> Any:
-        """Run forward pass. Accepts dict or positional args."""
+    def forward(self, batch: Any) -> Any:
+        """Run forward pass. Accepts dict, tuple, or any positional args."""
+        assert self._model is not None, "No model loaded — call load_model() first"
         if isinstance(batch, dict):
             # Move tensors to device
             device_batch = {
@@ -211,6 +212,7 @@ class TorchEngine:
 
     def state_dict(self) -> bytes:
         """Serialize model + optimizer state for checkpointing."""
+        assert self._model is not None, "No model loaded — call load_model() first"
         buffer = io.BytesIO()
         state = {"model": self._model.state_dict()}
         if self._optimizer:
@@ -220,6 +222,7 @@ class TorchEngine:
 
     def load_state_dict(self, data: bytes) -> None:
         """Load model + optimizer from checkpoint bytes."""
+        assert self._model is not None, "No model loaded — call load_model() first"
         buffer = io.BytesIO(data)
         state = torch.load(buffer, map_location=self._device, weights_only=True)
         self._model.load_state_dict(state["model"])
@@ -271,14 +274,14 @@ class TorchEngine:
         for p in self._model.parameters():
             if p.grad is not None:
                 total += p.grad.numel() * p.grad.element_size()
-        return total / (1024**3)
+        return total / (1024**3)  # type: ignore[no-any-return]
 
     def estimated_model_memory_gb(self) -> float:
         """Estimated total memory needed (params + grads + optimizer + activations)."""
         if not self._model:
             return 0.0
         param_bytes = sum(p.numel() * p.element_size() for p in self._model.parameters())
-        return param_bytes * 4.5 / (1024**3)  # ~4.5x for Adam optimizer
+        return param_bytes * 4.5 / (1024**3)  # type: ignore[no-any-return]
 
     @property
     def capabilities(self) -> EngineCapabilities:

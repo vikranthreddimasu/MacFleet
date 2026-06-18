@@ -78,7 +78,7 @@ def tensor_to_bytes(
     inner_header = struct.pack("!IIII", msg_type, dtype_code, n_dims, len(payload))
     shape_bytes = struct.pack(f"!{n_dims}I", *shape)
 
-    return inner_header + shape_bytes + payload
+    return inner_header + shape_bytes + payload  # type: ignore[no-any-return]
 
 
 def bytes_to_tensor(
@@ -140,7 +140,7 @@ def serialize_compressed_gradient(
     orig_dtype_code = DTYPE_TO_CODE.get(original_dtype, 0)
     metadata = struct.pack("!III", original_numel, topk_count, orig_dtype_code)
 
-    return header + metadata + indices_bytes + values_bytes
+    return header + metadata + indices_bytes + values_bytes  # type: ignore[no-any-return]
 
 
 def deserialize_compressed_gradient(
