@@ -445,6 +445,7 @@ class PeerTransport:
                         )
                         self._rate_limiter.record_failure(peer_ip)
                         writer.close()
+                        await writer.wait_closed()
                         return
                     if not (msg.flags & MessageFlags.HANDSHAKE_V2):
                         logger.warning(
@@ -455,6 +456,7 @@ class PeerTransport:
                         )
                         self._rate_limiter.record_failure(peer_ip)
                         writer.close()
+                        await writer.wait_closed()
                         return
                     hello_proof = payload[-CHALLENGE_SIZE:]
                     challenge_a = payload[-2 * CHALLENGE_SIZE:-CHALLENGE_SIZE]
@@ -475,6 +477,7 @@ class PeerTransport:
                         )
                         self._rate_limiter.record_failure(peer_ip)
                         writer.close()
+                        await writer.wait_closed()
                         return
 
                     # Client is authentic — now prove ourselves and challenge
@@ -582,6 +585,7 @@ class PeerTransport:
                 logger.debug("Handshake error from %s: %s", peer_ip, e)
                 try:
                     writer.close()
+                    await writer.wait_closed()
                 except Exception:
                     pass
                 return
