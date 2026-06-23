@@ -145,16 +145,24 @@ class PoolServiceListener(ServiceListener):
 
             props = info.properties
             hostname = info.server.rstrip(".")
-            node_id = props.get(b"node_id", b"").decode() or hostname
-            gpu_cores = int(props.get(b"gpu_cores", b"0").decode())
-            ram_gb = int(props.get(b"ram_gb", b"0").decode())
-            chip_name = props.get(b"chip_name", b"unknown").decode()
-            link_types = props.get(b"link_types", b"").decode()
-            pool_version = props.get(b"pool_version", b"0.0.0").decode()
-            compute_score = float(props.get(b"compute_score", b"0").decode())
+
+            def _prop(key: bytes, default: bytes) -> bytes:
+                val = props.get(key)
+                return val if isinstance(val, bytes) else default
+
+            node_id = _prop(b"node_id", b"").decode() or hostname
+            gpu_cores = int(_prop(b"gpu_cores", b"0").decode())
+            ram_gb = int(_prop(b"ram_gb", b"0").decode())
+            chip_name = _prop(b"chip_name", b"unknown").decode()
+            link_types = _prop(b"link_types", b"").decode()
+            pool_version = _prop(b"pool_version", b"0.0.0").decode()
+            compute_score = float(_prop(b"compute_score", b"0").decode())
             # data_port advertised since v2.2; 2.1.x peers lack this. DiscoveredNode
             # __post_init__ falls back to heartbeat port + 1 when 0.
-            data_port = int(props.get(b"data_port", b"0").decode())
+            data_port = int(_prop(b"data_port", b"0").decode())
+
+            if info.port is None:
+                return None
 
             return DiscoveredNode(
                 hostname=hostname,
@@ -370,6 +378,7 @@ class ServiceRegistry:
         self._listener = PoolServiceListener(
             on_add=track_add, on_remove=track_remove, on_update=track_update,
         )
+        assert self._zeroconf is not None
         self._browser = ServiceBrowser(
             self._zeroconf, self._service_type, self._listener,
         )
@@ -402,6 +411,7 @@ class ServiceRegistry:
                 found.append(node)
 
         listener = PoolServiceListener(on_add=on_add)
+        assert self._zeroconf is not None
         browser = ServiceBrowser(self._zeroconf, self._service_type, listener)
 
         time.sleep(timeout)
@@ -422,6 +432,7 @@ class ServiceRegistry:
                 found.append(node)
 
         listener = PoolServiceListener(on_add=on_add)
+        assert self._zeroconf is not None
         browser = ServiceBrowser(self._zeroconf, self._service_type, listener)
 
         try:
