@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import struct
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 
@@ -153,9 +153,9 @@ class CollectiveGroup:
         _, remote = await asyncio.gather(_send(), _recv())
 
         if op == "mean":
-            return (array + remote) / 2.0
+            return cast(np.ndarray, (array + remote) / 2.0)
         elif op == "sum":
-            return array + remote
+            return cast(np.ndarray, array + remote)
         raise ValueError(f"Unknown reduction op: {op}")
 
     async def _ring_allreduce(
@@ -273,9 +273,13 @@ class CollectiveGroup:
             This rank's chunk of the array.
         """
         if self.world_size == 1:
+            if array is None:
+                raise ValueError("src rank must provide array to scatter")
             return array
 
         if self.rank == src:
+            if array is None:
+                raise ValueError("src rank must provide array to scatter")
             chunks = np.array_split(array, self.world_size)
             sends = [
                 self._send_array(r, chunks[r])
@@ -303,7 +307,7 @@ class CollectiveGroup:
             return np.expand_dims(array, 0)
 
         if self.rank == dst:
-            chunks = [None] * self.world_size
+            chunks: list[Optional[np.ndarray]] = [None] * self.world_size
             chunks[dst] = array
 
             recv_ranks = [r for r in range(self.world_size) if r != dst]
@@ -313,7 +317,7 @@ class CollectiveGroup:
             for r, received in zip(recv_ranks, results):
                 chunks[r] = received
 
-            return np.stack(chunks)
+            return np.stack(cast(list[np.ndarray], chunks))
         else:
             await self._send_array(dst, array)
             return None
