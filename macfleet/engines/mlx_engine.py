@@ -322,7 +322,7 @@ class MLXEngine:
                 pass
 
         buffer = io.BytesIO()
-        np.savez(buffer, **state)
+        np.savez(buffer, **state)  # type: ignore[arg-type]  # numpy 2.x stubs expose allow_pickle:bool; **state is safe here
         return buffer.getvalue()
 
     def load_state_dict(self, data: bytes) -> None:
