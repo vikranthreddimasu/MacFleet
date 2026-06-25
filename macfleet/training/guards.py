@@ -15,9 +15,59 @@ hangs forever. Both are terrible UX — users blame the framework for
 
 from __future__ import annotations
 
+import math
+
 
 class DatasetSizeError(ValueError):
     """Raised when a dataset is too small for the requested batch/world size."""
+
+
+class TrainingConfigError(ValueError):
+    """Raised when training hyperparameters cannot produce a valid run."""
+
+
+VALID_TRAINING_COMPRESSION = frozenset(
+    {"none", "light", "moderate", "aggressive", "adaptive"}
+)
+
+
+def check_training_options(
+    *,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    compression: str | None,
+) -> str:
+    """Validate core Pool.train options and return normalized compression.
+
+    This guard runs before engine setup or DataLoader construction, so common
+    mistakes fail with direct messages instead of late framework exceptions.
+    """
+    if not isinstance(epochs, int) or isinstance(epochs, bool) or epochs < 1:
+        raise TrainingConfigError(
+            f"epochs must be a positive integer (>= 1), got {epochs!r}."
+        )
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+        raise TrainingConfigError(
+            f"batch_size must be a positive integer (>= 1), got {batch_size!r}."
+        )
+    if (
+        not isinstance(lr, (int, float))
+        or isinstance(lr, bool)
+        or not math.isfinite(float(lr))
+        or float(lr) <= 0
+    ):
+        raise TrainingConfigError(
+            f"lr must be a positive finite number (> 0), got {lr!r}."
+        )
+
+    normalized = "none" if compression is None else compression
+    if not isinstance(normalized, str) or normalized not in VALID_TRAINING_COMPRESSION:
+        valid = ", ".join(sorted(VALID_TRAINING_COMPRESSION))
+        raise TrainingConfigError(
+            f"compression must be one of: {valid}. Got {compression!r}."
+        )
+    return normalized
 
 
 def check_dataset_sufficient(

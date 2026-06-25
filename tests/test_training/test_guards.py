@@ -9,7 +9,62 @@ from __future__ import annotations
 
 import pytest
 
-from macfleet.training.guards import DatasetSizeError, check_dataset_sufficient
+from macfleet.training.guards import (
+    DatasetSizeError,
+    TrainingConfigError,
+    check_dataset_sufficient,
+    check_training_options,
+)
+
+
+class TestCheckTrainingOptions:
+    def test_happy_path_returns_normalized_compression(self):
+        assert (
+            check_training_options(
+                epochs=1,
+                batch_size=32,
+                lr=0.001,
+                compression=None,
+            )
+            == "none"
+        )
+
+    def test_epochs_must_be_positive_integer(self):
+        with pytest.raises(TrainingConfigError, match="epochs"):
+            check_training_options(
+                epochs=0,
+                batch_size=32,
+                lr=0.001,
+                compression="none",
+            )
+
+    def test_batch_size_must_be_positive_integer(self):
+        with pytest.raises(TrainingConfigError, match="batch_size"):
+            check_training_options(
+                epochs=1,
+                batch_size=0,
+                lr=0.001,
+                compression="none",
+            )
+
+    def test_lr_must_be_positive_finite(self):
+        for lr in (0, -0.1, float("nan"), float("inf")):
+            with pytest.raises(TrainingConfigError, match="lr"):
+                check_training_options(
+                    epochs=1,
+                    batch_size=32,
+                    lr=lr,
+                    compression="none",
+                )
+
+    def test_compression_must_be_known_mode(self):
+        with pytest.raises(TrainingConfigError, match="compression"):
+            check_training_options(
+                epochs=1,
+                batch_size=32,
+                lr=0.001,
+                compression="typo",
+            )
 
 
 class TestCheckDatasetSufficient:

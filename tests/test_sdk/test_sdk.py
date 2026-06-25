@@ -11,6 +11,7 @@ import torch.nn as nn
 import macfleet
 from macfleet.sdk.decorators import distributed
 from macfleet.sdk.pool import Pool
+from macfleet.training.guards import TrainingConfigError
 
 # ------------------------------------------------------------------ #
 # Test models                                                        #
@@ -65,6 +66,28 @@ class TestPoolSDK:
         with Pool(engine="invalid") as pool:
             with pytest.raises(ValueError, match="not supported"):
                 pool.train(model=SimpleMLP(), dataset=(np.zeros((10, 4)), np.zeros(10)))
+
+    def test_pool_train_rejects_invalid_training_options(self):
+        model = SimpleMLP()
+        dataset = (np.zeros((32, 4), dtype=np.float32), np.zeros(32, dtype=np.int64))
+
+        cases = [
+            {"epochs": 0},
+            {"batch_size": 0},
+            {"lr": 0},
+            {"lr": float("nan")},
+            {"compression": "typo"},
+        ]
+
+        with Pool(open=True) as pool:
+            for kwargs in cases:
+                with pytest.raises(TrainingConfigError):
+                    pool.train(
+                        model=model,
+                        dataset=dataset,
+                        loss_fn=nn.CrossEntropyLoss(),
+                        **kwargs,
+                    )
 
     def test_pool_world_size(self):
         pool = Pool()

@@ -640,6 +640,14 @@ class Pool:
             raise ValueError(
                 f"Engine '{engine_type}' not supported. Use 'torch' or 'mlx'."
             )
+        from macfleet.training.guards import check_training_options
+
+        compression = check_training_options(
+            epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            compression=compression,
+        )
 
         has_peers = self.is_distributed and self.world_size > 1
         if distributed is None:
@@ -671,6 +679,7 @@ class Pool:
             pass
         else:
             from macfleet.training.guards import check_dataset_sufficient
+
             check_dataset_sufficient(
                 dataset_len=dataset_len,
                 batch_size=batch_size,
