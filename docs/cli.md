@@ -56,11 +56,14 @@ Pair this Mac with an existing fleet and write the token to
 ```
 macfleet pair --host HOST:PORT --code ONE-TIME-CODE
 macfleet pair --stdin
+macfleet pair --pasteboard
 ```
 
 Use `--host/--code` with the command printed by
 `macfleet join --bootstrap`. `--stdin` is a legacy migration path for
-old `macfleet://pair?token=...` URLs.
+old `macfleet://pair?token=...` URLs. `--pasteboard` is also available
+for legacy URL migration, but it must be requested explicitly so the CLI
+does not silently trust pasteboard contents.
 
 ## `macfleet rotate-token`
 

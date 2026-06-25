@@ -63,11 +63,12 @@ Older MacFleet builds used URLs like:
 macfleet://pair?token=<permanent-token>&fleet=<fleet-id>
 ```
 
-Current `macfleet pair` still accepts those URLs from pasteboard or
-stdin for migration:
+Current `macfleet pair` still accepts those URLs from explicit stdin or
+pasteboard input for migration:
 
 ```bash
 echo "macfleet://pair?token=...&fleet=default" | macfleet pair --stdin
+macfleet pair --pasteboard
 ```
 
 Treat a legacy URL exactly like a password. Anyone with it can join the

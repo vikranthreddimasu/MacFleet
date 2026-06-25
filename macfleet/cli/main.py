@@ -749,6 +749,13 @@ def _bench_allreduce(size_mb: int, iterations: int):
     help="Read a legacy token-bearing pairing URL from stdin.",
 )
 @click.option(
+    "--pasteboard",
+    "from_pasteboard",
+    is_flag=True,
+    default=False,
+    help="Read a legacy token-bearing pairing URL from the macOS pasteboard.",
+)
+@click.option(
     "--host",
     "enroll_host",
     default=None,
@@ -760,12 +767,18 @@ def _bench_allreduce(size_mb: int, iterations: int):
     default=None,
     help="One-time enrollment code from `macfleet join --bootstrap`.",
 )
-def pair(from_stdin: bool, enroll_host: str | None, enroll_code: str | None):
+def pair(
+    from_stdin: bool,
+    from_pasteboard: bool,
+    enroll_host: str | None,
+    enroll_code: str | None,
+):
     """Pair this Mac with an existing fleet.
 
     Preferred flow: use the short-lived host/code printed by
     `macfleet join --bootstrap`. Legacy `macfleet://pair?token=...` URLs
-    are still accepted from pasteboard or stdin so existing setups can migrate.
+    are still accepted from explicitly requested pasteboard or stdin input
+    so existing setups can migrate.
 
     \b
     Typical flow:
@@ -787,8 +800,10 @@ def pair(from_stdin: bool, enroll_host: str | None, enroll_code: str | None):
     )
 
     if enroll_host or enroll_code:
-        if from_stdin:
-            console.print("[red]Error: --stdin cannot be combined with --host/--code.[/red]")
+        if from_stdin or from_pasteboard:
+            console.print(
+                "[red]Error: legacy URL input cannot be combined with --host/--code.[/red]"
+            )
             sys.exit(1)
         if not enroll_host or not enroll_code:
             console.print("[red]Error: --host and --code must be provided together.[/red]")
@@ -813,12 +828,16 @@ def pair(from_stdin: bool, enroll_host: str | None, enroll_code: str | None):
         )
         return
 
+    if from_stdin and from_pasteboard:
+        console.print("[red]Error: choose only one legacy URL input source.[/red]")
+        sys.exit(1)
+
     if from_stdin:
         url = sys.stdin.read().strip()
         if not url:
             console.print("[red]Error: no URL on stdin.[/red]")
             sys.exit(1)
-    else:
+    elif from_pasteboard:
         url = read_from_pasteboard()
         if not url:
             console.print(
@@ -829,6 +848,14 @@ def pair(from_stdin: bool, enroll_host: str | None, enroll_code: str | None):
             )
             sys.exit(1)
         url = url.strip()
+    else:
+        console.print(
+            "[red]Error: pairing requires an explicit input source.[/red]\n"
+            "[dim]Preferred: run `macfleet join --bootstrap` on the first Mac, "
+            "then run the printed `macfleet pair --host ... --code ...` command here.[/dim]\n"
+            "[dim]Legacy URL migration: use --stdin or --pasteboard explicitly.[/dim]"
+        )
+        sys.exit(1)
 
     try:
         token, fleet_id = parse_pairing_url(url)

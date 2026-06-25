@@ -76,7 +76,24 @@ class TestPairFromStdin:
 
 
 class TestPairFromPasteboard:
-    def test_reads_from_pasteboard(self, tmp_path: Path, monkeypatch):
+    def test_default_requires_explicit_input_source(self, tmp_path: Path, monkeypatch):
+        token_path = tmp_path / "token"
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+
+        url = "macfleet://pair?token=pasteboard-token&fleet=cluster-a"
+        with patch(
+            "macfleet.security.bootstrap.read_from_pasteboard",
+            return_value=url,
+        ) as read_from_pasteboard:
+            runner = CliRunner()
+            result = runner.invoke(cli, ["pair"])
+
+        assert result.exit_code == 1
+        assert "explicit input source" in result.output
+        assert not token_path.exists()
+        read_from_pasteboard.assert_not_called()
+
+    def test_reads_from_pasteboard_when_explicit(self, tmp_path: Path, monkeypatch):
         token_path = tmp_path / "token"
         monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
 
@@ -86,7 +103,7 @@ class TestPairFromPasteboard:
             return_value=url,
         ):
             runner = CliRunner()
-            result = runner.invoke(cli, ["pair"])
+            result = runner.invoke(cli, ["pair", "--pasteboard"])
 
         assert result.exit_code == 0
         assert "Paired" in result.output
@@ -98,7 +115,7 @@ class TestPairFromPasteboard:
             return_value=None,
         ):
             runner = CliRunner()
-            result = runner.invoke(cli, ["pair"])
+            result = runner.invoke(cli, ["pair", "--pasteboard"])
         assert result.exit_code == 1
         clean = " ".join(result.output.split())
         assert "pasteboard" in clean
@@ -109,10 +126,20 @@ class TestPairFromPasteboard:
             return_value=None,
         ):
             runner = CliRunner()
-            result = runner.invoke(cli, ["pair"])
+            result = runner.invoke(cli, ["pair", "--pasteboard"])
         # Error message should hint at the --stdin workaround
         clean = " ".join(result.output.split())
         assert "--stdin" in clean
+
+    def test_rejects_multiple_legacy_sources(self):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["pair", "--stdin", "--pasteboard"],
+            input="macfleet://pair?token=secret-token",
+        )
+        assert result.exit_code == 1
+        assert "choose only one" in result.output
 
 
 class TestPairFromEnrollment:
@@ -155,6 +182,22 @@ class TestPairFromEnrollment:
         assert result.exit_code == 1
         assert "--host and --code" in result.output
 
+    def test_host_code_rejects_pasteboard(self):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "pair",
+                "--host",
+                "127.0.0.1:1234",
+                "--code",
+                "ABCD-EFGH-IJKL-MNOP",
+                "--pasteboard",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "cannot be combined" in result.output
+
 
 class TestBootstrapFlag:
     def test_open_plus_bootstrap_rejected(self):
@@ -184,3 +227,8 @@ class TestCliHelp:
         result = runner.invoke(cli, ["join", "--help"])
         assert "--bootstrap" in result.output
         assert "--allow-insecure-open" in result.output
+
+    def test_pasteboard_flag_in_pair_help(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["pair", "--help"])
+        assert "--pasteboard" in result.output
