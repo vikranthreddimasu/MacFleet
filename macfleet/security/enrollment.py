@@ -21,6 +21,7 @@ from typing import Optional, TextIO
 from macfleet.security.audit import audit_event
 from macfleet.security.auth import (
     MIN_TOKEN_LENGTH,
+    AuthRateLimiter,
     create_client_ssl_context,
     create_server_tls_context,
     tls_channel_binding_from_writer,
@@ -31,6 +32,8 @@ DEFAULT_ENROLLMENT_TTL_SEC = 300
 DEFAULT_ENROLLMENT_MAX_USES = 1
 ENROLLMENT_READ_LIMIT_BYTES = 4096
 ENROLLMENT_READ_TIMEOUT_SEC = 10.0
+ENROLLMENT_NONCE_BYTES = 16
+ENROLLMENT_PROOF_BYTES = 32
 
 _LABEL_CLIENT = b"MFENROLLv1-C:"
 
@@ -131,6 +134,8 @@ class EnrollmentServer:
         self._started_at_monotonic = 0.0
         self._expires_at_epoch = 0.0
         self._uses = 0
+        self._use_lock = asyncio.Lock()
+        self._rate_limiter = AuthRateLimiter()
 
     @property
     def bound_port(self) -> int:
@@ -193,6 +198,14 @@ class EnrollmentServer:
         peer = writer.get_extra_info("peername")
         peer_ip = peer[0] if peer else "unknown"
         try:
+            if self._rate_limiter.is_banned(peer_ip):
+                audit_event("enrollment.rejected", reason="rate_limited", peer_ip=peer_ip)
+                return
+
+            delay = self._rate_limiter.get_delay(peer_ip)
+            if delay > 0:
+                await asyncio.sleep(delay)
+
             if self._expired() or self._uses >= self.max_uses:
                 audit_event("enrollment.rejected", reason="expired_or_used", peer_ip=peer_ip)
                 await self._write_response(writer, {"ok": False, "error": "enrollment expired"})
@@ -202,26 +215,52 @@ class EnrollmentServer:
                 reader.readline(),
                 timeout=ENROLLMENT_READ_TIMEOUT_SEC,
             )
-            if not line or len(line) > ENROLLMENT_READ_LIMIT_BYTES:
+            if not line:
+                audit_event("enrollment.rejected", reason="empty_request", peer_ip=peer_ip)
+                return
+            if len(line) > ENROLLMENT_READ_LIMIT_BYTES:
+                self._rate_limiter.record_failure(peer_ip)
                 audit_event("enrollment.rejected", reason="bad_request_size", peer_ip=peer_ip)
                 return
             try:
                 request = json.loads(line.decode("utf-8"))
+                if not isinstance(request, dict):
+                    raise ValueError("request must be a JSON object")
                 nonce = bytes.fromhex(str(request["nonce"]))
                 received = bytes.fromhex(str(request["proof"]))
+                if len(nonce) != ENROLLMENT_NONCE_BYTES:
+                    raise ValueError("nonce has wrong size")
+                if len(received) != ENROLLMENT_PROOF_BYTES:
+                    raise ValueError("proof has wrong size")
             except (KeyError, ValueError, TypeError, json.JSONDecodeError):
+                self._rate_limiter.record_failure(peer_ip)
                 audit_event("enrollment.rejected", reason="malformed_request", peer_ip=peer_ip)
                 return
 
             if request.get("version") != ENROLLMENT_VERSION:
+                self._rate_limiter.record_failure(peer_ip)
                 audit_event("enrollment.rejected", reason="version_mismatch", peer_ip=peer_ip)
                 return
 
             if not _verify_proof(self.code, nonce, self._cert_binding, received):
+                self._rate_limiter.record_failure(peer_ip)
                 audit_event("enrollment.rejected", reason="bad_code_or_mitm", peer_ip=peer_ip)
                 return
 
-            self._uses += 1
+            async with self._use_lock:
+                if self._expired() or self._uses >= self.max_uses:
+                    audit_event(
+                        "enrollment.rejected",
+                        reason="expired_or_used",
+                        peer_ip=peer_ip,
+                    )
+                    await self._write_response(
+                        writer, {"ok": False, "error": "enrollment expired"}
+                    )
+                    return
+                self._uses += 1
+
+            self._rate_limiter.record_success(peer_ip)
             await self._write_response(
                 writer,
                 {
@@ -243,6 +282,7 @@ class EnrollmentServer:
             if self._uses >= self.max_uses and self._server is not None:
                 self._server.close()
         except asyncio.TimeoutError:
+            self._rate_limiter.record_failure(peer_ip)
             audit_event("enrollment.rejected", reason="timeout", peer_ip=peer_ip)
         finally:
             writer.close()
