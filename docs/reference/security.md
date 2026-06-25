@@ -215,9 +215,12 @@ role checks before invocation.
 ## Audit log
 
 MacFleet writes a local JSONL audit trail at `~/.macfleet/audit.jsonl`
-with mode 0600. It is best-effort and local-only; no telemetry is sent
-off machine. Credential-shaped fields (`token`, `secret`, `password`,
-`key`, `code`, `proof`, `signature`) are redacted before writing.
+with mode 0600. The containing directory is repaired to 0700, and the
+audit file is never followed when it is a symlink. It is best-effort and
+local-only; no telemetry is sent off machine. Credential-shaped fields
+(`token`, `secret`, `password`, `key`, `code`, `proof`, `signature`) and
+credential-looking string values such as `token=...` or
+`Authorization: Bearer ...` are redacted before writing.
 
 Current audited events include enrollment start/stop/completion,
 pairing, token rotation/reveal, authenticated transport failures,

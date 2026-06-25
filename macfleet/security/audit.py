@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import stat
 import time
@@ -28,6 +29,40 @@ _SENSITIVE_FIELD_PARTS = (
     "sig",
     "signature",
 )
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"\b(token|secret|password|key|code|proof|sig|signature)=([^&\s]+)",
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+
+
+def _nofollow_flag() -> int:
+    """Return O_NOFOLLOW when the platform supports it."""
+    return getattr(os, "O_NOFOLLOW", 0)
+
+
+def _ensure_private_audit_dir() -> bool:
+    """Create or repair the audit directory without following symlinks."""
+    try:
+        try:
+            st = os.lstat(AUDIT_DIR)
+        except FileNotFoundError:
+            os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
+            st = os.lstat(AUDIT_DIR)
+
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return False
+        if stat.S_IMODE(st.st_mode) & 0o077:
+            os.chmod(AUDIT_DIR, 0o700)
+        return True
+    except OSError:
+        return False
+
+
+def _redact_string(value: str) -> str:
+    """Redact credential-shaped substrings in otherwise safe fields."""
+    value = _SENSITIVE_ASSIGNMENT_RE.sub(r"\1=[REDACTED]", value)
+    return _BEARER_RE.sub("Bearer [REDACTED]", value)
 
 
 def _redact_value(key: str, value: Any) -> Any:
@@ -41,6 +76,8 @@ def _redact_value(key: str, value: Any) -> Any:
         return {str(k): _redact_value(str(k), v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_redact_value(key, item) for item in value]
+    if isinstance(value, str):
+        return _redact_string(value)
     return value
 
 
@@ -65,9 +102,21 @@ def audit_event(event: str, **fields: Any) -> None:
     }
 
     try:
-        os.makedirs(AUDIT_DIR, mode=0o700, exist_ok=True)
+        if not _ensure_private_audit_dir():
+            return
         path = Path(AUDIT_FILE)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                return
+        except FileNotFoundError:
+            pass
+
+        fd = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | _nofollow_flag(),
+            0o600,
+        )
         try:
             os.write(fd, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
         finally:
