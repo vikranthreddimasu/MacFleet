@@ -15,6 +15,7 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 # Type checkers see real symbols here; runtime uses __getattr__ below to
 # keep heavy framework imports off the cold path.
 if TYPE_CHECKING:
+    from macfleet.compute.authz import TaskAuthorizationError, TaskAuthorizationPolicy
     from macfleet.compute.models import RemoteTaskError, TaskFuture
     from macfleet.compute.registry import task
     from macfleet.engines.mlx_engine import MLXEngine
@@ -51,6 +52,12 @@ def __getattr__(name: str):
     if name == "RemoteTaskError":
         from macfleet.compute.models import RemoteTaskError
         return RemoteTaskError
+    if name == "TaskAuthorizationError":
+        from macfleet.compute.authz import TaskAuthorizationError
+        return TaskAuthorizationError
+    if name == "TaskAuthorizationPolicy":
+        from macfleet.compute.authz import TaskAuthorizationPolicy
+        return TaskAuthorizationPolicy
     # v2.2 PR 7: @macfleet.task decorator
     if name == "task":
         from macfleet.compute.registry import task
@@ -68,5 +75,7 @@ __all__ = [
     "MLXEngine",
     "TaskFuture",
     "RemoteTaskError",
+    "TaskAuthorizationError",
+    "TaskAuthorizationPolicy",
     "task",
 ]

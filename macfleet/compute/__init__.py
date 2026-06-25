@@ -12,6 +12,7 @@ Usage (single-node or multi-node):
 """
 
 from macfleet.compute.dispatch import TaskDispatcher
+from macfleet.compute.authz import TaskAuthorizationError, TaskAuthorizationPolicy
 from macfleet.compute.models import (
     RemoteTaskError,
     TaskFuture,
@@ -22,6 +23,8 @@ from macfleet.compute.worker import TaskWorker
 
 __all__ = [
     "RemoteTaskError",
+    "TaskAuthorizationError",
+    "TaskAuthorizationPolicy",
     "TaskDispatcher",
     "TaskFuture",
     "TaskResult",

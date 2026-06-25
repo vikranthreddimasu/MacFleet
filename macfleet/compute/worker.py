@@ -24,12 +24,14 @@ from typing import Any, Optional
 
 from macfleet.comm.protocol import MessageType
 from macfleet.comm.transport import PeerTransport
+from macfleet.compute.authz import DEFAULT_TASK_POLICY, TaskAuthorizationPolicy
 from macfleet.compute.models import TaskNotRegisteredError, TaskResult, TaskSpec
+from macfleet.security.audit import audit_event
 
 logger = logging.getLogger(__name__)
 
 
-def _execute_task(task_name: str, args: list, kwargs: dict) -> Any:
+def _execute_task(spec: TaskSpec, policy: TaskAuthorizationPolicy) -> Any:
     """Execute a registered task in a worker thread.
 
     Looks up `task_name` in the process-local TaskRegistry — if the name
@@ -41,15 +43,16 @@ def _execute_task(task_name: str, args: list, kwargs: dict) -> Any:
 
     from macfleet.compute.registry import get_default_registry
 
-    entry = get_default_registry().get(task_name)
+    entry = get_default_registry().get(spec.task_name)
     if entry is None:
         raise TaskNotRegisteredError(
-            task_name, get_default_registry().names(),
+            spec.task_name, get_default_registry().names(),
         )
+    policy.authorize(spec, entry)
 
     # Apply schema validation if declared on the task
-    resolved_args: list = list(args)
-    resolved_kwargs: dict = dict(kwargs)
+    resolved_args: list = list(spec.args)
+    resolved_kwargs: dict = dict(spec.kwargs)
     if entry.schema is not None:
         if len(resolved_args) == 1 and isinstance(resolved_args[0], dict):
             resolved_args = [entry.schema(**resolved_args[0])]
@@ -81,10 +84,12 @@ class TaskWorker:
         transport: PeerTransport,
         coordinator_peer_id: str,
         max_workers: Optional[int] = None,
+        policy: Optional[TaskAuthorizationPolicy] = None,
     ):
         self._transport = transport
         self._coordinator = coordinator_peer_id
         self._max_workers = max_workers or min(os.cpu_count() or 1, 4)
+        self._policy = policy or DEFAULT_TASK_POLICY
         self._executor: Optional[ThreadPoolExecutor] = None
         self._listener_task: Optional[asyncio.Task] = None
         # Strong-ref every spawned _execute_and_reply task so Python's GC
@@ -158,13 +163,17 @@ class TaskWorker:
                 loop.run_in_executor(
                     self._executor,
                     _execute_task,
-                    spec.task_name,
-                    spec.args,
-                    spec.kwargs,
+                    spec,
+                    self._policy,
                 ),
                 timeout=spec.timeout_sec,
             )
             result = TaskResult.success(spec.task_id, value)
+            audit_event(
+                "task.executed",
+                task_name=spec.task_name,
+                coordinator=self._coordinator,
+            )
         except asyncio.TimeoutError:
             result = TaskResult(
                 task_id=spec.task_id,
@@ -172,6 +181,12 @@ class TaskWorker:
                 error=f"Task timed out after {spec.timeout_sec}s",
             )
         except Exception as e:
+            audit_event(
+                "task.failed",
+                task_name=spec.task_name,
+                coordinator=self._coordinator,
+                error_type=type(e).__name__,
+            )
             result = TaskResult.failure(spec.task_id, e)
 
         try:
