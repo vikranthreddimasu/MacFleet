@@ -325,6 +325,28 @@ class TestBootstrapFlag:
         assert "--allow-insecure-open" in clean
 
 
+class TestJoinTokenSetup:
+    def test_join_reports_token_write_failure_without_traceback(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        target = tmp_path / "target-token"
+        target.write_text("existing-token")
+        token_path = tmp_path / "fleet-token"
+        token_path.symlink_to(target)
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_DIR", str(tmp_path))
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["join"])
+
+        assert result.exit_code == 1
+        assert "couldn't configure fleet token" in result.output
+        assert "Traceback" not in result.output
+        assert target.read_text() == "existing-token"
+
+
 class TestCliHelp:
     def test_pair_in_help(self):
         runner = CliRunner()

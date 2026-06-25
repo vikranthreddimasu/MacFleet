@@ -149,7 +149,15 @@ def join(
             and os.environ.get(TOKEN_ENV_VAR) is None
             and not os.path.exists(TOKEN_FILE)
         )
-        resolved_token = resolve_token_with_file(token, auto_generate=True)
+        try:
+            resolved_token = resolve_token_with_file(token, auto_generate=True)
+        except OSError as e:
+            console.print(f"[red]Error: couldn't configure fleet token at {TOKEN_FILE}: {e}[/red]")
+            console.print(
+                "[dim]Fix the token path, or remove it and run `macfleet join` again "
+                "to generate a fresh token.[/dim]"
+            )
+            sys.exit(1)
         if use_tls:
             console.print(
                 "[dim]--tls is implicit when a token is set (already enforced "
