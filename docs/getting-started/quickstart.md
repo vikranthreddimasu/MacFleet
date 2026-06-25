@@ -36,7 +36,7 @@ print(result)  # {"loss": 0.4, "epochs": 5, "time_sec": 2.1, "steps": 80}
 ```
 
 That runs single-node, no agent, no discovery. (A fleet token is
-auto-generated to `~/.macfleet/token` on first run, but no peers
+auto-generated to `~/.macfleet/fleet-token` on first run, but no peers
 are advertised until you set `enable_pool_distributed=True`.)
 Good baseline.
 
@@ -45,32 +45,25 @@ Good baseline.
 ### Mac #1 — the first on the fleet
 
 ```bash
-macfleet join
+macfleet join --bootstrap
 ```
 
 The first run auto-generates a fleet token, starts the agent, and
-prints a QR code (later runs reuse the saved token; pass `--bootstrap`
-to re-print pairing info):
+prints a short-lived one-time pairing command:
 
 ```
-Fleet pairing URL: macfleet://pair?token=...&fleet=default
-Scan this QR from a second Mac's iPhone camera:
-████ ▄▄▄▄▄ █▀█ █▄▀▄▀ ██▄ ▄▄▄▄▄ ████
-...
+Pair another Mac with this one-time command:
+  macfleet pair --host 192.168.1.10:61234 --code AB12CD-EF34GH-IJ56KL-MN78OP
+Code expires at 14:05:31 and can be used once.
 ```
 
 Leave the terminal open. The agent runs until you Ctrl-C.
 
 ### Mac #2 — the second Mac
 
-Option A: point your iPhone camera at the QR on Mac #1. Tap the
-notification. The URL is copied.
-
-Option B: your Macs share a pasteboard via Handoff. Just run:
-
 ```bash
-macfleet pair    # reads URL from pasteboard
-macfleet join    # joins the fleet using the token now on disk
+macfleet pair --host 192.168.1.10:61234 --code AB12CD-EF34GH-IJ56KL-MN78OP
+macfleet join
 ```
 
 After `pair`, both Macs show each other in `macfleet status`:
@@ -100,6 +93,7 @@ with macfleet.Pool(
 
     result = pool.train(model, dataset, epochs=3)
     # result["params_sha256"] is identical on both Macs when in sync
+    # result["degraded"] tells you if any sync step fell back locally
 ```
 
 You don't need to hit Enter at the same moment — the gradient mesh
@@ -130,4 +124,4 @@ for the full story.
 
 - [Training guide](../guides/train.md) — full API, optimizers, callbacks
 - [Dashboard](../guides/dashboard.md) — live Rich TUI
-- [Pairing](pairing.md) — all three pairing flows (QR / pasteboard / URL)
+- [Pairing](pairing.md) — one-time enrollment codes and token rotation

@@ -39,7 +39,7 @@ The attacker cannot:
 ## Fleet isolation
 
 When you set a token (which happens automatically on first
-`macfleet join --bootstrap`), mDNS broadcasts use a scoped service type:
+`macfleet join`), mDNS broadcasts use a scoped service type:
 
 ```
 _mf-<first-8-hex-of-sha256(fleet_key)>._tcp.local.
@@ -156,10 +156,35 @@ slow attackers get dropped quickly.
 
 ## Token file permissions
 
-`~/.macfleet/token` is chmod 0o600 after `O_CREAT`. On every read,
+`~/.macfleet/fleet-token` is chmod 0o600 after `O_CREAT`. On every read,
 `_check_token_file_mode` warns (not fails) if the mode leaks any bits
 to group or other — a soft tripwire that catches users who copied the
 file around with `cp` on a poorly-configured system.
+
+## Pairing and rotation
+
+`macfleet join --bootstrap` starts a short-lived enrollment listener
+and prints a command like:
+
+```bash
+macfleet pair --host 192.168.1.10:61234 --code AB12CD-EF34GH-IJ56KL-MN78OP
+```
+
+The displayed code is not the fleet token. It is a one-time verifier
+used to authenticate a TLS request to the enrollment server, where the
+permanent token is returned only after a channel-bound HMAC proof. The
+default code lifetime is 5 minutes and the default use count is 1.
+
+Legacy `macfleet://pair?token=...` URLs are still accepted only for
+migration. Treat them as passwords and rotate after exposure:
+
+```bash
+macfleet rotate-token
+macfleet join --bootstrap
+```
+
+Rotation replaces the local saved token. Running agents keep their
+in-memory token until restarted, so re-pair and restart every Mac.
 
 ## Task dispatch
 
@@ -172,6 +197,25 @@ inject arbitrary code.
 Pydantic schemas declared on the decorator add a second layer of
 validation on the worker side — bad args surface as
 `ValidationError`, not as a crash inside your function.
+
+The high-level SDK also rejects undecorated functions by default. The
+legacy local ProcessPool/cloudpickle fallback requires
+`Pool(allow_legacy_pickle=True)` and writes `compute.legacy_pickle_used`
+to the local audit log. Tasks can also declare `remote=False`, and
+workers enforce `TaskAuthorizationPolicy` allowlists, denylists, and
+role checks before invocation.
+
+## Audit log
+
+MacFleet writes a local JSONL audit trail at `~/.macfleet/audit.jsonl`
+with mode 0600. It is best-effort and local-only; no telemetry is sent
+off machine. Credential-shaped fields (`token`, `secret`, `password`,
+`key`, `code`, `proof`, `signature`) are redacted before writing.
+
+Current audited events include enrollment start/stop/completion,
+pairing, token rotation/reveal, authenticated transport failures,
+legacy pickle fallback use, task authorization/execution outcomes, and
+degraded training fallbacks.
 
 ## What's NOT covered
 

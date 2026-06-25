@@ -31,7 +31,7 @@ per call.
 
 1. `pip install macfleet`
 2. On Mac #1: `macfleet join --bootstrap`
-3. On Mac #2: scan the QR with iPhone camera → tap → done
+3. On Mac #2: run the printed `macfleet pair --host ... --code ...`
 4. Both Macs: `python train.py`
 
 ## Current state: v2.2
@@ -39,7 +39,7 @@ per call.
 - `Pool.join` / `Pool.nodes` / `Pool.world_size` wired to live discovery
 - `@macfleet.task` registry replaces cloudpickle on the wire
 - APING v2 handshake + rate-limited heartbeat
-- Token pairing via QR + pasteboard
+- Token pairing via short-lived enrollment codes
 - Dashboard wired to agent state
 
 See the [changelog](https://github.com/vikranthreddimasu/MacFleet/releases)
