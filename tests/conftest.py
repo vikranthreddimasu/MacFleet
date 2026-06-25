@@ -13,7 +13,6 @@ from macfleet.core.config import (
     TrainingConfig,
 )
 
-
 # Configure logging for tests
 logging.basicConfig(level=logging.WARNING)
 

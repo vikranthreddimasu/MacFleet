@@ -1,16 +1,17 @@
 """Tests for tensor transport layer."""
 
 import asyncio
+
 import pytest
 import torch
 
-from macfleet.comm.transport import TensorTransport, TensorServer
+from macfleet.comm.transport import TensorTransport
 from macfleet.utils.tensor_utils import (
-    tensor_to_bytes,
-    bytes_to_tensor,
     MessageType,
-    serialize_compressed_gradient,
+    bytes_to_tensor,
     deserialize_compressed_gradient,
+    serialize_compressed_gradient,
+    tensor_to_bytes,
 )
 
 
@@ -70,7 +71,9 @@ class TestTensorSerialization:
         original_dtype = torch.float32
 
         data = serialize_compressed_gradient(indices, values, original_numel, original_dtype)
-        result_indices, result_values, result_numel, result_dtype = deserialize_compressed_gradient(data)
+        result_indices, result_values, result_numel, result_dtype = (
+            deserialize_compressed_gradient(data)
+        )
 
         assert torch.equal(indices, result_indices)
         assert torch.allclose(values, result_values)

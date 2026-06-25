@@ -57,7 +57,6 @@ class TopKCompressor:
         """
         original_dtype = tensor.dtype
         original_numel = tensor.numel()
-        original_shape = tensor.shape
 
         # Flatten for processing
         flat = tensor.flatten().float()

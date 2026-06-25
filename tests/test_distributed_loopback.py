@@ -6,8 +6,8 @@ to verify TCP peer connections, test tensor exchange, and AllReduce work.
 """
 
 import asyncio
-import sys
 import os
+import sys
 
 import torch
 import torch.nn as nn
@@ -16,7 +16,7 @@ from torch.utils.data import TensorDataset
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from macfleet.core.config import ClusterConfig, NodeRole, TrainingConfig, CompressionType
+from macfleet.core.config import ClusterConfig, CompressionType, NodeRole, TrainingConfig
 from macfleet.training.trainer import Trainer
 
 

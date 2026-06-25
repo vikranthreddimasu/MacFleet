@@ -5,7 +5,7 @@ across nodes using AllReduce after the backward pass.
 """
 
 import asyncio
-from typing import Any, Callable, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -170,7 +170,7 @@ class MacFleetDDP(nn.Module):
         trainer, call sync_gradients() directly with await.
         """
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
             raise RuntimeError(
                 "sync_gradients_sync() cannot be called from a running event loop. "
                 "Use 'await sync_gradients()' instead."

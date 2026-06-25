@@ -7,8 +7,8 @@ does not cause race conditions.
 import threading
 import time
 
-from macfleet.core.config import ClusterState, NodeConfig
 from macfleet.comm.grpc_service import ClusterControlServicer
+from macfleet.core.config import ClusterState, NodeConfig
 
 
 class FakeContext:

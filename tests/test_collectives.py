@@ -1,15 +1,15 @@
 """Tests for collective operations."""
 
 import asyncio
-import pytest
+
 import torch
 
 from macfleet.comm.collectives import (
-    CollectiveGroup,
     AllReduce,
     Broadcast,
-    Scatter,
+    CollectiveGroup,
     Gather,
+    Scatter,
 )
 from macfleet.comm.transport import TensorTransport
 

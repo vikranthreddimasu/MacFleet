@@ -13,7 +13,6 @@ from typing import Callable, Optional
 from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 from zeroconf.asyncio import AsyncZeroconf
 
-
 # Service type for MacFleet
 MACFLEET_SERVICE_TYPE = "_macfleet._tcp.local."
 

@@ -7,7 +7,6 @@ including network setup, tensor transport, and service discovery.
 import asyncio
 import logging
 import signal
-import sys
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -28,7 +27,6 @@ from macfleet.utils.network import (
     get_memory_bandwidth,
     get_memory_info,
 )
-
 
 logger = logging.getLogger(__name__)
 

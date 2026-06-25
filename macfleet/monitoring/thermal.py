@@ -13,7 +13,6 @@ from typing import Callable, Optional
 
 from rich.console import Console
 
-
 console = Console()
 
 

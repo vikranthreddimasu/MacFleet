@@ -20,7 +20,6 @@ from macfleet.utils.tensor_utils import (
     tensor_to_bytes,
 )
 
-
 # Buffer sizes for optimal Thunderbolt performance
 RECV_BUFFER_SIZE = 1024 * 1024  # 1 MB receive buffer
 SEND_BUFFER_SIZE = 1024 * 1024  # 1 MB send buffer

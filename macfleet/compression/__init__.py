@@ -1,14 +1,14 @@
 """Gradient compression utilities for MacFleet."""
 
 from macfleet.compression.pipeline import (
-    CompressionPipeline,
     CompressedGradient,
-    TopKStage,
+    CompressionPipeline,
     FP16Stage,
+    TopKStage,
     create_pipeline,
 )
-from macfleet.compression.topk import TopKCompressor
 from macfleet.compression.quantize import FP16Quantizer
+from macfleet.compression.topk import TopKCompressor
 
 __all__ = [
     "CompressionPipeline",

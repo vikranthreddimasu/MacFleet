@@ -1,16 +1,13 @@
 """Tests for gradient compression."""
 
-import pytest
 import torch
 
-from macfleet.compression.topk import TopKCompressor, topk_compress, topk_decompress
-from macfleet.compression.quantize import FP16Quantizer, quantize_fp16, dequantize_fp16
 from macfleet.compression.pipeline import (
     CompressionPipeline,
-    TopKStage,
-    FP16Stage,
     create_pipeline,
 )
+from macfleet.compression.quantize import FP16Quantizer, dequantize_fp16, quantize_fp16
+from macfleet.compression.topk import TopKCompressor, topk_compress, topk_decompress
 
 
 class TestTopKCompression:
@@ -123,6 +120,8 @@ class TestFP16Quantization:
         # Should not have inf or nan
         assert not torch.isinf(quantized).any()
         assert not torch.isnan(quantized).any()
+        assert not torch.isinf(result).any()
+        assert not torch.isnan(result).any()
 
     def test_compression_ratio(self):
         """Test that FP16 gives 2x compression."""

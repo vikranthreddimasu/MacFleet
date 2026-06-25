@@ -5,8 +5,8 @@ import torch
 from torch.utils.data import TensorDataset
 
 from macfleet.training.distributed_sampler import (
-    WeightedDistributedSampler,
     DistributedBatchSampler,
+    WeightedDistributedSampler,
     compute_weights_from_gpu_cores,
     compute_weights_from_throughput,
 )

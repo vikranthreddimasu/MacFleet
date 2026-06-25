@@ -6,8 +6,8 @@ and recovers when thermal state improves.
 
 import time
 
-from macfleet.core.config import ClusterState, NodeConfig
 from macfleet.comm.grpc_service import ClusterControlServicer
+from macfleet.core.config import ClusterState, NodeConfig
 
 
 class FakeContext:

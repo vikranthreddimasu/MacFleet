@@ -2,13 +2,6 @@
 
 import logging
 
-__version__ = "0.2.0"
-
-# Configure a NullHandler so library users can control logging.
-# Applications (CLI, scripts) should call logging.basicConfig() to see output.
-logging.getLogger(__name__).addHandler(logging.NullHandler())
-
-# Config classes are lightweight — safe to import eagerly.
 from macfleet.core.config import (
     ClusterConfig,
     ClusterState,
@@ -16,6 +9,12 @@ from macfleet.core.config import (
     NodeRole,
     TrainingConfig,
 )
+
+__version__ = "0.2.0"
+
+# Configure a NullHandler so library users can control logging.
+# Applications (CLI, scripts) should call logging.basicConfig() to see output.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 
 def __getattr__(name: str):

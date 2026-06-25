@@ -8,16 +8,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from rich.console import Console, Group
-from rich.layout import Layout
+from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TaskProgressColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
-from rich.text import Text
 
 from macfleet.monitoring.health import NodeHealth, NodeStatus
-
 
 console = Console()
 

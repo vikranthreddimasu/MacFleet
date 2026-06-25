@@ -6,12 +6,11 @@ and recovery for fault-tolerant training.
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Dict, Optional
 
 from rich.console import Console
-
 
 console = Console()
 

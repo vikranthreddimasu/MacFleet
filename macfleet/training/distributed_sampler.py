@@ -4,7 +4,6 @@ Extends PyTorch's DistributedSampler to support weighted splitting
 based on each node's compute capacity (GPU cores, throughput).
 """
 
-import math
 from typing import Iterator, Optional, TypeVar
 
 import torch

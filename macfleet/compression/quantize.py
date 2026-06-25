@@ -4,7 +4,7 @@ Implements FP16 and other quantization methods for reducing
 communication bandwidth during distributed training.
 """
 
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 

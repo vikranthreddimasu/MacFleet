@@ -5,7 +5,6 @@ optimized for small clusters connected via Thunderbolt.
 """
 
 import asyncio
-from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
 import torch

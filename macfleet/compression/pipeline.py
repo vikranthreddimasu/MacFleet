@@ -8,7 +8,7 @@ This gives ~20x compression (Top-10% + FP16).
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import torch
 
@@ -44,10 +44,15 @@ class CompressedGradient:
         if self.is_sparse:
             # indices (int32) + values (fp16 or fp32)
             idx_bytes = self.indices.numel() * 4 if self.indices is not None else 0
-            val_bytes = self.values.numel() * self.values.element_size() if self.values is not None else 0
+            if self.values is not None:
+                val_bytes = self.values.numel() * self.values.element_size()
+            else:
+                val_bytes = 0
             return idx_bytes + val_bytes
         else:
-            return self.dense_data.numel() * self.dense_data.element_size() if self.dense_data is not None else 0
+            if self.dense_data is not None:
+                return self.dense_data.numel() * self.dense_data.element_size()
+            return 0
 
     @property
     def compression_ratio(self) -> float:
@@ -229,7 +234,11 @@ class NoOpStage(Compressor):
     def decompress(self, compressed: CompressedGradient) -> torch.Tensor:
         if compressed.is_sparse:
             dense = torch.zeros(compressed.original_numel, dtype=compressed.original_dtype)
-            dense.scatter_(0, compressed.indices.long(), compressed.values.to(compressed.original_dtype))
+            dense.scatter_(
+                0,
+                compressed.indices.long(),
+                compressed.values.to(compressed.original_dtype),
+            )
         else:
             dense = compressed.dense_data.to(compressed.original_dtype)
 
