@@ -26,10 +26,30 @@ from macfleet.security.auth import (
     verify_heartbeat_response,
     verify_response,
 )
+from macfleet.security.enrollment import (
+    EnrollmentError,
+    EnrollmentResult,
+    EnrollmentServer,
+    format_pair_command,
+    generate_enrollment_code,
+    normalize_enrollment_code,
+    parse_host_port,
+    print_enrollment_info,
+    request_enrollment,
+)
 
 __all__ = [
     "audit_event",
     "audit_log_path",
+    "EnrollmentError",
+    "EnrollmentResult",
+    "EnrollmentServer",
+    "format_pair_command",
+    "generate_enrollment_code",
+    "normalize_enrollment_code",
+    "parse_host_port",
+    "print_enrollment_info",
+    "request_enrollment",
     "MIN_TOKEN_LENGTH",
     "TOKEN_FILE",
     "AuthRateLimiter",
