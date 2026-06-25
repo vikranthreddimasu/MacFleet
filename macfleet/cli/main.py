@@ -484,9 +484,9 @@ def diagnose():
 @cli.command()
 @click.argument("script", required=False)
 @click.option("--engine", type=click.Choice(["torch", "mlx"]), default="torch")
-@click.option("--epochs", default=10, help="Number of training epochs")
-@click.option("--batch-size", default=128, help="Global batch size")
-@click.option("--lr", default=0.001, help="Learning rate")
+@click.option("--epochs", default=10, type=click.IntRange(1), help="Number of training epochs")
+@click.option("--batch-size", default=128, type=click.IntRange(1), help="Global batch size")
+@click.option("--lr", default=0.001, type=click.FloatRange(0.0, min_open=True), help="Learning rate")
 @click.option("--compression", default="none", help="Compression: none, topk, fp16, topk_fp16")
 @click.option("--config", "config_path", default=None, help="YAML config file")
 def train(
@@ -693,8 +693,13 @@ def run_command(
 
 @cli.command()
 @click.option("--type", "bench_type", type=click.Choice(["network", "compute", "allreduce"]), default="network")
-@click.option("--size-mb", default=10, help="Payload size in MB for network tests")
-@click.option("--iterations", default=5, help="Number of iterations")
+@click.option(
+    "--size-mb",
+    default=10,
+    type=click.IntRange(1, 4096),
+    help="Payload size in MB for network tests",
+)
+@click.option("--iterations", default=5, type=click.IntRange(1), help="Number of iterations")
 def bench(bench_type: str, size_mb: int, iterations: int):
     """Benchmark network and compute performance."""
     if bench_type == "compute":
