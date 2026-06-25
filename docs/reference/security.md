@@ -181,7 +181,9 @@ permanent token is returned only after a channel-bound HMAC proof. The
 default code lifetime is 5 minutes and the default use count is 1.
 
 Legacy `macfleet://pair?token=...` URLs are still accepted only for
-migration. Treat them as passwords and rotate after exposure:
+migration. Treat them as passwords and rotate after exposure. Helpers
+that render legacy URLs hide the token by default; callers must
+explicitly opt into revealing or copying the permanent token.
 
 ```bash
 macfleet rotate-token

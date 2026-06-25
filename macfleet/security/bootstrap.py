@@ -171,32 +171,46 @@ def print_pairing_info(
     token: str,
     fleet_id: Optional[str] = None,
     *,
-    to_pasteboard: bool = True,
+    reveal_token: bool = False,
+    to_pasteboard: bool = False,
     out: Optional[TextIO] = None,
 ) -> str:
     """Format the legacy token URL + QR pairing block and return it.
 
-    If `to_pasteboard=True` (default), also copies the URL to the local
-    pasteboard. This exposes the permanent token and should not be used
-    for new flows; prefer `print_enrollment_info`.
+    By default this does NOT reveal the permanent fleet token. Passing
+    `reveal_token=True` prints the old token-bearing URL and QR code for
+    migration from older MacFleet versions. Passing `to_pasteboard=True`
+    requires `reveal_token=True` because copying the URL exposes the
+    permanent token outside MacFleet.
 
     Returns the rendered text so the CLI can print it; accepts `out`
     override for tests.
     """
-    url = token_to_url(token, fleet_id=fleet_id)
-    qr = render_qr_ascii(url)
-    lines = [
-        "",
-        "Legacy fleet pairing URL (contains the permanent token):",
-        f"  {url}",
-        "",
-        "Prefer `macfleet join --bootstrap` enrollment for new pairing.",
-        "This QR/URL is kept for migration from older MacFleet versions:",
-        "  echo '<url>' | macfleet pair --stdin",
-        "",
-        qr,
-        "",
-    ]
+    if to_pasteboard and not reveal_token:
+        raise PairingError("to_pasteboard=True requires reveal_token=True")
+
+    lines = ["", "Legacy token pairing helper:"]
+    if reveal_token:
+        url = token_to_url(token, fleet_id=fleet_id)
+        qr = render_qr_ascii(url)
+        lines.extend([
+            "  WARNING: this URL contains the permanent fleet token.",
+            f"  {url}",
+            "",
+            "Prefer `macfleet join --bootstrap` enrollment for new pairing.",
+            "This QR/URL is kept only for migration from older MacFleet versions:",
+            "  echo '<url>' | macfleet pair --stdin",
+            "",
+            qr,
+            "",
+        ])
+    else:
+        lines.extend([
+            "  Permanent fleet token hidden.",
+            "  Prefer `macfleet join --bootstrap` enrollment for new pairing.",
+            "  To migrate an old setup, call this helper with reveal_token=True.",
+            "",
+        ])
     rendered = "\n".join(lines)
 
     if to_pasteboard:

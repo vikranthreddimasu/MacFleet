@@ -94,30 +94,47 @@ class TestRenderQrAscii:
 
 
 class TestPrintPairingInfo:
-    def test_returns_full_block(self):
+    def test_default_hides_permanent_token(self):
         rendered = print_pairing_info(
             "secret-token-123",
             fleet_id="test-fleet",
-            to_pasteboard=False,
         )
-        # URL and QR both present
+
+        assert "secret-token-123" not in rendered
+        assert "macfleet://pair?" not in rendered
+        assert "Permanent fleet token hidden" in rendered
+
+    def test_reveal_token_returns_full_block(self):
+        rendered = print_pairing_info(
+            "secret-token-123",
+            fleet_id="test-fleet",
+            reveal_token=True,
+        )
+
         assert "macfleet://pair?" in rendered
-        assert "secret-token-123" in rendered or "secret-token" in rendered
-        # Instructions line
-        assert "iPhone camera" in rendered or "macfleet pair" in rendered
+        assert "secret-token-123" in rendered
+        assert "WARNING" in rendered
+        assert "macfleet pair" in rendered
 
     def test_writes_to_out(self):
         buf = io.StringIO()
         print_pairing_info(
             "tkn12345678",
-            to_pasteboard=False,
+            reveal_token=True,
             out=buf,
         )
         out = buf.getvalue()
         assert "macfleet://pair?" in out
-        assert "tkn12345678" in out or "tkn" in out
+        assert "tkn12345678" in out
 
-    def test_pasteboard_failure_not_fatal(self, monkeypatch):
+    def test_pasteboard_requires_explicit_reveal(self):
+        with pytest.raises(PairingError, match="reveal_token"):
+            print_pairing_info(
+                "secret-token-123",
+                to_pasteboard=True,
+            )
+
+    def test_pasteboard_failure_not_fatal_when_revealed(self, monkeypatch):
         """pbcopy failure shouldn't crash the function — URL still printed."""
         from macfleet.security import bootstrap
 
@@ -129,6 +146,7 @@ class TestPrintPairingInfo:
         # Must not raise
         rendered = print_pairing_info(
             "resilient-token",
+            reveal_token=True,
             to_pasteboard=True,
         )
         assert "macfleet://pair?" in rendered

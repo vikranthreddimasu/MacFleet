@@ -71,7 +71,9 @@ echo "macfleet://pair?token=...&fleet=default" | macfleet pair --stdin
 ```
 
 Treat a legacy URL exactly like a password. Anyone with it can join the
-fleet until the token is rotated.
+fleet until the token is rotated. MacFleet's legacy URL rendering helper
+redacts the permanent token by default; code must explicitly opt into
+revealing or copying token-bearing URLs for migration.
 
 ## Rotating The Token
 
