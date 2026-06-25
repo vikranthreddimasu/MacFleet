@@ -90,6 +90,26 @@ def _valid_enrollment_line(server: EnrollmentServer) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
 
+async def _request_with_response_line(line: bytes, monkeypatch):
+    async def fake_open_connection(*args, **kwargs):
+        return _ImmediateReader(line), _FakeWriter()
+
+    monkeypatch.setattr(
+        "macfleet.security.enrollment.asyncio.open_connection",
+        fake_open_connection,
+    )
+    monkeypatch.setattr(
+        "macfleet.security.enrollment.tls_channel_binding_from_writer",
+        lambda writer: b"test-channel-binding",
+    )
+    return await request_enrollment(
+        "127.0.0.1",
+        12345,
+        "ABCD-EFGH-IJKL-MNOP",
+        timeout_sec=1,
+    )
+
+
 def test_generate_enrollment_code_is_grouped_and_normalizable():
     code = generate_enrollment_code()
     assert "-" in code
@@ -260,3 +280,49 @@ async def test_enrollment_malformed_proof_size_records_failure():
     assert writer.writes == []
     assert server._uses == 0
     assert server._rate_limiter._failures["127.0.0.1"][0] == 1
+
+
+@pytest.mark.asyncio
+async def test_request_enrollment_rejects_non_object_response(monkeypatch):
+    with pytest.raises(EnrollmentError, match="malformed response"):
+        await _request_with_response_line(b"[]\n", monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_request_enrollment_rejects_non_string_token(monkeypatch):
+    line = (
+        json.dumps(
+            {
+                "ok": True,
+                "version": ENROLLMENT_VERSION,
+                "token": 123456789,
+                "fleet_id": None,
+                "server_node": "node-a",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    with pytest.raises(EnrollmentError, match="invalid token"):
+        await _request_with_response_line(line, monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_request_enrollment_rejects_non_string_fleet_id(monkeypatch):
+    line = (
+        json.dumps(
+            {
+                "ok": True,
+                "version": ENROLLMENT_VERSION,
+                "token": "enrollment-token-long-enough",
+                "fleet_id": ["not", "a", "string"],
+                "server_node": "node-a",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    with pytest.raises(EnrollmentError, match="invalid fleet id"):
+        await _request_with_response_line(line, monkeypatch)

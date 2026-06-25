@@ -326,16 +326,27 @@ async def request_enrollment(
         line = await asyncio.wait_for(reader.readline(), timeout=timeout_sec)
         if not line:
             raise EnrollmentError("Enrollment server closed without a response")
-        response = json.loads(line.decode("utf-8"))
+        try:
+            response = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise EnrollmentError(f"Enrollment server returned malformed JSON: {e}") from e
+        if not isinstance(response, dict):
+            raise EnrollmentError("Enrollment server returned a malformed response")
         if not response.get("ok"):
             raise EnrollmentError(str(response.get("error") or "enrollment rejected"))
-        token = str(response.get("token") or "")
-        if len(token) < MIN_TOKEN_LENGTH:
+        token = response.get("token")
+        if not isinstance(token, str) or len(token) < MIN_TOKEN_LENGTH:
             raise EnrollmentError("Enrollment server returned an invalid token")
+        fleet_id = response.get("fleet_id")
+        if fleet_id is not None and not isinstance(fleet_id, str):
+            raise EnrollmentError("Enrollment server returned an invalid fleet id")
+        server_node = response.get("server_node")
+        if server_node is not None and not isinstance(server_node, str):
+            raise EnrollmentError("Enrollment server returned an invalid server node")
         result = EnrollmentResult(
             token=token,
-            fleet_id=response.get("fleet_id"),
-            server_node=str(response.get("server_node") or "unknown"),
+            fleet_id=fleet_id,
+            server_node=server_node or "unknown",
         )
         audit_event(
             "pairing.enrolled",
@@ -345,7 +356,7 @@ async def request_enrollment(
             port=port,
         )
         return result
-    except (json.JSONDecodeError, OSError, asyncio.TimeoutError) as e:
+    except (OSError, asyncio.TimeoutError) as e:
         raise EnrollmentError(f"Enrollment failed: {e}") from e
     finally:
         writer.close()
