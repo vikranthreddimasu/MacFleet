@@ -501,11 +501,15 @@ def train(
     """Submit a training job to the pool.
 
     If SCRIPT is provided, it is executed as a Python file that defines
-    `model` and `dataset` variables. Otherwise, runs a built-in demo
+    a `main()` function. If that function accepts parameters named
+    `engine`, `epochs`, `batch_size`, `lr`, `compression`, or `config_path`,
+    the matching CLI values are passed in. Otherwise, runs a built-in demo
     (small MLP on synthetic data) useful for testing the pipeline.
     """
     if script:
-        _train_from_script(script, engine, epochs, batch_size, lr, compression)
+        _train_from_script(
+            script, engine, epochs, batch_size, lr, compression, config_path
+        )
     else:
         _train_demo(engine, epochs, batch_size, lr)
 
@@ -586,9 +590,11 @@ def _train_from_script(
     batch_size: int,
     lr: float,
     compression: str,
+    config_path: str | None,
 ):
     """Run a user-provided training script."""
     import importlib.util
+    import inspect
     import os
 
     if not os.path.isfile(script):
@@ -605,15 +611,81 @@ def _train_from_script(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    # Expect the script to define a `main()` function or `model`/`dataset`
+    # Expect the script to define a `main()` function.
     if hasattr(module, "main"):
-        module.main()
+        main_fn = module.main
+        options = {
+            "engine": engine_type,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "lr": lr,
+            "compression": compression,
+            "config_path": config_path,
+        }
+        try:
+            signature = inspect.signature(main_fn)
+        except (TypeError, ValueError):
+            main_fn()
+            return
+
+        params = signature.parameters
+        accepts_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in params.values()
+        )
+        kwargs = {}
+        for name, value in options.items():
+            param = params.get(name)
+            if accepts_kwargs or (
+                param is not None
+                and param.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            ):
+                kwargs[name] = value
+        if "config" in params and "config_path" not in params:
+            param = params["config"]
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                kwargs["config"] = config_path
+
+        missing_required = [
+            name
+            for name, param in params.items()
+            if param.default is inspect.Parameter.empty
+            and param.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            and name not in kwargs
+        ]
+        if missing_required:
+            console.print(
+                "[red]Error: Script main() has required parameter(s) MacFleet "
+                f"cannot provide: {', '.join(missing_required)}[/red]"
+            )
+            console.print(
+                "[dim]Supported injected parameters: engine, epochs, "
+                "batch_size, lr, compression, config_path.[/dim]"
+            )
+            sys.exit(1)
+
+        main_fn(**kwargs)
     else:
         console.print("[red]Error: Script must define a main() function.[/red]")
         console.print("[dim]Example:[/dim]")
-        console.print("[dim]  def main():[/dim]")
+        console.print("[dim]  def main(epochs=10, batch_size=128, lr=0.001):[/dim]")
         console.print("[dim]      model = MyModel()[/dim]")
-        console.print("[dim]      macfleet.train(model, dataset, epochs=10)[/dim]")
+        console.print(
+            "[dim]      macfleet.train(model, dataset, epochs=epochs, "
+            "batch_size=batch_size, lr=lr)[/dim]"
+        )
         sys.exit(1)
 
 
