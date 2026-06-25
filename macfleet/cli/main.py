@@ -375,12 +375,20 @@ def diagnose():
         resolve_token_with_file,
     )
 
-    tok = resolve_token_with_file(None)
-    check(
-        "Fleet token configured",
-        tok is not None,
-        "" if tok else "run 'macfleet join' once to auto-generate",
-    )
+    token_read_error = None
+    try:
+        tok = resolve_token_with_file(None)
+    except OSError as e:
+        tok = None
+        token_read_error = e
+    if token_read_error is not None:
+        check("Fleet token readable", False, str(token_read_error))
+    else:
+        check(
+            "Fleet token configured",
+            tok is not None,
+            "" if tok else "run 'macfleet join' once to auto-generate",
+        )
     if tok is not None:
         check(
             f"Token length >= {RECOMMENDED_TOKEN_LENGTH}",
@@ -390,15 +398,27 @@ def diagnose():
                 else " — short tokens are dictionary-attackable"
             ),
         )
-    if os.path.exists(TOKEN_FILE):
-        mode = stat_mod.S_IMODE(os.stat(TOKEN_FILE).st_mode)
-        check(
-            "Token file private (0600)",
-            (mode & 0o077) == 0,
-            f"mode {oct(mode)}" + (
-                "" if (mode & 0o077) == 0 else f" — fix: chmod 600 {TOKEN_FILE}"
-            ),
-        )
+    if os.path.lexists(TOKEN_FILE):
+        try:
+            token_stat = os.lstat(TOKEN_FILE)
+        except OSError as e:
+            check("Token file metadata readable", False, str(e))
+        else:
+            is_regular = stat_mod.S_ISREG(token_stat.st_mode)
+            check(
+                "Token file is regular file",
+                is_regular,
+                "" if is_regular else f"must not be a symlink or directory: {TOKEN_FILE}",
+            )
+            if is_regular:
+                mode = stat_mod.S_IMODE(token_stat.st_mode)
+                check(
+                    "Token file private (0600)",
+                    (mode & 0o077) == 0,
+                    f"mode {oct(mode)}" + (
+                        "" if (mode & 0o077) == 0 else f" — fix: chmod 600 {TOKEN_FILE}"
+                    ),
+                )
 
     # Summary
     console.print(f"\n[bold]{checks_passed}/{checks_total} checks passed[/bold]")

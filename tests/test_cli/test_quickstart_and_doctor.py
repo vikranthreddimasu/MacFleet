@@ -86,6 +86,22 @@ class TestDoctor:
             assert section in doctor_out
             assert section in diagnose_out
 
+    def test_doctor_reports_symlinked_token_file(self, tmp_path: Path, monkeypatch):
+        target = tmp_path / "target-token"
+        target.write_text("existing-token")
+        token_path = tmp_path / "fleet-token"
+        token_path.symlink_to(target)
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_DIR", str(tmp_path))
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["doctor"])
+
+        assert result.exit_code == 0
+        clean = " ".join(result.output.split())
+        assert "Token file is regular file" in clean
+        assert "must not be a symlink" in clean
+
 
 class TestCliHelp:
     def test_quickstart_in_help(self):

@@ -97,7 +97,7 @@ Checks:
 - MLX installed (if applicable)
 - Thermal state (not throttling at rest)
 - mDNS reachability (can we actually broadcast?)
-- Token file permissions
+- Token file regular-file shape and permissions
 
 Prints a checklist. Green = OK, yellow = warning, red = blocker.
 
