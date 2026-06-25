@@ -2,23 +2,33 @@
 
 import pytest
 
+from macfleet import task
 from macfleet.sdk.pool import Pool
 
 
+@task
 def _square(x):
     return x * x
 
 
+@task
 def _add_ten(x):
     return x + 10
 
 
+@task
 def _greet(name):
     return f"hello {name}"
 
 
-def _failing_fn(x):
-    raise ValueError(f"cannot process {x}")
+@task
+def _power(base, exp=2):
+    return base ** exp
+
+
+@task
+def _get_value():
+    return 42
 
 
 class TestPoolMap:
@@ -60,11 +70,8 @@ class TestPoolSubmit:
         assert result == 49
 
     def test_submit_with_kwargs(self):
-        def power(base, exp=2):
-            return base ** exp
-
         with Pool(open=True) as pool:
-            result = pool.submit(power, 3, exp=4)
+            result = pool.submit(_power, 3, exp=4)
         assert result == 81
 
     def test_submit_not_joined_raises(self):
@@ -80,11 +87,8 @@ class TestPoolRun:
         assert result == 36
 
     def test_run_no_args(self):
-        def get_value():
-            return 42
-
         with Pool(open=True) as pool:
-            result = pool.run(get_value)
+            result = pool.run(_get_value)
         assert result == 42
 
 

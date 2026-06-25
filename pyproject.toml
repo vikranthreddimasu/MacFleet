@@ -44,9 +44,9 @@ dependencies = [
     # cloudpickle'd blindly. A malicious coordinator can no longer inject
     # arbitrary pickled code for the worker to execute.
     "pydantic>=2.0.0",
-    # qrcode is core starting v2.2 PR 13 (Issue 26): `macfleet join --bootstrap`
-    # prints a QR of the fleet token so a second Mac can be paired in 5s via
-    # an iPhone camera, no copy-paste required.
+    # qrcode remains core for legacy token-bearing pairing URL rendering.
+    # Current `macfleet join --bootstrap` uses short-lived enrollment codes
+    # and does not print the permanent fleet token.
     "qrcode>=7.0",
 ]
 

@@ -27,20 +27,24 @@ call through the registry. Args/kwargs are serialized via msgpack.
 
 ## Why not just `pool.submit(lambda x: ..., x)`?
 
-You *can* still pass lambdas — `pool.submit` falls through to a legacy
-ProcessPool + cloudpickle path when the callable isn't decorated. But
-that path is:
+Undecorated functions are rejected by default:
 
-1. **Unsafe**: cloudpickle deserializes arbitrary code. If your
-   coordinator ever accepts tasks from a less-trusted source, you
-   just gave them RCE on every worker.
-2. **Slower**: pickling full closures is measurably slow for large
-   args.
-3. **Going away**: the distributed path (coming in a later PR) only
-   dispatches registered tasks. Lambdas will keep working locally
-   but won't run across the fleet.
+```
+ValueError: Pool.submit requires a function decorated with @macfleet.task.
+```
 
-Decorate your functions.
+That is intentional. Python pickle/cloudpickle can execute arbitrary
+code during deserialization, so it is not a safe fleet boundary. If you
+are migrating old local-only scripts, you can opt in explicitly:
+
+```python
+with macfleet.Pool(allow_legacy_pickle=True) as pool:
+    result = pool.submit(lambda x: x + 1, 41)
+```
+
+Use that only for code you fully trust on a single Mac. It writes a
+local audit event (`compute.legacy_pickle_used`) and should not be used
+with untrusted inputs or distributed workers.
 
 ## Pydantic schemas for structured args
 
@@ -109,6 +113,20 @@ underlying bytes/list and reconstruct on the worker.
 `TaskResult.success()` dumps Pydantic models via `model_dump(mode="json")`
 so they survive the msgpack round-trip. For raw types, return directly
 — msgpack-native roundtrips just work.
+
+### Remote execution policy
+
+Tasks may opt out of remote execution:
+
+```python
+@macfleet.task(remote=False)
+def local_cleanup(path: str) -> None:
+    ...
+```
+
+Workers enforce a `TaskAuthorizationPolicy` before invocation. You can
+use policy allowlists/denylists and roles to keep risky maintenance
+tasks local while still using the same registry for ordinary compute.
 
 ## Introspection
 

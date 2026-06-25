@@ -16,6 +16,7 @@ import torch.nn as nn
 from macfleet.comm.collectives import CollectiveGroup
 from macfleet.comm.transport import PeerTransport, TransportConfig
 from macfleet.engines.torch_engine import TorchEngine
+from macfleet.security import audit
 from macfleet.training.data_parallel import DataParallel
 
 # --------------------------------------------------------------------------- #
@@ -423,3 +424,94 @@ class TestEmptyGradientGuard:
 
         elapsed = await dp.sync_gradients()
         assert elapsed == 0.0
+
+
+class _ArrayEngine:
+    def __init__(self, gradients):
+        self._gradients = np.array(gradients, dtype=np.float32)
+        self.applied = None
+
+    def get_flat_gradients(self):
+        return self._gradients.copy()
+
+    def apply_flat_gradients(self, flat):
+        self.applied = flat.copy()
+
+
+class _EchoGroup:
+    rank = 0
+    world_size = 2
+
+    async def allreduce(self, array, op="mean"):
+        return array.copy()
+
+
+class _TimeoutGroup(_EchoGroup):
+    async def allreduce(self, array, op="mean"):
+        raise asyncio.TimeoutError
+
+
+class _PoisonedGroup(_EchoGroup):
+    async def allreduce(self, array, op="mean"):
+        poisoned = array.copy()
+        poisoned[0] = np.nan
+        return poisoned
+
+
+@pytest.fixture
+def isolated_audit_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "AUDIT_DIR", str(tmp_path))
+    monkeypatch.setattr(audit, "AUDIT_FILE", str(tmp_path / "audit.jsonl"))
+    return tmp_path / "audit.jsonl"
+
+
+class TestDataParallelDegradedState:
+    @pytest.mark.asyncio
+    async def test_allreduce_failure_marks_unsynced_degraded(self, isolated_audit_log):
+        engine = _ArrayEngine([1.0, 2.0, 3.0])
+        dp = DataParallel(engine, _TimeoutGroup())
+
+        await dp.sync_gradients()
+
+        assert dp.degraded is True
+        assert dp.unsynced_steps == 1
+        assert dp.validation_fallback_steps == 0
+        assert dp.last_sync_error == "allreduce_failed:TimeoutError"
+        np.testing.assert_array_equal(
+            engine.applied,
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        )
+        assert "training.sync_degraded" in isolated_audit_log.read_text()
+
+    @pytest.mark.asyncio
+    async def test_remote_invalid_gradient_marks_validation_fallback(
+        self, isolated_audit_log
+    ):
+        engine = _ArrayEngine([1.0, 2.0, 3.0])
+        dp = DataParallel(engine, _PoisonedGroup())
+
+        await dp.sync_gradients()
+
+        assert dp.degraded is True
+        assert dp.unsynced_steps == 0
+        assert dp.validation_fallback_steps == 1
+        assert dp.last_sync_error.startswith("gradient_validation_failed:")
+        np.testing.assert_array_equal(
+            engine.applied,
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        )
+        assert "training.gradient_validation_failed" in isolated_audit_log.read_text()
+
+    @pytest.mark.asyncio
+    async def test_local_invalid_gradient_is_zeroed_and_reported(self, isolated_audit_log):
+        engine = _ArrayEngine([1.0, np.nan, 3.0])
+        dp = DataParallel(engine, _EchoGroup())
+
+        await dp.sync_gradients()
+
+        assert dp.degraded is True
+        assert dp.unsynced_steps == 0
+        assert dp.validation_fallback_steps == 1
+        assert dp.last_sync_error == "local_gradients_nan_or_inf"
+        np.testing.assert_array_equal(engine.applied, np.zeros(3, dtype=np.float32))
+        assert "local_gradients_nan_or_inf" in isolated_audit_log.read_text()

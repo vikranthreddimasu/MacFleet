@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 if TYPE_CHECKING:
     from macfleet.pool.agent import PoolAgent
 
-import cloudpickle
 from rich.console import Console
 
 logger = logging.getLogger(__name__)
@@ -224,6 +223,10 @@ async def _distributed_train_torch(
             "rank": mesh.rank,
             "world_size": mesh.world_size,
             "avg_sync_time_sec": dp.avg_sync_time_sec,
+            "degraded": dp.degraded,
+            "unsynced_steps": dp.unsynced_steps,
+            "validation_fallback_steps": dp.validation_fallback_steps,
+            "last_sync_error": dp.last_sync_error,
             "params_sha256": params_sha,
         }
     finally:
@@ -342,6 +345,10 @@ async def _distributed_train_mlx(
             "rank": mesh.rank,
             "world_size": mesh.world_size,
             "avg_sync_time_sec": dp.avg_sync_time_sec,
+            "degraded": dp.degraded,
+            "unsynced_steps": dp.unsynced_steps,
+            "validation_fallback_steps": dp.validation_fallback_steps,
+            "last_sync_error": dp.last_sync_error,
             "params_sha256": params_sha,
         }
     finally:
@@ -382,6 +389,7 @@ class Pool:
         # data-plane transports (SPMD scripts are started by hand on each
         # Mac, so allow a human-scale delay between starts).
         rendezvous_timeout_sec: float = 60.0,
+        allow_legacy_pickle: bool = False,
     ):
         from macfleet.security.auth import resolve_token_with_file
 
@@ -400,6 +408,7 @@ class Pool:
         self.quorum_size = quorum_size
         self.quorum_timeout_sec = quorum_timeout_sec
         self.rendezvous_timeout_sec = rendezvous_timeout_sec
+        self.allow_legacy_pickle = allow_legacy_pickle
         self._manual_peers = peers or []
         self._joined = False
         self._agent: Optional[PoolAgent] = None
@@ -916,11 +925,11 @@ class Pool:
     ) -> list:
         """Apply fn to each item across the pool, return results in order.
 
-        v2.2 PR 10 (Issue 25): if `fn` is decorated with @macfleet.task, the
-        call routes through the task registry (name + msgpack args, no
-        cloudpickle). Legacy bare-lambda calls still work via the
-        ProcessPoolExecutor + cloudpickle fallback, but that path will
-        eventually go away — decorate your functions.
+        The default path requires `fn` to be decorated with @macfleet.task.
+        Registered tasks route through the task registry (name + msgpack
+        args, no cloudpickle). For migration-only local scripts, construct
+        `Pool(..., allow_legacy_pickle=True)` to opt into the legacy
+        ProcessPoolExecutor + cloudpickle fallback.
 
         Args:
             fn: Function to apply to each item. Prefer @macfleet.task.
@@ -948,15 +957,21 @@ class Pool:
         if self._is_registered_task(fn):
             return [self._run_registered_task(fn, item, timeout=timeout) for item in items]
 
-        # Legacy cloudpickle fallback (discouraged — fn not decorated with @task).
-        # Will be removed once distributed dispatch is wired (see TODOS Issue 25).
+        self._ensure_legacy_pickle_allowed("map")
+
+        # Legacy cloudpickle fallback (local-only, explicit opt-in).
         import os
         import warnings
+
+        import cloudpickle
+
+        from macfleet.security.audit import audit_event
+
+        audit_event("compute.legacy_pickle_used", method="map")
         warnings.warn(
-            "Pool.map fell through to the cloudpickle/ProcessPool path. "
-            "Decorate the callable with @macfleet.task — the legacy path "
-            "will be removed in v3.0 and only registered tasks will run "
-            "across the fleet.",
+            "Pool.map is using the local-only cloudpickle/ProcessPool path. "
+            "Decorate the callable with @macfleet.task before using a fleet "
+            "or untrusted code.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -977,9 +992,10 @@ class Pool:
     def submit(self, fn: Callable, *args: Any, timeout: float = 300.0, **kwargs: Any) -> Any:
         """Submit a single task and block until complete.
 
-        v2.2 PR 10 (Issue 25): @macfleet.task-decorated fns route through
-        the registry (safe, msgpack-native). Undecorated fns fall through to
-        the legacy ProcessPoolExecutor + cloudpickle path.
+        @macfleet.task-decorated functions route through the registry
+        (safe, msgpack-native). Undecorated functions are rejected by
+        default; construct `Pool(..., allow_legacy_pickle=True)` only for
+        migration-only local scripts.
 
         Args:
             fn: Function to execute. Prefer @macfleet.task.
@@ -1003,13 +1019,20 @@ class Pool:
         if self._is_registered_task(fn):
             return self._run_registered_task(fn, *args, timeout=timeout, **kwargs)
 
-        # Legacy cloudpickle fallback (will be removed in v3.0).
+        self._ensure_legacy_pickle_allowed("submit")
+
+        # Legacy cloudpickle fallback (local-only, explicit opt-in).
         import warnings
+
+        import cloudpickle
+
+        from macfleet.security.audit import audit_event
+
+        audit_event("compute.legacy_pickle_used", method="submit")
         warnings.warn(
-            "Pool.submit fell through to the cloudpickle/ProcessPool path. "
-            "Decorate the callable with @macfleet.task — the legacy path "
-            "will be removed in v3.0 and only registered tasks will run "
-            "across the fleet.",
+            "Pool.submit is using the local-only cloudpickle/ProcessPool path. "
+            "Decorate the callable with @macfleet.task before using a fleet "
+            "or untrusted code.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -1026,6 +1049,18 @@ class Pool:
     def _is_registered_task(fn: Any) -> bool:
         """True iff `fn` was decorated with @macfleet.task."""
         return callable(fn) and hasattr(fn, "task_name")
+
+    def _ensure_legacy_pickle_allowed(self, method: str) -> None:
+        """Reject unsafe dynamic function execution unless explicitly enabled."""
+        if self.allow_legacy_pickle:
+            return
+        raise ValueError(
+            f"Pool.{method} requires a function decorated with @macfleet.task. "
+            "Registered tasks are validated by name and encoded with msgpack; "
+            "undecorated functions require Python pickle execution. Decorate "
+            "the callable, or construct Pool(..., allow_legacy_pickle=True) "
+            "for local-only migration code you fully trust."
+        )
 
     def _run_registered_task(
         self, fn: Any, *args: Any, timeout: float = 300.0, **kwargs: Any,

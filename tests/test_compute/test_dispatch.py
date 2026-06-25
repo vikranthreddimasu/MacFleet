@@ -15,6 +15,7 @@ import pytest
 
 from macfleet import task
 from macfleet.comm.transport import PeerTransport, TransportConfig
+from macfleet.compute.authz import TaskAuthorizationPolicy
 from macfleet.compute.dispatch import TaskDispatcher
 from macfleet.compute.models import RemoteTaskError
 from macfleet.compute.worker import TaskWorker
@@ -45,6 +46,11 @@ def times_ten(x: int) -> int:
 @task
 def bad_fn(x: int) -> int:
     raise ValueError(f"bad value: {x}")
+
+
+@task(remote=False)
+def local_only_secret(x: int) -> int:
+    return x + 999
 
 
 async def _setup_pair() -> tuple[PeerTransport, PeerTransport, int]:
@@ -127,6 +133,55 @@ class TestDispatcherWorkerIntegration:
                 await future.result(timeout=5.0)
 
             assert "bad value: 99" in exc_info.value.remote_traceback
+
+            await tw.stop()
+            await dispatcher.stop()
+        finally:
+            await _teardown(coordinator, worker)
+
+    @pytest.mark.asyncio
+    async def test_remote_disabled_task_is_refused(self):
+        """Workers reject tasks explicitly marked local-only."""
+        coordinator, worker, _ = await _setup_pair()
+        try:
+            dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+            tw = TaskWorker(worker, "coordinator", max_workers=1)
+
+            await dispatcher.start()
+            await tw.start()
+
+            future = await dispatcher.submit(local_only_secret, 1, timeout=5.0)
+            with pytest.raises(RemoteTaskError) as exc_info:
+                await future.result(timeout=5.0)
+
+            assert "not allowed to run remotely" in exc_info.value.remote_traceback
+
+            await tw.stop()
+            await dispatcher.stop()
+        finally:
+            await _teardown(coordinator, worker)
+
+    @pytest.mark.asyncio
+    async def test_worker_allowlist_blocks_unlisted_task(self):
+        """Workers can restrict execution to an explicit task allowlist."""
+        coordinator, worker, _ = await _setup_pair()
+        try:
+            dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+            policy = TaskAuthorizationPolicy(
+                allowed_tasks=frozenset({times_two.task_name}),
+            )
+            tw = TaskWorker(worker, "coordinator", max_workers=1, policy=policy)
+
+            await dispatcher.start()
+            await tw.start()
+
+            allowed = await dispatcher.submit(times_two, 2, timeout=5.0)
+            assert await allowed.result(timeout=5.0) == 4
+
+            blocked = await dispatcher.submit(pow_two, 3, timeout=5.0)
+            with pytest.raises(RemoteTaskError) as exc_info:
+                await blocked.result(timeout=5.0)
+            assert "not in the worker allowlist" in exc_info.value.remote_traceback
 
             await tw.stop()
             await dispatcher.stop()

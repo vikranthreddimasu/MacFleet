@@ -20,9 +20,16 @@ pool.train(
 
 Returns a dict: `{"loss": ..., "epochs": ..., "time_sec": ..., "steps": ...}`.
 In distributed mode it also includes `rank`, `world_size`,
-`avg_sync_time_sec`, and `params_sha256` — the hash matches across
-ranks iff the fleet stayed in sync (same check
+`avg_sync_time_sec`, `params_sha256`, `degraded`, `unsynced_steps`,
+`validation_fallback_steps`, and `last_sync_error`. The hash matches
+across ranks iff the fleet stayed in sync (same check
 `tools/two_mac_real_train.py` uses).
+
+`degraded=True` means at least one step used a local fallback instead of
+a clean synchronized gradient. `unsynced_steps` counts allreduce or
+connection failures. `validation_fallback_steps` counts NaN/Inf,
+metadata, or shape-validation failures that were discarded before they
+could poison the model.
 
 ## Mutation semantics
 

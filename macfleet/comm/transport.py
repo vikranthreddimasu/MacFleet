@@ -16,7 +16,7 @@ import socket
 import struct
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from macfleet.comm.protocol import (
     HEADER_SIZE,
@@ -25,6 +25,7 @@ from macfleet.comm.protocol import (
     WireMessage,
 )
 from macfleet.pool.network import LinkType
+from macfleet.security.audit import audit_event
 from macfleet.security.auth import (
     CHALLENGE_SIZE,
     HS_LABEL_CLIENT_RESP,
@@ -47,6 +48,11 @@ from macfleet.security.auth import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _audit_transport_auth(event: str, **fields: Any) -> None:
+    """Record transport auth events without placing secrets in the log."""
+    audit_event(event, component="transport", **fields)
 
 
 class PeerAuthError(ConnectionError):
@@ -404,6 +410,12 @@ class PeerTransport:
                 # SECURITY: Rate limit — reject banned IPs immediately
                 if self._rate_limiter.is_banned(peer_ip):
                     logger.warning("Rate limit: rejecting banned IP %s", peer_ip)
+                    _audit_transport_auth(
+                        "transport.auth_rate_limited",
+                        role="server",
+                        local_id=self.local_id,
+                        peer_ip=peer_ip,
+                    )
                     writer.close()
                     await writer.wait_closed()
                     return
@@ -419,6 +431,13 @@ class PeerTransport:
                     timeout=self.config.connect_timeout_sec,
                 )
                 if msg.msg_type != MessageType.CONTROL:
+                    _audit_transport_auth(
+                        "transport.auth_failed",
+                        role="server",
+                        local_id=self.local_id,
+                        peer_ip=peer_ip,
+                        reason="non_control_handshake",
+                    )
                     writer.close()
                     await writer.wait_closed()
                     return
@@ -444,6 +463,13 @@ class PeerTransport:
                             peer_ip,
                         )
                         self._rate_limiter.record_failure(peer_ip)
+                        _audit_transport_auth(
+                            "transport.auth_failed",
+                            role="server",
+                            local_id=self.local_id,
+                            peer_ip=peer_ip,
+                            reason="secure_payload_too_short",
+                        )
                         writer.close()
                         await writer.wait_closed()
                         return
@@ -455,6 +481,13 @@ class PeerTransport:
                             peer_ip,
                         )
                         self._rate_limiter.record_failure(peer_ip)
+                        _audit_transport_auth(
+                            "transport.auth_failed",
+                            role="server",
+                            local_id=self.local_id,
+                            peer_ip=peer_ip,
+                            reason="missing_v2_flag",
+                        )
                         writer.close()
                         await writer.wait_closed()
                         return
@@ -476,6 +509,14 @@ class PeerTransport:
                             peer_id, peer_ip,
                         )
                         self._rate_limiter.record_failure(peer_ip)
+                        _audit_transport_auth(
+                            "transport.auth_failed",
+                            role="server",
+                            local_id=self.local_id,
+                            peer_id=peer_id,
+                            peer_ip=peer_ip,
+                            reason="invalid_client_hello_proof",
+                        )
                         writer.close()
                         await writer.wait_closed()
                         return
@@ -519,6 +560,14 @@ class PeerTransport:
                             peer_id, peer_ip, e,
                         )
                         self._rate_limiter.record_failure(peer_ip)
+                        _audit_transport_auth(
+                            "transport.auth_failed",
+                            role="server",
+                            local_id=self.local_id,
+                            peer_id=peer_id,
+                            peer_ip=peer_ip,
+                            reason="invalid_hw_suffix",
+                        )
                         writer.close()
                         await writer.wait_closed()
                         return
@@ -530,6 +579,14 @@ class PeerTransport:
                             peer_id, len(response_b), CHALLENGE_SIZE,
                         )
                         self._rate_limiter.record_failure(peer_ip)
+                        _audit_transport_auth(
+                            "transport.auth_failed",
+                            role="server",
+                            local_id=self.local_id,
+                            peer_id=peer_id,
+                            peer_ip=peer_ip,
+                            reason="invalid_client_response_size",
+                        )
                         writer.close()
                         await writer.wait_closed()
                         return
@@ -544,6 +601,14 @@ class PeerTransport:
                             peer_id, peer_ip,
                         )
                         self._rate_limiter.record_failure(peer_ip)
+                        _audit_transport_auth(
+                            "transport.auth_failed",
+                            role="server",
+                            local_id=self.local_id,
+                            peer_id=peer_id,
+                            peer_ip=peer_ip,
+                            reason="invalid_client_challenge_response",
+                        )
                         writer.close()
                         await writer.wait_closed()
                         return
@@ -565,6 +630,13 @@ class PeerTransport:
                             "(possible auth handshake sent to open server)",
                             peer_ip,
                         )
+                        _audit_transport_auth(
+                            "transport.auth_failed",
+                            role="server",
+                            local_id=self.local_id,
+                            peer_ip=peer_ip,
+                            reason="auth_payload_to_open_server",
+                        )
                         writer.close()
                         await writer.wait_closed()
                         return
@@ -583,6 +655,13 @@ class PeerTransport:
 
             except Exception as e:
                 logger.debug("Handshake error from %s: %s", peer_ip, e)
+                _audit_transport_auth(
+                    "transport.handshake_error",
+                    role="server",
+                    local_id=self.local_id,
+                    peer_ip=peer_ip,
+                    error_type=type(e).__name__,
+                )
                 try:
                     writer.close()
                     await writer.wait_closed()
@@ -663,6 +742,14 @@ class PeerTransport:
                 # Fail closed: secure mode mandates TLS; a missing ssl_object
                 # means the channel is not what we think it is.
                 await conn.close()
+                _audit_transport_auth(
+                    "transport.auth_failed",
+                    role="client",
+                    local_id=self.local_id,
+                    peer_id=peer_id,
+                    peer_host=host,
+                    reason="missing_tls_channel",
+                )
                 raise ConnectionError(
                     f"Auth handshake: expected a TLS channel to {peer_id} but "
                     f"none was negotiated"
@@ -698,6 +785,15 @@ class PeerTransport:
                 )
             except (asyncio.IncompleteReadError, ConnectionResetError, EOFError) as e:
                 await conn.close()
+                _audit_transport_auth(
+                    "transport.auth_failed",
+                    role="client",
+                    local_id=self.local_id,
+                    peer_id=peer_id,
+                    peer_host=host,
+                    reason="server_rejected_hello",
+                    error_type=type(e).__name__,
+                )
                 raise PeerAuthError(
                     f"Auth handshake failed: peer {peer_id} rejected our hello "
                     f"— this node likely does not have the correct token "
@@ -706,10 +802,26 @@ class PeerTransport:
             ack_payload = ack.payload
             if len(ack_payload) < CHALLENGE_SIZE * 2 + 1:
                 await conn.close()
+                _audit_transport_auth(
+                    "transport.auth_failed",
+                    role="client",
+                    local_id=self.local_id,
+                    peer_id=peer_id,
+                    peer_host=host,
+                    reason="server_response_too_short",
+                )
                 raise ConnectionError("Auth handshake: server response too short")
 
             if not (ack.flags & MessageFlags.HANDSHAKE_V2):
                 await conn.close()
+                _audit_transport_auth(
+                    "transport.auth_failed",
+                    role="client",
+                    local_id=self.local_id,
+                    peer_id=peer_id,
+                    peer_host=host,
+                    reason="server_missing_v2_flag",
+                )
                 raise PeerAuthError(
                     f"Auth handshake failed: peer {peer_id} did not complete "
                     f"the authenticated handshake (pre-2.3 version or open "
@@ -727,11 +839,27 @@ class PeerTransport:
                 )
             except HandshakeHwValidationError as e:
                 await conn.close()
+                _audit_transport_auth(
+                    "transport.auth_failed",
+                    role="client",
+                    local_id=self.local_id,
+                    peer_id=peer_id,
+                    peer_host=host,
+                    reason="server_hw_invalid",
+                )
                 raise PeerAuthError(
                     f"Auth handshake failed: peer {peer_id} does not have the correct token"
                 ) from e
             if len(base_ack) < CHALLENGE_SIZE * 2 + 1:
                 await conn.close()
+                _audit_transport_auth(
+                    "transport.auth_failed",
+                    role="client",
+                    local_id=self.local_id,
+                    peer_id=peer_id,
+                    peer_host=host,
+                    reason="ack_base_too_short",
+                )
                 raise ConnectionError(
                     "Auth handshake v2: ACK base section too short after HW peel"
                 )
@@ -748,6 +876,14 @@ class PeerTransport:
                 channel_binding=channel_binding,
             ):
                 await conn.close()
+                _audit_transport_auth(
+                    "transport.auth_failed",
+                    role="client",
+                    local_id=self.local_id,
+                    peer_id=peer_id,
+                    peer_host=host,
+                    reason="invalid_server_challenge_response",
+                )
                 raise PeerAuthError(
                     f"Auth handshake failed: peer {peer_id} does not have the correct token"
                 )

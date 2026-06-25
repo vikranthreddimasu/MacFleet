@@ -64,33 +64,33 @@ python my_macfleet_demo.py
 On Mac #1:
 
 ```bash
-macfleet join
-# first run auto-generates a fleet token and prints a QR code +
-# pairing URL (also copied to the pasteboard). Use --bootstrap to
-# re-print pairing info later.
+macfleet join --bootstrap
+# first run auto-generates a fleet token and prints a short-lived
+# one-time pairing command. The permanent token is not printed.
 ```
 
-On Mac #2 (same Apple ID → Handoff pasteboard sync):
+On Mac #2:
 
 ```bash
-macfleet pair && macfleet join
+macfleet pair --host <Mac-1-IP>:<enrollment-port> --code <one-time-code>
+macfleet join
 ```
 
-Or: scan the QR from Mac #1 with your iPhone camera. Tap the link.
-Done.
+The enrollment code expires after 5 minutes and is single-use by default.
 
 **4. Set `enable_pool_distributed=True` and run the same script on both
 Macs** — training now spans both: the pool forms a gradient mesh, rank 0
 broadcasts initial weights, and every step's gradients are averaged
 across the fleet. The result dict's `params_sha256` matches on both
-Macs when the fleet stayed in sync.
+Macs when the fleet stayed in sync; `degraded`, `unsynced_steps`, and
+`validation_fallback_steps` tell you if any step fell back locally.
 
 ## Features
 
 - **Dual engine** — PyTorch (MPS) and Apple MLX, same pool infrastructure
 - **Zero config** — mDNS discovery, no coordinator setup, no config files
 - **Safe task dispatch** — `@macfleet.task` registry + msgpack args
-  (no cloudpickle on the wire)
+  (no cloudpickle on the wire; local pickle fallback is explicit opt-in)
 - **Adaptive compression** — auto-selects TopK + FP16 based on link
   speed (locally; sparse-on-wire arrives in v2.3, see TODOS.md
   Issue 3)
@@ -106,7 +106,7 @@ Macs when the fleet stayed in sync.
 ## Security
 
 Security is on by default. The first `macfleet join` auto-generates a
-fleet token at `~/.macfleet/token` (mode 0600). See the
+fleet token at `~/.macfleet/fleet-token` (mode 0600). See the
 [security reference](docs/reference/security.md) for the full threat
 model.
 
@@ -122,12 +122,18 @@ Short version:
   1s to stop slowloris)
 - **No cloudpickle over the wire** — `@macfleet.task` routes
   registered callables by name, not by pickled closures
+- **One-time pairing** — `macfleet join --bootstrap` exposes only a
+  short-lived enrollment code, not the permanent fleet token
+- **Local audit trail** — auth failures, enrollment, token rotation,
+  legacy pickle use, and degraded training events are written to
+  `~/.macfleet/audit.jsonl` with credential fields redacted
 
 ## CLI
 
 ```
 macfleet join         Join the pool (auto-discovers peers)
-macfleet pair         Read a pairing URL from pasteboard / stdin
+macfleet pair         Pair with a one-time enrollment code
+macfleet rotate-token Rotate the local fleet token
 macfleet status       Show pool members and network info
 macfleet info         Show local hardware profile
 macfleet train        Run training (demo or custom script)

@@ -54,6 +54,8 @@ class TaskEntry:
     name: str
     fn: Callable[..., Any]
     schema: Optional[Type[BaseModel]] = None
+    remote: bool = True
+    roles: tuple[str, ...] = ("worker",)
 
 
 class TaskRegistry:
@@ -73,6 +75,8 @@ class TaskRegistry:
         fn: Callable[..., Any],
         name: Optional[str] = None,
         schema: Optional[Type[BaseModel]] = None,
+        remote: bool = True,
+        roles: tuple[str, ...] = ("worker",),
     ) -> TaskEntry:
         """Register a callable under a name. Returns the TaskEntry.
 
@@ -85,7 +89,15 @@ class TaskRegistry:
         silently masking one of them.
         """
         task_name = name or f"{fn.__module__}.{fn.__qualname__}"
-        entry = TaskEntry(name=task_name, fn=fn, schema=schema)
+        if not roles:
+            raise ValueError("roles must contain at least one role")
+        entry = TaskEntry(
+            name=task_name,
+            fn=fn,
+            schema=schema,
+            remote=remote,
+            roles=tuple(roles),
+        )
         with self._lock:
             if task_name in self._tasks:
                 old = self._tasks[task_name]
@@ -136,6 +148,8 @@ def task(
     *,
     name: Optional[str] = None,
     schema: Optional[Type[BaseModel]] = None,
+    remote: bool = True,
+    roles: tuple[str, ...] = ("worker",),
     registry: Optional[TaskRegistry] = None,
 ) -> Union[Callable[..., Any], Callable[[Callable[..., Any]], Callable[..., Any]]]:
     """Decorator that registers a callable as a MacFleet task.
@@ -151,10 +165,18 @@ def task(
     target_registry = registry or _default_registry
 
     def _wrap(func: Callable[..., Any]) -> Callable[..., Any]:
-        entry = target_registry.register(func, name=name, schema=schema)
+        entry = target_registry.register(
+            func,
+            name=name,
+            schema=schema,
+            remote=remote,
+            roles=roles,
+        )
         # Attach introspection handles directly on the function object
         func.task_name = entry.name  # type: ignore[attr-defined]
         func.schema = entry.schema  # type: ignore[attr-defined]
+        func.remote = entry.remote  # type: ignore[attr-defined]
+        func.roles = entry.roles  # type: ignore[attr-defined]
         return func
 
     if fn is not None:

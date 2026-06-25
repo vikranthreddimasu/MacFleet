@@ -31,7 +31,7 @@ Used only for open pools (no token). Terminal newline-delimited.
 
 Where `hmac_sig = HMAC-SHA256(fleet_key, node_id || nonce)`.
 
-### Secure mode — APING v2 (5 fields, v2.2)
+### Secure mode — APING v2 (5 fields, v2.2+)
 
 ```
 → APING <node_id> <nonce_hex> <hmac_sig_hex> <hw_json_hex>
@@ -45,9 +45,8 @@ peer registers with real hardware info (GPU cores, RAM, data_port)
 instead of a zero-score placeholder. The HMAC covers the HW JSON so
 a rogue peer can't lie about hardware to win coordinator election.
 
-A v2.2 server accepts both variants; a v2.2 client pinging a v2.1
-server gets a 4-field APONG back and falls through to the legacy
-zero-HW path (logged for visibility).
+APONG signatures are bound to the request nonce, so a captured response
+cannot be replayed as the answer to a later APING.
 
 ### Bounds
 
@@ -95,13 +94,22 @@ Struct format: `!IHHIIII` (big-endian).
 | 0x08 | TASK | `@macfleet.task` dispatch (msgpack) |
 | 0x09 | RESULT | Task return value (msgpack) |
 
-### Handshake (v2.2)
+### Handshake v3 (client proves first, v2.3+)
+
+Secure transport always runs over TLS. The HMACs below are
+domain-labeled and include the SHA-256 fingerprint of B's TLS
+certificate as A sees it.
 
 1. **A → B**: CONTROL message with flag `HANDSHAKE_V2` set. Payload:
-   `node_id || challenge_a` + HW suffix.
-2. **B → A**: CONTROL. Payload: `response_a (HMAC of challenge_a) ||
-   challenge_b || response_b_to_a_ack` + HW suffix.
-3. **A → B**: CONTROL. Payload: `response_b` (HMAC of challenge_b).
+   `node_id || challenge_a || hello_proof`, where `hello_proof`
+   proves A knows the fleet key before B sends any bytes.
+2. **B verifies first.** On failure, B closes silently. This avoids
+   turning B into an offline token-brute-force oracle.
+3. **B → A**: CONTROL. Payload:
+   `server_response_a || challenge_b || hw_suffix_b`.
+4. **A verifies B**, peels and verifies `hw_suffix_b`, then sends:
+   `client_response_b || hw_suffix_a`.
+5. **B verifies A's response** and the signed hardware suffix.
 
 The HW suffix format (right-to-left peelable):
 
@@ -116,6 +124,10 @@ block_size     (2B BE, trailing — tells receiver how much to peel)
 The trailing `block_size` lets the receiver peel the suffix off a
 variable-length base (`node_id + challenge_a`) without reparsing from
 the left.
+
+Secure fleets reject proof-less pre-v2.3 handshakes. Open fleets
+(created only with `--open --allow-insecure-open`) use the older
+plain `node_id` exchange and do not carry hardware suffixes.
 
 ## TASK / RESULT payloads
 

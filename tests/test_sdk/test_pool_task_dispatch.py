@@ -1,9 +1,9 @@
 """Tests for Pool.submit/map routing through @macfleet.task (Issue 25).
 
-v2.2 PR 10: `Pool.submit` and `Pool.map` detect @task-decorated callables
-and invoke them via the task registry (no cloudpickle). Undecorated fns
-fall through to the legacy ProcessPoolExecutor + cloudpickle path so
-existing user code keeps working.
+`Pool.submit` and `Pool.map` invoke @task-decorated callables via the task
+registry (no cloudpickle). Undecorated functions are rejected by default;
+the legacy local ProcessPoolExecutor + cloudpickle path is an explicit
+opt-in for migration-only scripts.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from macfleet import task
 from macfleet.sdk.pool import Pool
+from macfleet.security import audit
 
 # --------------------------------------------------------------------------- #
 # Tasks registered at module level (so ProcessPool workers can re-import them)
@@ -87,17 +88,33 @@ class TestPoolMapRegisteredTask:
 
 
 class TestPoolLegacyFallback:
-    def test_undecorated_fn_still_works(self):
-        """Bare lambdas fall through to the old ProcessPool path."""
+    @pytest.fixture
+    def isolated_audit_log(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(audit, "AUDIT_DIR", str(tmp_path))
+        monkeypatch.setattr(audit, "AUDIT_FILE", str(tmp_path / "audit.jsonl"))
+        return tmp_path / "audit.jsonl"
+
+    def test_undecorated_fn_rejected_by_default(self):
         with Pool(open=True) as pool:
-            # Plain lambda (no task_name) → ProcessPool + cloudpickle
+            with pytest.raises(ValueError, match="@macfleet.task"):
+                pool.submit(lambda x: x + 100, 5)
+
+    def test_undecorated_map_rejected_by_default(self):
+        with Pool(open=True) as pool:
+            with pytest.raises(ValueError, match="@macfleet.task"):
+                pool.map(lambda x: x * 3, [1, 2, 3])
+
+    def test_undecorated_fn_legacy_opt_in_still_works(self, isolated_audit_log):
+        with Pool(open=True, allow_legacy_pickle=True) as pool:
             result = pool.submit(lambda x: x + 100, 5)
         assert result == 105
+        assert "compute.legacy_pickle_used" in isolated_audit_log.read_text()
 
-    def test_undecorated_map_still_works(self):
-        with Pool(open=True) as pool:
+    def test_undecorated_map_legacy_opt_in_still_works(self, isolated_audit_log):
+        with Pool(open=True, allow_legacy_pickle=True) as pool:
             results = pool.map(lambda x: x * 3, [1, 2, 3])
         assert results == [3, 6, 9]
+        assert "compute.legacy_pickle_used" in isolated_audit_log.read_text()
 
 
 class TestIsDistributedProperty:

@@ -54,6 +54,26 @@ class TestArraySerialization:
         result = unpack_array(pack_array(arr))
         np.testing.assert_array_equal(result, arr)
 
+    def test_rejects_truncated_header(self):
+        with pytest.raises(ValueError, match="too short"):
+            unpack_array(b"\x00\x07")
+
+    def test_rejects_unsupported_dtype(self):
+        arr = np.array([1 + 1j], dtype=np.complex64)
+        with pytest.raises(ValueError, match="unsupported"):
+            pack_array(arr)
+
+    def test_rejects_payload_size_mismatch(self):
+        arr = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        packed = pack_array(arr)
+        with pytest.raises(ValueError, match="size mismatch"):
+            unpack_array(packed[:-1])
+
+    def test_rejects_excessive_dimensions(self):
+        arr = np.zeros((1,) * 9, dtype=np.float32)
+        with pytest.raises(ValueError, match="too many dimensions"):
+            pack_array(arr)
+
 
 # --------------------------------------------------------------------------- #
 # Helpers for multi-node loopback tests                                       #

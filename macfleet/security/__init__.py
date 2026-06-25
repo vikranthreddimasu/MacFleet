@@ -1,5 +1,6 @@
 """MacFleet security: fleet isolation, authentication, encryption, and validation."""
 
+from macfleet.security.audit import audit_event, audit_log_path
 from macfleet.security.auth import (
     MIN_TOKEN_LENGTH,
     TOKEN_FILE,
@@ -15,6 +16,8 @@ from macfleet.security.auth import (
     generate_fleet_token,
     resolve_token,
     resolve_token_with_file,
+    rotate_saved_fleet_token,
+    save_fleet_token,
     sign_heartbeat,
     sign_heartbeat_response,
     tls_channel_binding_from_writer,
@@ -25,8 +28,30 @@ from macfleet.security.auth import (
     verify_heartbeat_response,
     verify_response,
 )
+from macfleet.security.enrollment import (
+    EnrollmentError,
+    EnrollmentResult,
+    EnrollmentServer,
+    format_pair_command,
+    generate_enrollment_code,
+    normalize_enrollment_code,
+    parse_host_port,
+    print_enrollment_info,
+    request_enrollment,
+)
 
 __all__ = [
+    "audit_event",
+    "audit_log_path",
+    "EnrollmentError",
+    "EnrollmentResult",
+    "EnrollmentServer",
+    "format_pair_command",
+    "generate_enrollment_code",
+    "normalize_enrollment_code",
+    "parse_host_port",
+    "print_enrollment_info",
+    "request_enrollment",
     "MIN_TOKEN_LENGTH",
     "TOKEN_FILE",
     "AuthRateLimiter",
@@ -41,6 +66,8 @@ __all__ = [
     "generate_fleet_token",
     "resolve_token",
     "resolve_token_with_file",
+    "rotate_saved_fleet_token",
+    "save_fleet_token",
     "sign_heartbeat",
     "sign_heartbeat_response",
     "tls_channel_binding_from_writer",
