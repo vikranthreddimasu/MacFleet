@@ -8,9 +8,17 @@ import numpy as np
 import pytest
 
 from macfleet.comm.transport import PeerTransport, TransportConfig
+from macfleet.security import audit
 from macfleet.security.auth import SecurityConfig
 
 CONFIG = TransportConfig(recv_timeout_sec=5.0, connect_timeout_sec=5.0)
+
+
+@pytest.fixture(autouse=True)
+def isolated_audit_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(audit, "AUDIT_DIR", str(tmp_path))
+    monkeypatch.setattr(audit, "AUDIT_FILE", str(tmp_path / "audit.jsonl"))
+    return tmp_path / "audit.jsonl"
 
 
 # ------------------------------------------------------------------ #
@@ -84,7 +92,7 @@ class TestAuthenticatedTransport:
         await client.disconnect_all()
         await server.disconnect_all()
 
-    async def test_mismatched_tokens_rejected(self):
+    async def test_mismatched_tokens_rejected(self, isolated_audit_log):
         sec_a = SecurityConfig(token="secret-a-long")
         sec_b = SecurityConfig(token="secret-b-long")
         server = PeerTransport(local_id="server", config=CONFIG, security=sec_a)
@@ -95,6 +103,11 @@ class TestAuthenticatedTransport:
 
         with pytest.raises(ConnectionError, match="does not have the correct token"):
             await client.connect("server", "127.0.0.1", port)
+
+        audit_text = isolated_audit_log.read_text()
+        assert "transport.auth_failed" in audit_text
+        assert "invalid_client_hello_proof" in audit_text
+        assert "server_rejected_hello" in audit_text
 
         await client.disconnect_all()
         await server.disconnect_all()
