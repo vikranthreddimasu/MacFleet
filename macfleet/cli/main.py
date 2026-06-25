@@ -767,11 +767,18 @@ def _bench_allreduce(size_mb: int, iterations: int):
     default=None,
     help="One-time enrollment code from `macfleet join --bootstrap`.",
 )
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Do not prompt before replacing an existing saved fleet token.",
+)
 def pair(
     from_stdin: bool,
     from_pasteboard: bool,
     enroll_host: str | None,
     enroll_code: str | None,
+    yes: bool,
 ):
     """Pair this Mac with an existing fleet.
 
@@ -786,6 +793,8 @@ def pair(
         Mac #2: macfleet pair --host <Mac-A-IP>:<port> --code <code>
         Mac #2: macfleet join
     """
+    import os
+
     from macfleet.security.audit import audit_event
     from macfleet.security.auth import TOKEN_FILE, _write_token_file
     from macfleet.security.bootstrap import (
@@ -799,6 +808,31 @@ def pair(
         request_enrollment,
     )
 
+    def confirm_token_replacement(*, can_prompt: bool = True) -> None:
+        if yes or not os.path.lexists(TOKEN_FILE):
+            return
+        if not can_prompt:
+            console.print(
+                "[red]Error: refusing to replace an existing saved fleet token from --stdin.[/red]\n"
+                "[dim]Re-run with --yes if this migration should overwrite the saved token.[/dim]"
+            )
+            raise click.exceptions.Exit(1)
+        confirmed = click.confirm(
+            "Replace the saved fleet token on this Mac? "
+            "This Mac will need to rejoin peers from the new fleet.",
+            default=False,
+        )
+        if not confirmed:
+            console.print("[yellow]Pairing cancelled; existing fleet token left unchanged.[/yellow]")
+            raise click.exceptions.Exit(1)
+
+    def write_pairing_token(new_token: str) -> None:
+        try:
+            _write_token_file(new_token)
+        except OSError as e:
+            console.print(f"[red]Error: couldn't write fleet token to {TOKEN_FILE}: {e}[/red]")
+            sys.exit(1)
+
     if enroll_host or enroll_code:
         if from_stdin or from_pasteboard:
             console.print(
@@ -808,13 +842,14 @@ def pair(
         if not enroll_host or not enroll_code:
             console.print("[red]Error: --host and --code must be provided together.[/red]")
             sys.exit(1)
+        confirm_token_replacement()
         try:
             host, port = parse_host_port(enroll_host)
             result = asyncio.run(request_enrollment(host, port, enroll_code))
         except (EnrollmentError, OSError, asyncio.TimeoutError) as e:
             console.print(f"[red]Error: enrollment failed: {e}[/red]")
             sys.exit(1)
-        _write_token_file(result.token)
+        write_pairing_token(result.token)
         audit_event(
             "pairing.completed",
             mode="enrollment",
@@ -866,7 +901,8 @@ def pair(
         )
         sys.exit(1)
 
-    _write_token_file(token)
+    confirm_token_replacement(can_prompt=not from_stdin)
+    write_pairing_token(token)
     audit_event("pairing.completed", mode="legacy_url", fleet_id=fleet_id)
     console.print(
         f"[green]Paired from legacy token URL.[/green] Token written to {TOKEN_FILE}"

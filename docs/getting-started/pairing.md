@@ -76,6 +76,10 @@ fleet until the token is rotated. MacFleet's legacy URL rendering helper
 redacts the permanent token by default; code must explicitly opt into
 revealing or copying token-bearing URLs for migration.
 
+If `~/.macfleet/fleet-token` already exists, `macfleet pair` asks before
+replacing it. For scripted legacy stdin migration, pass `--yes`
+deliberately.
+
 ## Rotating The Token
 
 Rotate when a token, legacy URL, screenshot, or enrollment command may

@@ -74,6 +74,37 @@ class TestPairFromStdin:
         assert result.exit_code == 0
         assert token_path.read_text().strip() == "spaced-token"
 
+    def test_existing_token_from_stdin_requires_yes(self, tmp_path: Path, monkeypatch):
+        token_path = tmp_path / "token"
+        token_path.write_text("existing-token")
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["pair", "--stdin"],
+            input="macfleet://pair?token=new-token",
+        )
+
+        assert result.exit_code == 1
+        assert "--yes" in result.output
+        assert token_path.read_text() == "existing-token"
+
+    def test_existing_token_can_be_replaced_with_yes(self, tmp_path: Path, monkeypatch):
+        token_path = tmp_path / "token"
+        token_path.write_text("existing-token")
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["pair", "--stdin", "--yes"],
+            input="macfleet://pair?token=new-token",
+        )
+
+        assert result.exit_code == 0, result.output
+        assert token_path.read_text().strip() == "new-token"
+
 
 class TestPairFromPasteboard:
     def test_default_requires_explicit_input_source(self, tmp_path: Path, monkeypatch):
@@ -108,6 +139,23 @@ class TestPairFromPasteboard:
         assert result.exit_code == 0
         assert "Paired" in result.output
         assert token_path.read_text().strip() == "pasteboard-token"
+
+    def test_existing_token_from_pasteboard_can_be_cancelled(self, tmp_path: Path, monkeypatch):
+        token_path = tmp_path / "token"
+        token_path.write_text("existing-token")
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+
+        url = "macfleet://pair?token=pasteboard-token&fleet=cluster-a"
+        with patch(
+            "macfleet.security.bootstrap.read_from_pasteboard",
+            return_value=url,
+        ):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["pair", "--pasteboard"], input="n\n")
+
+        assert result.exit_code == 1
+        assert "left unchanged" in result.output
+        assert token_path.read_text() == "existing-token"
 
     def test_empty_pasteboard_errors(self):
         with patch(
@@ -176,6 +224,67 @@ class TestPairFromEnrollment:
         assert "studio" in result.output
         assert token_path.read_text().strip() == "enrolled-token-long-enough"
 
+    def test_host_code_confirmation_happens_before_enrollment_request(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        token_path = tmp_path / "token"
+        token_path.write_text("existing-token")
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+
+        async def fail_if_called(host, port, code):
+            raise AssertionError("enrollment request should not run after cancel")
+
+        monkeypatch.setattr("macfleet.security.enrollment.request_enrollment", fail_if_called)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "pair",
+                "--host",
+                "192.168.1.10:4242",
+                "--code",
+                "ABCD-EFGH-IJKL-MNOP",
+            ],
+            input="n\n",
+        )
+
+        assert result.exit_code == 1
+        assert "left unchanged" in result.output
+        assert token_path.read_text() == "existing-token"
+
+    def test_host_code_yes_replaces_existing_token(self, tmp_path: Path, monkeypatch):
+        token_path = tmp_path / "token"
+        token_path.write_text("existing-token")
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+
+        async def fake_request(host, port, code):
+            return EnrollmentResult(
+                token="new-enrolled-token",
+                fleet_id="lab",
+                server_node="studio",
+            )
+
+        monkeypatch.setattr("macfleet.security.enrollment.request_enrollment", fake_request)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "pair",
+                "--host",
+                "192.168.1.10:4242",
+                "--code",
+                "ABCD-EFGH-IJKL-MNOP",
+                "--yes",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert token_path.read_text().strip() == "new-enrolled-token"
+
     def test_host_requires_code(self):
         runner = CliRunner()
         result = runner.invoke(cli, ["pair", "--host", "127.0.0.1:1234"])
@@ -232,3 +341,8 @@ class TestCliHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["pair", "--help"])
         assert "--pasteboard" in result.output
+
+    def test_yes_flag_in_pair_help(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["pair", "--help"])
+        assert "--yes" in result.output
