@@ -1,21 +1,25 @@
+<div align="center">
+
 # MacFleet
 
-**Distributed ML training on Apple Silicon.** Pool your Macs into a
-cluster in 5 seconds, run PyTorch or MLX across them, keep zero cloud
-spend.
+### Distributed training for Apple Silicon fleets
 
+Run PyTorch or MLX across multiple Macs with secure peer discovery,
+TLS/HMAC authentication, and framework-agnostic gradient synchronization.
+
+```bash
+pip install macfleet
+macfleet join --bootstrap
 ```
-  macfleet join              macfleet join            macfleet join
- ┌──────────────┐          ┌──────────────┐          ┌──────────────┐
- │  MacBook Pro │◄────────►│  MacBook Air │◄────────►│  Mac Studio  │
- │  M4 Pro      │  WiFi /  │  M4          │  WiFi /  │  M4 Ultra    │
- │  16 GPU cores│  ETH /   │  10 GPU cores│  ETH /   │  60 GPU cores│
- │  48 GB RAM   │  TB4     │  16 GB RAM   │  TB4     │  192 GB RAM  │
- └──────────────┘          └──────────────┘          └──────────────┘
-         ▲                          ▲                          ▲
-         └──────────────────────────┴──────────────────────────┘
-                        Ring AllReduce (gradient sync)
-```
+
+**Local hardware. Real data parallelism. No cloud bill.**
+
+</div>
+
+MacFleet turns a room full of Apple Silicon machines into one training
+pool. Each Mac keeps a full model replica, processes its shard of the
+batch, and synchronizes gradients over a NumPy-only communication layer
+that never imports torch or MLX.
 
 ## Why MacFleet
 
