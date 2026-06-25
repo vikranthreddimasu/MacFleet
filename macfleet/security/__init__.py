@@ -1,5 +1,6 @@
 """MacFleet security: fleet isolation, authentication, encryption, and validation."""
 
+from macfleet.security.audit import audit_event, audit_log_path
 from macfleet.security.auth import (
     MIN_TOKEN_LENGTH,
     TOKEN_FILE,
@@ -27,6 +28,8 @@ from macfleet.security.auth import (
 )
 
 __all__ = [
+    "audit_event",
+    "audit_log_path",
     "MIN_TOKEN_LENGTH",
     "TOKEN_FILE",
     "AuthRateLimiter",
