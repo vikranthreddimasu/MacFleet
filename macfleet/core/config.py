@@ -1,5 +1,7 @@
 """Configuration dataclasses for MacFleet distributed training."""
 
+import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -36,6 +38,39 @@ DEFAULT_TOPK_RATIO = 0.1
 DEFAULT_HEARTBEAT_INTERVAL_SEC = 2.0
 DEFAULT_HEARTBEAT_TIMEOUT_SEC = 6.0
 DEFAULT_CHECKPOINT_EVERY = 2
+DEFAULT_AUTH_TOKEN_ENV = "MACFLEET_AUTH_TOKEN"
+MIN_AUTH_TOKEN_LENGTH = 16
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def resolve_auth_token(
+    auth_token: Optional[str] = None,
+    auth_token_env: str = DEFAULT_AUTH_TOKEN_ENV,
+) -> Optional[str]:
+    """Resolve and validate the optional control-plane auth token.
+
+    Tokens are intentionally omitted from serialized config dictionaries.
+    """
+    if auth_token is None:
+        if not auth_token_env:
+            return None
+        if not _ENV_NAME_RE.match(auth_token_env):
+            raise ValueError(
+                "auth_token_env must be a valid environment variable name"
+            )
+        auth_token = os.environ.get(auth_token_env)
+
+    if auth_token is None or auth_token == "":
+        return None
+
+    token = str(auth_token)
+    if any(ch in token for ch in "\r\n\0"):
+        raise ValueError("auth_token must not contain control characters")
+    if len(token) < MIN_AUTH_TOKEN_LENGTH:
+        raise ValueError(
+            f"auth_token must be at least {MIN_AUTH_TOKEN_LENGTH} characters"
+        )
+    return token
 
 
 @dataclass
@@ -122,6 +157,8 @@ class ClusterConfig:
     service_name: str = "_macfleet._tcp.local."
     host: Optional[str] = None
     min_workers: int = 1  # Minimum workers required before training starts
+    auth_token_env: str = DEFAULT_AUTH_TOKEN_ENV
+    auth_token: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.master_addr:
@@ -147,6 +184,11 @@ class ClusterConfig:
             )
         if self.min_workers < 1:
             raise ValueError(f"min_workers must be >= 1, got {self.min_workers}")
+        if not self.auth_token_env or not _ENV_NAME_RE.match(self.auth_token_env):
+            raise ValueError(
+                "auth_token_env must be a valid environment variable name"
+            )
+        self.auth_token = resolve_auth_token(self.auth_token, self.auth_token_env)
 
     @property
     def master_grpc_address(self) -> str:
@@ -166,6 +208,8 @@ class ClusterConfig:
             "service_name": self.service_name,
             "host": self.host,
             "min_workers": self.min_workers,
+            "auth_token_env": self.auth_token_env,
+            "auth_required": self.auth_token is not None,
         }
 
     @classmethod

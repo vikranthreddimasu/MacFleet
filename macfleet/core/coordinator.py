@@ -17,18 +17,14 @@ from typing import Callable, Optional
 from rich.console import Console
 from rich.table import Table
 
-from macfleet.comm.discovery import DiscoveredNode
 from macfleet.comm.grpc_service import ClusterControlServicer, GRPCServer
-from macfleet.comm.transport import TensorTransport
 from macfleet.core.config import (
     ClusterConfig,
-    ClusterState,
     NodeConfig,
     NodeRole,
     TrainingConfig,
 )
 from macfleet.core.node import BaseNode
-
 
 logger = logging.getLogger(__name__)
 console = Console()  # Keep for Rich table output only
@@ -69,7 +65,8 @@ class Coordinator(BaseNode):
         self._servicer: Optional[ClusterControlServicer] = None
         self._heartbeat_tracker: dict[int, float] = {}  # rank -> last_heartbeat_time
         self._throughput_tracker: dict[int, float] = {}  # rank -> samples/sec
-        self._state_lock = threading.Lock()  # Protects heartbeat/throughput trackers and cluster state
+        # Protects heartbeat/throughput trackers and cluster state.
+        self._state_lock = threading.Lock()
         self._on_node_registered: Optional[Callable[[NodeConfig], None]] = None
         self._on_node_lost: Optional[Callable[[int], None]] = None
 
@@ -131,6 +128,7 @@ class Coordinator(BaseNode):
             on_register=self._handle_registration,
             on_heartbeat=self._handle_heartbeat,
             on_deregister=self._handle_deregistration,
+            auth_token=self._cluster_config.auth_token,
         )
 
         self._grpc_server = GRPCServer(

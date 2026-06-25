@@ -10,21 +10,16 @@ The worker runs on secondary nodes (e.g., MacBook Air) and handles:
 import asyncio
 import logging
 import subprocess
-import time
 from typing import Optional
 
 from macfleet.comm.discovery import discover_master
 from macfleet.comm.grpc_service import ClusterControlClient
-from macfleet.comm.transport import TensorTransport
 from macfleet.core.config import (
     ClusterConfig,
     NodeConfig,
     NodeRole,
-    ThermalState,
-    TrainingConfig,
 )
 from macfleet.core.node import BaseNode
-
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +165,8 @@ class Worker(BaseNode):
         self._grpc_client = ClusterControlClient(
             master_addr=self._cluster_config.master_addr,
             master_port=self._cluster_config.master_port,
+            auth_token=self._cluster_config.auth_token,
+            auth_token_env=self._cluster_config.auth_token_env,
         )
 
         # Try to connect with exponential backoff

@@ -4,6 +4,7 @@ Provides server and client implementations for cluster control messages
 including registration, heartbeats, synchronization barriers, and training commands.
 """
 
+import hmac
 import threading
 import time
 from concurrent import futures
@@ -13,11 +14,15 @@ import grpc
 
 from macfleet.comm.proto import control_pb2, control_pb2_grpc
 from macfleet.core.config import (
+    DEFAULT_AUTH_TOKEN_ENV,
     ClusterState,
     NodeConfig,
     TrainingConfig,
+    resolve_auth_token,
 )
 from macfleet.utils.network import validate_host, validate_port
+
+AUTH_METADATA_KEY = "x-macfleet-auth-token"
 
 
 class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
@@ -38,6 +43,7 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         on_register: Optional[Callable[[NodeConfig], None]] = None,
         on_heartbeat: Optional[Callable[[int, float, str], None]] = None,
         on_deregister: Optional[Callable[[int, str], None]] = None,
+        auth_token: Optional[str] = None,
     ):
         """Initialize the servicer.
 
@@ -48,6 +54,7 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
             on_register: Callback when a node registers.
             on_heartbeat: Callback on heartbeat (rank, throughput, thermal).
             on_deregister: Callback on deregistration (rank, reason).
+            auth_token: Optional shared token required for all control RPCs.
         """
         self._state = cluster_state
         self._tensor_addr = tensor_addr
@@ -55,6 +62,7 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         self._on_register = on_register
         self._on_heartbeat = on_heartbeat
         self._on_deregister = on_deregister
+        self._auth_token = resolve_auth_token(auth_token, "")
         self._next_rank = 1  # Rank 0 is reserved for master
         self._free_ranks: list[int] = []  # Reusable ranks from departed nodes
         # barrier_id -> (ranks, created_time)
@@ -63,12 +71,37 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         self._base_weights: dict[int, float] = {}  # rank -> baseline weight (GPU-core based)
         self._lock = threading.Lock()  # Protects all mutable state from gRPC thread pool
 
+    def _require_authorized(self, context: grpc.ServicerContext) -> None:
+        """Require the configured shared token when auth is enabled."""
+        if self._auth_token is None:
+            return
+
+        provided = None
+        for item in context.invocation_metadata():
+            if isinstance(item, tuple):
+                key, value = item
+            else:
+                key, value = item.key, item.value
+            if key.lower() == AUTH_METADATA_KEY:
+                provided = value
+                break
+
+        if provided is not None and hmac.compare_digest(str(provided), self._auth_token):
+            return
+
+        message = "missing or invalid MacFleet auth token"
+        if hasattr(context, "abort"):
+            context.abort(grpc.StatusCode.UNAUTHENTICATED, message)
+        raise PermissionError(message)
+
     def Register(
         self,
         request: control_pb2.RegisterRequest,
         context: grpc.ServicerContext,
     ) -> control_pb2.RegisterResponse:
         """Handle node registration."""
+        self._require_authorized(context)
+
         with self._lock:
             # Assign rank (reuse freed ranks before incrementing)
             if self._free_ranks:
@@ -128,6 +161,8 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         context: grpc.ServicerContext,
     ) -> control_pb2.HeartbeatResponse:
         """Handle heartbeat from a worker."""
+        self._require_authorized(context)
+
         with self._lock:
             node = self._state.get_node(request.rank)
             if not node:
@@ -170,6 +205,8 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         context: grpc.ServicerContext,
     ) -> control_pb2.BarrierResponse:
         """Handle synchronization barrier."""
+        self._require_authorized(context)
+
         barrier_id = request.barrier_id
         rank = request.rank
 
@@ -206,6 +243,8 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         context: grpc.ServicerContext,
     ) -> control_pb2.Ack:
         """Handle start training command."""
+        self._require_authorized(context)
+
         with self._lock:
             self._state.training_active = True
             self._state.current_epoch = 0
@@ -222,6 +261,8 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         context: grpc.ServicerContext,
     ) -> control_pb2.Ack:
         """Handle stop training command."""
+        self._require_authorized(context)
+
         with self._lock:
             self._state.training_active = False
 
@@ -236,6 +277,8 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         context: grpc.ServicerContext,
     ) -> control_pb2.ClusterStateProto:
         """Return current cluster state."""
+        self._require_authorized(context)
+
         with self._lock:
             nodes = []
             for node in self._state.nodes.values():
@@ -268,6 +311,8 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         context: grpc.ServicerContext,
     ) -> control_pb2.Ack:
         """Handle graceful node deregistration."""
+        self._require_authorized(context)
+
         with self._lock:
             node = self._state.get_node(request.rank)
             if not node:
@@ -297,6 +342,8 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         context: grpc.ServicerContext,
     ) -> control_pb2.Ack:
         """Handle broadcast request."""
+        self._require_authorized(context)
+
         # For now, just acknowledge - actual broadcast logic in coordinator
         return control_pb2.Ack(
             success=True,
@@ -364,18 +411,29 @@ class ClusterControlClient:
         self,
         master_addr: str,
         master_port: int = 50051,
+        auth_token: Optional[str] = None,
+        auth_token_env: str = DEFAULT_AUTH_TOKEN_ENV,
     ):
         """Initialize the client.
 
         Args:
             master_addr: Address of the master node.
             master_port: gRPC port of the master.
+            auth_token: Optional shared token for protected control planes.
+            auth_token_env: Environment variable to read when auth_token is unset.
         """
         master_addr = validate_host(master_addr, "master_addr")
         master_port = validate_port(master_port, "master_port")
         self._addr = f"{master_addr}:{master_port}"
+        self._auth_token = resolve_auth_token(auth_token, auth_token_env)
         self._channel: Optional[grpc.Channel] = None
         self._stub: Optional[control_pb2_grpc.ClusterControlStub] = None
+
+    def _metadata(self) -> Optional[tuple[tuple[str, str], ...]]:
+        """Return gRPC metadata containing the auth token when configured."""
+        if self._auth_token is None:
+            return None
+        return ((AUTH_METADATA_KEY, self._auth_token),)
 
     def connect(self) -> None:
         """Connect to the master."""
@@ -415,7 +473,7 @@ class ClusterControlClient:
             tensor_port=tensor_port,
         )
 
-        response = self._stub.Register(request)
+        response = self._stub.Register(request, metadata=self._metadata())
 
         return (
             response.assigned_rank,
@@ -448,7 +506,7 @@ class ClusterControlClient:
             current_step=current_step,
         )
 
-        response = self._stub.Heartbeat(request)
+        response = self._stub.Heartbeat(request, metadata=self._metadata())
 
         return (
             response.acknowledged,
@@ -476,7 +534,7 @@ class ClusterControlClient:
             barrier_id=barrier_id,
         )
 
-        response = self._stub.SyncBarrier(request)
+        response = self._stub.SyncBarrier(request, metadata=self._metadata())
 
         return (response.proceed, response.nodes_at_barrier)
 
@@ -489,7 +547,10 @@ class ClusterControlClient:
         if not self._stub:
             raise RuntimeError("Not connected to master")
 
-        response = self._stub.GetClusterState(control_pb2.Empty())
+        response = self._stub.GetClusterState(
+            control_pb2.Empty(),
+            metadata=self._metadata(),
+        )
 
         nodes = []
         for node in response.nodes:
@@ -532,7 +593,7 @@ class ClusterControlClient:
             device=config.device,
         )
 
-        response = self._stub.StartTraining(request)
+        response = self._stub.StartTraining(request, metadata=self._metadata())
         return response.success
 
     def deregister(self, rank: int, reason: str = "Graceful shutdown") -> bool:
@@ -549,7 +610,11 @@ class ClusterControlClient:
                 rank=rank,
                 reason=reason,
             )
-            response = self._stub.Deregister(request, timeout=5.0)
+            response = self._stub.Deregister(
+                request,
+                timeout=5.0,
+                metadata=self._metadata(),
+            )
             return response.success
         except Exception:
             return False
@@ -568,7 +633,7 @@ class ClusterControlClient:
             save_checkpoint=True,
         )
 
-        response = self._stub.StopTraining(request)
+        response = self._stub.StopTraining(request, metadata=self._metadata())
         return response.success
 
     @property

@@ -14,7 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from macfleet import __version__
-from macfleet.core.config import ClusterConfig, NodeRole
+from macfleet.core.config import DEFAULT_AUTH_TOKEN_ENV, ClusterConfig, NodeRole
 from macfleet.utils.network import parse_endpoint
 
 console = Console()
@@ -94,6 +94,12 @@ def cli():
     is_flag=True,
     help="Disable Bonjour/zeroconf discovery.",
 )
+@click.option(
+    "--auth-token-env",
+    default=DEFAULT_AUTH_TOKEN_ENV,
+    show_default=True,
+    help="Environment variable containing the shared control-plane token.",
+)
 def launch(
     role: str,
     port: int,
@@ -101,6 +107,7 @@ def launch(
     master: str,
     host: str,
     no_discovery: bool,
+    auth_token_env: str,
 ):
     """Launch a MacFleet node (coordinator or worker).
 
@@ -130,6 +137,7 @@ def launch(
         tensor_port=tensor_port,
         discovery_enabled=not no_discovery,
         host=host,
+        auth_token_env=auth_token_env,
     )
 
     # Print banner
@@ -184,7 +192,13 @@ def _run_worker(config: ClusterConfig):
     default="10.0.0.1:50051",
     help="Master address (default: 10.0.0.1:50051).",
 )
-def status(master: str):
+@click.option(
+    "--auth-token-env",
+    default=DEFAULT_AUTH_TOKEN_ENV,
+    show_default=True,
+    help="Environment variable containing the shared control-plane token.",
+)
+def status(master: str, auth_token_env: str):
     """Check the status of a MacFleet cluster.
 
     Connects to the coordinator and displays cluster information.
@@ -201,7 +215,11 @@ def status(master: str):
     console.print(f"Connecting to {master_addr}:{master_port}...")
 
     try:
-        client = ClusterControlClient(master_addr, master_port)
+        client = ClusterControlClient(
+            master_addr,
+            master_port,
+            auth_token_env=auth_token_env,
+        )
         client.connect()
         state = client.get_cluster_state()
         client.disconnect()

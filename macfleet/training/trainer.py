@@ -7,19 +7,18 @@ multiple Macs with automatic distributed coordination.
 import asyncio
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Type
 
 import torch
 import torch.nn as nn
+from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from rich.table import Table
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader, Dataset
 
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-from rich.table import Table
-
-from macfleet.comm.collectives import AllReduce, Broadcast, CollectiveGroup
+from macfleet.comm.collectives import CollectiveGroup
 from macfleet.comm.transport import TensorTransport
 from macfleet.compression.pipeline import create_pipeline
 from macfleet.core.config import (
@@ -32,7 +31,6 @@ from macfleet.core.config import (
 from macfleet.training.data_parallel import MacFleetDDP
 from macfleet.training.distributed_sampler import WeightedDistributedSampler
 from macfleet.utils.tensor_utils import MessageType
-
 
 console = Console()
 
@@ -227,7 +225,10 @@ class Trainer:
         )
 
         # Compute per-node batch size
-        weight = self._weights[self._rank] if self._rank < len(self._weights) else 1.0 / self._world_size
+        if self._rank < len(self._weights):
+            weight = self._weights[self._rank]
+        else:
+            weight = 1.0 / self._world_size
         local_batch_size = max(1, int(self.training_config.batch_size * weight))
 
         self._dataloader = DataLoader(
@@ -259,8 +260,11 @@ class Trainer:
 
         from macfleet.comm.grpc_service import ClusterControlServicer, GRPCServer
         from macfleet.utils.network import (
-            get_gpu_info, get_hostname, get_local_ip,
-            get_memory_bandwidth, get_memory_info,
+            get_gpu_info,
+            get_hostname,
+            get_local_ip,
+            get_memory_bandwidth,
+            get_memory_info,
         )
 
         hostname = get_hostname()
@@ -311,6 +315,7 @@ class Trainer:
             tensor_addr=ip,
             tensor_port=self.cluster_config.tensor_port,
             on_register=on_register,
+            auth_token=self.cluster_config.auth_token,
         )
 
         self._grpc_server = GRPCServer(
@@ -348,7 +353,10 @@ class Trainer:
         # Workers may connect from a different IP than they registered with
         # (e.g., link-local vs manual IP on the same Thunderbolt interface),
         # so we match by IP first, then assign remaining connections by order.
-        console.print(f"  [yellow]Waiting for {len(registered_workers)} tensor connection(s)...[/yellow]")
+        console.print(
+            f"  [yellow]Waiting for {len(registered_workers)} "
+            "tensor connection(s)...[/yellow]"
+        )
         accepted: list[tuple] = []  # [(reader, writer, addr), ...]
         while len(accepted) < len(registered_workers):
             client_sock, addr = await asyncio.wait_for(
@@ -400,8 +408,11 @@ class Trainer:
         """
         from macfleet.comm.grpc_service import ClusterControlClient
         from macfleet.utils.network import (
-            get_gpu_info, get_hostname, get_local_ip,
-            get_memory_bandwidth, get_memory_info,
+            get_gpu_info,
+            get_hostname,
+            get_local_ip,
+            get_memory_bandwidth,
+            get_memory_info,
         )
 
         hostname = get_hostname()
@@ -417,6 +428,8 @@ class Trainer:
         self._grpc_client = ClusterControlClient(
             self.cluster_config.master_addr,
             self.cluster_config.master_port,
+            auth_token=self.cluster_config.auth_token,
+            auth_token_env=self.cluster_config.auth_token_env,
         )
 
         # Retry gRPC connect + register (channel is lazy, so the real
@@ -442,7 +455,7 @@ class Trainer:
                     await asyncio.sleep(3.0)
                 else:
                     raise RuntimeError(
-                        f"Failed to register with master after 30 attempts"
+                        "Failed to register with master after 30 attempts"
                     )
 
         console.print(f"  [green]Registered with master, assigned rank {rank}[/green]")
@@ -471,7 +484,7 @@ class Trainer:
             master_tensor_addr, master_tensor_port,
         )
         self._peer_info = {0: conn_key}
-        console.print(f"  TCP tensor connection established with master")
+        console.print("  TCP tensor connection established with master")
 
     async def _verify_connections(self) -> None:
         """Verify peer connections by exchanging a small test tensor.
@@ -674,7 +687,10 @@ class Trainer:
 
         avg_loss = total_loss / num_batches
         accuracy = total_correct / total_samples if total_samples > 0 else 0
-        samples_per_sec = total_samples / (total_compute_time / 1000) if total_compute_time > 0 else 0
+        if total_compute_time > 0:
+            samples_per_sec = total_samples / (total_compute_time / 1000)
+        else:
+            samples_per_sec = 0
 
         return {
             "loss": avg_loss,
