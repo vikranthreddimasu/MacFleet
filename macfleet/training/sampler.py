@@ -11,6 +11,7 @@ Example:
 
 from __future__ import annotations
 
+from collections.abc import Sized
 from typing import Iterator, Optional
 
 import torch
@@ -42,6 +43,9 @@ class WeightedDistributedSampler(Sampler[int]):
         self.seed = seed
         self.drop_last = drop_last
         self.epoch = 0
+        if not isinstance(dataset, Sized):
+            raise TypeError("WeightedDistributedSampler requires a sized dataset")
+        self._dataset_size = len(dataset)
 
         # Normalize weights
         if weights is None:
@@ -58,7 +62,7 @@ class WeightedDistributedSampler(Sampler[int]):
 
     def _recompute_counts(self) -> None:
         """Recompute sample counts from weights."""
-        total_size = len(self.dataset)
+        total_size = self._dataset_size
         self._sample_counts = self._compute_sample_counts(total_size)
         self.num_samples = self._sample_counts[self.rank]
         self.total_size = sum(self._sample_counts)
@@ -87,9 +91,9 @@ class WeightedDistributedSampler(Sampler[int]):
         if self.shuffle:
             g = torch.Generator()
             g.manual_seed(self.seed + self.epoch)
-            indices = torch.randperm(len(self.dataset), generator=g).tolist()
+            indices = torch.randperm(self._dataset_size, generator=g).tolist()
         else:
-            indices = list(range(len(self.dataset)))
+            indices = list(range(self._dataset_size))
 
         start = sum(self._sample_counts[: self.rank])
         end = start + self._sample_counts[self.rank]

@@ -7,7 +7,7 @@ Gives ~20x compression (Top-10% + FP16).
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
 import torch
 
@@ -110,6 +110,8 @@ class TopKStage(Compressor):
         )
 
     def decompress(self, compressed: CompressedGradient) -> torch.Tensor:
+        assert compressed.indices is not None
+        assert compressed.values is not None
         return self._compressor.decompress(
             compressed.indices,
             compressed.values,
@@ -135,6 +137,8 @@ class FP16Stage(Compressor):
     ) -> CompressedGradient:
         if isinstance(data, CompressedGradient):
             if data.is_sparse:
+                assert data.values is not None
+                assert data.indices is not None
                 quantized_values, scale = self._quantizer.quantize(data.values)
                 return CompressedGradient(
                     indices=data.indices,
@@ -147,6 +151,7 @@ class FP16Stage(Compressor):
                     compression_stages=data.compression_stages + ("fp16",),
                 )
             else:
+                assert data.dense_data is not None
                 quantized, scale = self._quantizer.quantize(data.dense_data)
                 return CompressedGradient(
                     dense_data=quantized,
@@ -187,12 +192,13 @@ class FP16Stage(Compressor):
                 dense = dense.view(compressed.original_shape)
             return dense
         else:
+            assert compressed.dense_data is not None
             tensor = self._quantizer.dequantize(
                 compressed.dense_data, compressed.scale, compressed.original_dtype
             )
             if compressed.original_shape:
                 tensor = tensor.view(compressed.original_shape)
-            return tensor
+            return cast(torch.Tensor, tensor)
 
 
 class NoOpStage(Compressor):
@@ -264,6 +270,7 @@ class CompressionPipeline:
         data: Union[torch.Tensor, CompressedGradient] = tensor
         for stage in self.stages:
             data = stage.compress(data, name)
+        assert isinstance(data, CompressedGradient)
         return data
 
     def decompress(self, compressed: CompressedGradient) -> torch.Tensor:
