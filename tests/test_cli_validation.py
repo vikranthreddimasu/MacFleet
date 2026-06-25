@@ -28,3 +28,31 @@ def test_benchmark_rejects_invalid_sizes_before_running():
 
     assert result.exit_code != 0
     assert "Invalid --sizes" in result.output
+
+
+def test_diagnose_runs_local_checks(monkeypatch):
+    monkeypatch.setattr("macfleet.cli.main.is_port_available", lambda port, host: True)
+
+    result = CliRunner().invoke(cli, ["diagnose"])
+
+    assert result.exit_code == 0
+    assert "MacFleet Diagnostics" in result.output
+    assert "Auth token" in result.output
+
+
+def test_diagnose_rejects_invalid_host():
+    result = CliRunner().invoke(cli, ["diagnose", "--host", "bad host"])
+
+    assert result.exit_code != 0
+    assert "--host" in result.output
+
+
+def test_diagnose_checks_optional_master(monkeypatch):
+    monkeypatch.setattr("macfleet.cli.main.is_port_available", lambda port, host: True)
+    monkeypatch.setattr("macfleet.cli.main.is_reachable", lambda host, port, timeout: True)
+
+    result = CliRunner().invoke(cli, ["diagnose", "--master", "10.0.0.1:50051"])
+
+    assert result.exit_code == 0
+    assert "Coordinator" in result.output
+    assert "10.0.0.1:50051 is reachable" in result.output

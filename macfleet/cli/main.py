@@ -14,8 +14,19 @@ from rich.console import Console
 from rich.table import Table
 
 from macfleet import __version__
-from macfleet.core.config import DEFAULT_AUTH_TOKEN_ENV, ClusterConfig, NodeRole
-from macfleet.utils.network import parse_endpoint
+from macfleet.core.config import (
+    DEFAULT_AUTH_TOKEN_ENV,
+    ClusterConfig,
+    NodeRole,
+    resolve_auth_token,
+)
+from macfleet.utils.network import (
+    is_port_available,
+    is_reachable,
+    parse_endpoint,
+    validate_ip_address,
+    validate_port,
+)
 
 console = Console()
 
@@ -475,6 +486,134 @@ def _run_allreduce_benchmark(sizes_mb: list[int]):
         await t1.stop_server()
 
     asyncio.run(run())
+
+
+@cli.command()
+@click.option(
+    "--host",
+    type=str,
+    default="127.0.0.1",
+    show_default=True,
+    help="Local IP address to check for binding.",
+)
+@click.option(
+    "--port",
+    type=int,
+    default=50051,
+    show_default=True,
+    help="gRPC control port to check.",
+)
+@click.option(
+    "--tensor-port",
+    type=int,
+    default=50052,
+    show_default=True,
+    help="Tensor transfer port to check.",
+)
+@click.option(
+    "--master",
+    type=str,
+    default=None,
+    help="Optional coordinator endpoint to test (host or host:port).",
+)
+@click.option(
+    "--auth-token-env",
+    default=DEFAULT_AUTH_TOKEN_ENV,
+    show_default=True,
+    help="Environment variable containing the shared control-plane token.",
+)
+def diagnose(
+    host: str,
+    port: int,
+    tensor_port: int,
+    master: str,
+    auth_token_env: str,
+):
+    """Run local readiness checks for a MacFleet node."""
+    rows: list[tuple[str, str, str]] = []
+    blocking_errors = 0
+
+    def add_check(name: str, status: str, detail: str, blocking: bool = False) -> None:
+        nonlocal blocking_errors
+        rows.append((name, status, detail))
+        if blocking:
+            blocking_errors += 1
+
+    try:
+        bind_host = validate_ip_address(host, "--host")
+        control_port = validate_port(port, "--port")
+        tensor_port = validate_port(tensor_port, "--tensor-port")
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if sys.version_info >= (3, 11):
+        add_check("Python", "OK", sys.version.split()[0])
+    else:
+        add_check("Python", "FAIL", "Python 3.11+ is required", blocking=True)
+
+    if sys.platform == "darwin":
+        add_check("Platform", "OK", "macOS detected")
+    else:
+        add_check("Platform", "WARN", "MacFleet is intended for macOS Apple Silicon")
+
+    try:
+        import torch
+
+        add_check("PyTorch", "OK", torch.__version__)
+        if torch.backends.mps.is_available():
+            add_check("MPS", "OK", "Apple GPU acceleration available")
+        else:
+            add_check("MPS", "WARN", "MPS unavailable; CPU training may be slow")
+    except ImportError:
+        add_check("PyTorch", "FAIL", "Install torch or macfleet[torch]", blocking=True)
+
+    if is_port_available(control_port, bind_host):
+        add_check("Control port", "OK", f"{bind_host}:{control_port} is available")
+    else:
+        add_check("Control port", "WARN", f"{bind_host}:{control_port} is already in use")
+
+    if is_port_available(tensor_port, bind_host):
+        add_check("Tensor port", "OK", f"{bind_host}:{tensor_port} is available")
+    else:
+        add_check("Tensor port", "WARN", f"{bind_host}:{tensor_port} is already in use")
+
+    try:
+        token = resolve_auth_token(auth_token_env=auth_token_env)
+        if token:
+            add_check("Auth token", "OK", f"{auth_token_env} is set")
+        else:
+            add_check("Auth token", "WARN", f"{auth_token_env} is not set")
+    except ValueError as exc:
+        add_check("Auth token", "FAIL", str(exc), blocking=True)
+
+    if master:
+        try:
+            master_host, master_port = parse_endpoint(master, port, "--master")
+        except ValueError as exc:
+            raise click.ClickException(f"Invalid --master: {exc}") from exc
+
+        if is_reachable(master_host, master_port, timeout=1.0):
+            add_check("Coordinator", "OK", f"{master_host}:{master_port} is reachable")
+        else:
+            add_check(
+                "Coordinator",
+                "WARN",
+                f"{master_host}:{master_port} is not reachable",
+            )
+
+    table = Table(title="MacFleet Diagnostics")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Detail")
+
+    for name, status, detail in rows:
+        style = "green" if status == "OK" else "yellow" if status == "WARN" else "red"
+        table.add_row(name, f"[{style}]{status}[/{style}]", detail)
+
+    console.print(table)
+
+    if blocking_errors:
+        raise click.ClickException("Diagnostics found blocking issues.")
 
 
 @cli.command()

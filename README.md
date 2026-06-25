@@ -148,6 +148,10 @@ macfleet launch --role worker --master 10.0.0.1
 # Check cluster status
 macfleet status --master 10.0.0.1
 
+# Diagnose local readiness before launching
+macfleet diagnose --host 10.0.0.1
+macfleet diagnose --master 10.0.0.1:50051
+
 # Run benchmarks
 macfleet benchmark --type bandwidth
 macfleet benchmark --type allreduce
@@ -155,6 +159,22 @@ macfleet benchmark --type allreduce
 # System info
 macfleet info
 ```
+
+## Security
+
+MacFleet can protect the gRPC control plane with a shared token. Set the same
+token on every node before launching the coordinator, workers, or status command:
+
+```bash
+export MACFLEET_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+macfleet launch --role master --host 10.0.0.1
+macfleet launch --role worker --master 10.0.0.1:50051
+macfleet status --master 10.0.0.1:50051
+```
+
+If `MACFLEET_AUTH_TOKEN` is not set, MacFleet keeps legacy open control-plane
+behavior for local experiments. Use `macfleet diagnose` to confirm whether auth
+is configured and whether the local control/tensor ports are available.
 
 ## Benchmarks
 
