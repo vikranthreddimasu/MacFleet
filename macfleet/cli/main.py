@@ -14,10 +14,37 @@ from rich.console import Console
 from rich.table import Table
 
 from macfleet import __version__
-from macfleet.core.config import ClusterConfig, NodeRole, TrainingConfig
-
+from macfleet.core.config import ClusterConfig, NodeRole
+from macfleet.utils.network import parse_endpoint
 
 console = Console()
+
+
+def _parse_endpoint_option(value: str, default_port: int, option_name: str) -> tuple[str, int]:
+    """Parse a CLI endpoint and surface validation as a Click error."""
+    try:
+        return parse_endpoint(value, default_port, option_name)
+    except ValueError as exc:
+        raise click.ClickException(f"Invalid {option_name}: {exc}") from exc
+
+
+def _parse_size_list(value: str) -> list[int]:
+    """Parse comma-separated positive integer sizes."""
+    sizes: list[int] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            raise click.ClickException("Invalid --sizes: entries must not be empty")
+        try:
+            size = int(item)
+        except ValueError as exc:
+            raise click.ClickException(
+                f"Invalid --sizes: {item!r} is not an integer"
+            ) from exc
+        if size <= 0:
+            raise click.ClickException("Invalid --sizes: entries must be positive")
+        sizes.append(size)
+    return sizes
 
 
 @click.group()
@@ -93,12 +120,7 @@ def launch(
     master_port = port
 
     if master:
-        if ":" in master:
-            parts = master.split(":")
-            master_addr = parts[0]
-            master_port = int(parts[1])
-        else:
-            master_addr = master
+        master_addr, master_port = _parse_endpoint_option(master, port, "--master")
 
     # Create cluster config
     cluster_config = ClusterConfig(
@@ -113,8 +135,16 @@ def launch(
     # Print banner
     console.print()
     console.print("[bold blue]╔══════════════════════════════════════╗[/bold blue]")
-    console.print("[bold blue]║[/bold blue]     [bold white]MacFleet[/bold white] - Distributed Training   [bold blue]║[/bold blue]")
-    console.print("[bold blue]║[/bold blue]     [dim]Apple Silicon over Thunderbolt[/dim]    [bold blue]║[/bold blue]")
+    console.print(
+        "[bold blue]║[/bold blue]     "
+        "[bold white]MacFleet[/bold white] - Distributed Training   "
+        "[bold blue]║[/bold blue]"
+    )
+    console.print(
+        "[bold blue]║[/bold blue]     "
+        "[dim]Apple Silicon over Thunderbolt[/dim]    "
+        "[bold blue]║[/bold blue]"
+    )
     console.print("[bold blue]╚══════════════════════════════════════╝[/bold blue]")
     console.print()
 
@@ -166,13 +196,7 @@ def status(master: str):
     from macfleet.comm.grpc_service import ClusterControlClient
 
     # Parse master address
-    if ":" in master:
-        parts = master.split(":")
-        master_addr = parts[0]
-        master_port = int(parts[1])
-    else:
-        master_addr = master
-        master_port = 50051
+    master_addr, master_port = _parse_endpoint_option(master, 50051, "--master")
 
     console.print(f"Connecting to {master_addr}:{master_port}...")
 
@@ -184,7 +208,7 @@ def status(master: str):
 
         # Display cluster state
         console.print()
-        console.print(f"[bold green]Cluster Status[/bold green]")
+        console.print("[bold green]Cluster Status[/bold green]")
         console.print(f"  World Size: {state['world_size']}")
         console.print(f"  Training: {state['training_status']}")
 
@@ -257,13 +281,11 @@ def benchmark(bench_type: str, master: str, sizes: str):
         # Test AllReduce with master:
         macfleet benchmark --type allreduce --master 10.0.0.1
     """
-    import torch
-
     console.print(f"[bold blue]Running {bench_type} benchmark...[/bold blue]")
     console.print()
 
     # Parse sizes
-    size_list = [int(s) for s in sizes.split(",")]
+    size_list = _parse_size_list(sizes)
 
     if bench_type == "bandwidth":
         _run_bandwidth_benchmark(size_list)
@@ -276,12 +298,13 @@ def benchmark(bench_type: str, master: str, sizes: str):
 def _run_bandwidth_benchmark(sizes_mb: list[int]):
     """Run local bandwidth benchmark."""
     import time
+
     import torch
 
     console.print("Testing tensor serialization bandwidth...")
     console.print()
 
-    from macfleet.utils.tensor_utils import tensor_to_bytes, bytes_to_tensor
+    from macfleet.utils.tensor_utils import bytes_to_tensor, tensor_to_bytes
 
     table = Table(title="Bandwidth Results")
     table.add_column("Size (MB)", justify="right")
@@ -326,8 +349,9 @@ def _run_latency_benchmark():
     console.print()
 
     async def run():
-        from macfleet.comm.transport import TensorTransport
         import torch
+
+        from macfleet.comm.transport import TensorTransport
 
         # Start server
         server = TensorTransport("127.0.0.1", 50099)
@@ -371,6 +395,7 @@ def _run_latency_benchmark():
 def _run_allreduce_benchmark(sizes_mb: list[int]):
     """Run AllReduce benchmark using loopback simulation."""
     import time
+
     import torch
 
     console.print("Running loopback AllReduce benchmark...")
@@ -378,8 +403,8 @@ def _run_allreduce_benchmark(sizes_mb: list[int]):
     console.print()
 
     async def run():
+        from macfleet.comm.collectives import AllReduce, CollectiveGroup
         from macfleet.comm.transport import TensorTransport
-        from macfleet.comm.collectives import CollectiveGroup, AllReduce
 
         port0, port1 = 50100, 50101
         t0 = TensorTransport("127.0.0.1", port0)
@@ -459,7 +484,7 @@ def info():
     if tb_ip:
         console.print(f"  Thunderbolt IP: [green]{tb_ip}[/green]")
     else:
-        console.print(f"  Thunderbolt IP: [yellow]Not detected[/yellow]")
+        console.print("  Thunderbolt IP: [yellow]Not detected[/yellow]")
 
     console.print()
 

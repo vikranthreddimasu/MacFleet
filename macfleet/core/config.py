@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from macfleet.utils.network import validate_host, validate_ip_address, validate_port
+
 
 class NodeRole(Enum):
     """Role of a node in the cluster."""
@@ -60,18 +62,21 @@ class NodeConfig:
     workload_weight: float = 0.0
 
     def __post_init__(self) -> None:
-        if not self.hostname:
+        if not self.hostname or not self.hostname.strip():
             raise ValueError("hostname must not be empty")
-        if not self.ip_address:
-            raise ValueError("ip_address must not be empty")
+        if any(ch in self.hostname for ch in "\r\n\t"):
+            raise ValueError("hostname must not contain control characters")
+        self.ip_address = validate_ip_address(self.ip_address, "ip_address")
         if self.gpu_cores < 0:
             raise ValueError(f"gpu_cores must be non-negative, got {self.gpu_cores}")
         if self.ram_gb < 0:
             raise ValueError(f"ram_gb must be non-negative, got {self.ram_gb}")
         if self.memory_bandwidth_gbps < 0:
-            raise ValueError(f"memory_bandwidth_gbps must be non-negative, got {self.memory_bandwidth_gbps}")
-        if not (1 <= self.tensor_port <= 65535):
-            raise ValueError(f"tensor_port must be 1-65535, got {self.tensor_port}")
+            raise ValueError(
+                "memory_bandwidth_gbps must be non-negative, "
+                f"got {self.memory_bandwidth_gbps}"
+            )
+        self.tensor_port = validate_port(self.tensor_port, "tensor_port")
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
@@ -119,14 +124,22 @@ class ClusterConfig:
     min_workers: int = 1  # Minimum workers required before training starts
 
     def __post_init__(self) -> None:
-        if not (1 <= self.master_port <= 65535):
-            raise ValueError(f"master_port must be 1-65535, got {self.master_port}")
-        if not (1 <= self.tensor_port <= 65535):
-            raise ValueError(f"tensor_port must be 1-65535, got {self.tensor_port}")
+        if self.master_addr:
+            self.master_addr = validate_host(self.master_addr, "master_addr")
+        if self.host:
+            self.host = validate_ip_address(self.host, "host")
+        self.master_port = validate_port(self.master_port, "master_port")
+        self.tensor_port = validate_port(self.tensor_port, "tensor_port")
         if self.heartbeat_interval_sec <= 0:
-            raise ValueError(f"heartbeat_interval_sec must be positive, got {self.heartbeat_interval_sec}")
+            raise ValueError(
+                "heartbeat_interval_sec must be positive, "
+                f"got {self.heartbeat_interval_sec}"
+            )
         if self.heartbeat_timeout_sec <= 0:
-            raise ValueError(f"heartbeat_timeout_sec must be positive, got {self.heartbeat_timeout_sec}")
+            raise ValueError(
+                "heartbeat_timeout_sec must be positive, "
+                f"got {self.heartbeat_timeout_sec}"
+            )
         if self.heartbeat_timeout_sec <= self.heartbeat_interval_sec:
             raise ValueError(
                 f"heartbeat_timeout_sec ({self.heartbeat_timeout_sec}) must be greater than "

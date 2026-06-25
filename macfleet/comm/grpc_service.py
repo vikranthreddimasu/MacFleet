@@ -15,9 +15,9 @@ from macfleet.comm.proto import control_pb2, control_pb2_grpc
 from macfleet.core.config import (
     ClusterState,
     NodeConfig,
-    ThermalState,
     TrainingConfig,
 )
+from macfleet.utils.network import validate_host, validate_port
 
 
 class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
@@ -57,7 +57,8 @@ class ClusterControlServicer(control_pb2_grpc.ClusterControlServicer):
         self._on_deregister = on_deregister
         self._next_rank = 1  # Rank 0 is reserved for master
         self._free_ranks: list[int] = []  # Reusable ranks from departed nodes
-        self._barriers: dict[str, tuple[set[int], float]] = {}  # barrier_id -> (ranks, created_time)
+        # barrier_id -> (ranks, created_time)
+        self._barriers: dict[str, tuple[set[int], float]] = {}
         self._barrier_ttl = 120.0  # seconds before stale barriers are cleaned up
         self._base_weights: dict[int, float] = {}  # rank -> baseline weight (GPU-core based)
         self._lock = threading.Lock()  # Protects all mutable state from gRPC thread pool
@@ -370,6 +371,8 @@ class ClusterControlClient:
             master_addr: Address of the master node.
             master_port: gRPC port of the master.
         """
+        master_addr = validate_host(master_addr, "master_addr")
+        master_port = validate_port(master_port, "master_port")
         self._addr = f"{master_addr}:{master_port}"
         self._channel: Optional[grpc.Channel] = None
         self._stub: Optional[control_pb2_grpc.ClusterControlStub] = None

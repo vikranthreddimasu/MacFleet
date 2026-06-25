@@ -2,6 +2,7 @@
 
 import pytest
 
+from macfleet.comm.grpc_service import ClusterControlClient
 from macfleet.core.config import (
     ClusterConfig,
     CompressionType,
@@ -9,6 +10,7 @@ from macfleet.core.config import (
     NodeRole,
     TrainingConfig,
 )
+from macfleet.utils.network import parse_endpoint
 
 
 class TestNodeConfigValidation:
@@ -34,6 +36,20 @@ class TestNodeConfigValidation:
                 tensor_port=0,
             )
 
+    def test_invalid_ip_address_rejected(self):
+        with pytest.raises(ValueError, match="ip_address"):
+            NodeConfig(
+                hostname="test", ip_address="not an ip",
+                gpu_cores=10, ram_gb=16, memory_bandwidth_gbps=200.0,
+            )
+
+    def test_hostname_rejects_control_characters(self):
+        with pytest.raises(ValueError, match="hostname"):
+            NodeConfig(
+                hostname="worker\nspoofed", ip_address="10.0.0.1",
+                gpu_cores=10, ram_gb=16, memory_bandwidth_gbps=200.0,
+            )
+
     def test_from_dict_ignores_unknown_keys(self):
         cfg = NodeConfig.from_dict({
             "hostname": "test", "ip_address": "10.0.0.1",
@@ -51,6 +67,14 @@ class TestClusterConfigValidation:
     def test_invalid_port(self):
         with pytest.raises(ValueError, match="master_port"):
             ClusterConfig(role=NodeRole.MASTER, master_port=0)
+
+    def test_invalid_master_addr(self):
+        with pytest.raises(ValueError, match="master_addr"):
+            ClusterConfig(role=NodeRole.WORKER, master_addr="bad host name")
+
+    def test_invalid_bind_host_requires_ip(self):
+        with pytest.raises(ValueError, match="host"):
+            ClusterConfig(role=NodeRole.MASTER, host="localhost")
 
     def test_heartbeat_timeout_must_exceed_interval(self):
         with pytest.raises(ValueError, match="heartbeat_timeout_sec"):
@@ -99,3 +123,22 @@ class TestTrainingConfigValidation:
             "extra": 42,
         })
         assert cfg.compression == CompressionType.NONE
+
+
+class TestEndpointValidation:
+    def test_parse_host_with_port(self):
+        assert parse_endpoint("10.0.0.1:6000", 50051, "--master") == ("10.0.0.1", 6000)
+
+    def test_parse_hostname_default_port(self):
+        assert parse_endpoint("master.local", 50051, "--master") == ("master.local", 50051)
+
+    def test_parse_bracketed_ipv6_with_port(self):
+        assert parse_endpoint("[::1]:50051", 1234, "--master") == ("::1", 50051)
+
+    def test_parse_rejects_bad_port(self):
+        with pytest.raises(ValueError, match="port"):
+            parse_endpoint("10.0.0.1:notaport", 50051, "--master")
+
+    def test_client_rejects_invalid_endpoint(self):
+        with pytest.raises(ValueError, match="master_addr"):
+            ClusterControlClient("bad host name", 50051)
