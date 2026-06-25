@@ -8,6 +8,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from macfleet.cli.main import cli
+from macfleet.security.enrollment import EnrollmentResult
 
 
 class TestPairFromStdin:
@@ -114,6 +115,47 @@ class TestPairFromPasteboard:
         assert "--stdin" in clean
 
 
+class TestPairFromEnrollment:
+    def test_host_code_writes_token(self, tmp_path: Path, monkeypatch):
+        token_path = tmp_path / "token"
+        monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_path))
+
+        async def fake_request(host, port, code):
+            assert host == "192.168.1.10"
+            assert port == 4242
+            assert code == "ABCD-EFGH-IJKL-MNOP"
+            return EnrollmentResult(
+                token="enrolled-token-long-enough",
+                fleet_id="lab",
+                server_node="studio",
+            )
+
+        monkeypatch.setattr("macfleet.security.enrollment.request_enrollment", fake_request)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "pair",
+                "--host",
+                "192.168.1.10:4242",
+                "--code",
+                "ABCD-EFGH-IJKL-MNOP",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "Paired" in result.output
+        assert "studio" in result.output
+        assert token_path.read_text().strip() == "enrolled-token-long-enough"
+
+    def test_host_requires_code(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["pair", "--host", "127.0.0.1:1234"])
+        assert result.exit_code == 1
+        assert "--host and --code" in result.output
+
+
 class TestBootstrapFlag:
     def test_open_plus_bootstrap_rejected(self):
         """--open (no token) + --bootstrap makes no sense — reject at CLI."""
@@ -122,6 +164,13 @@ class TestBootstrapFlag:
         assert result.exit_code == 1
         clean = " ".join(result.output.split())
         assert "open" in clean.lower() and "bootstrap" in clean.lower()
+
+    def test_open_requires_explicit_insecure_ack(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["join", "--open"])
+        assert result.exit_code == 1
+        clean = " ".join(result.output.split())
+        assert "--allow-insecure-open" in clean
 
 
 class TestCliHelp:
@@ -134,3 +183,4 @@ class TestCliHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["join", "--help"])
         assert "--bootstrap" in result.output
+        assert "--allow-insecure-open" in result.output

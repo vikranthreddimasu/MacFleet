@@ -34,24 +34,18 @@ def cli():
     pass
 
 
-def _show_pairing_block(token: str, fleet_id: str | None) -> None:
-    """Print the pairing URL + QR. Degrades gracefully when `qrcode`
-    isn't installed (URL only, with an install hint)."""
-    from macfleet.security.bootstrap import print_pairing_info, token_to_url
-
+def _best_pairing_host() -> str:
+    """Return a reachable LAN address for enrollment instructions."""
     try:
-        print_pairing_info(token, fleet_id=fleet_id, out=sys.stdout)
-    except ImportError:
-        url = token_to_url(token, fleet_id=fleet_id)
-        console.print(
-            "\nFleet pairing URL (run `macfleet pair` on the other Mac "
-            "after copying it):"
-        )
-        console.print(f"  {url}")
-        console.print(
-            "[dim]Install `qrcode` for a scannable QR code: "
-            "pip install qrcode[/dim]\n"
-        )
+        from macfleet.pool.network import LinkType, get_network_topology
+
+        topology = get_network_topology()
+        best = topology.best_link
+        if best and best.link_type != LinkType.LOOPBACK:
+            return best.ip_address
+    except Exception:
+        pass
+    return "127.0.0.1"
 
 
 @cli.command()
@@ -69,22 +63,47 @@ def _show_pairing_block(token: str, fleet_id: str | None) -> None:
     "--open", "open_fleet", is_flag=True, default=False,
     help="Disable security (open fleet, no authentication)",
 )
+@click.option(
+    "--allow-insecure-open",
+    is_flag=True,
+    default=False,
+    help="Required with --open. Makes unauthenticated LAN exposure explicit.",
+)
 @click.option("--peer", "peers", multiple=True, help="Peer address (IP:PORT). Use when mDNS is blocked. Repeatable.")
 @click.option(
     "--bootstrap", is_flag=True, default=False,
-    help="Print a QR code + pairing URL for the fleet token (v2.2 PR 13).",
+    help="Start a short-lived one-time enrollment endpoint for pairing.",
+)
+@click.option(
+    "--enroll-ttl",
+    default=300.0,
+    show_default=True,
+    help="Seconds that the one-time enrollment code remains valid.",
+)
+@click.option(
+    "--enroll-uses",
+    default=1,
+    show_default=True,
+    help="Number of Macs that may pair with this enrollment code.",
+)
+@click.option(
+    "--show-token",
+    is_flag=True,
+    default=False,
+    help="Reveal the permanent fleet token in the terminal (dangerous).",
 )
 def join(
     name: str | None, port: int, data_port: int, token: str | None, fleet_id: str | None,
-    use_tls: bool, open_fleet: bool, peers: tuple, bootstrap: bool,
+    use_tls: bool, open_fleet: bool, allow_insecure_open: bool, peers: tuple,
+    bootstrap: bool, enroll_ttl: float, enroll_uses: int, show_token: bool,
 ):
     """Join the compute pool. Auto-discovers peers on the network.
 
     Security is enabled by default. A fleet token is auto-generated on first
-    run and saved to ~/.macfleet/fleet-token. Copy this token to other Macs
-    to let them join your fleet.
+    run and saved to ~/.macfleet/fleet-token. Pairing uses a short-lived
+    one-time code so the permanent token does not need to leave this Mac.
 
-    Use --open to disable security (not recommended).
+    Use --open --allow-insecure-open to disable security (not recommended).
 
     \b
     If mDNS discovery doesn't work (e.g. enterprise WiFi), use --peer:
@@ -93,15 +112,18 @@ def join(
 
     \b
     For 5-second cross-Mac pairing, use --bootstrap:
-        Mac A: macfleet join --bootstrap    # prints QR + URL
-        Mac B: macfleet pair                 # reads URL from pasteboard
-        Mac B: macfleet join                 # uses the token just written
+        Mac A: macfleet join --bootstrap
+        Mac B: macfleet pair --host <Mac-A-IP>:<port> --code <code>
+        Mac B: macfleet join
     """
     import os
 
     from macfleet.pool.agent import PoolAgent
+    from macfleet.security.audit import audit_event
     from macfleet.security.auth import TOKEN_ENV_VAR, TOKEN_FILE, resolve_token_with_file
+    from macfleet.security.enrollment import EnrollmentServer, print_enrollment_info
 
+    start_enrollment = False
     if open_fleet:
         if token:
             console.print("[red]Error: --open and --token are mutually exclusive.[/red]")
@@ -109,6 +131,13 @@ def join(
         if bootstrap:
             console.print("[red]Error: --bootstrap requires a token (can't pair an open fleet).[/red]")
             sys.exit(1)
+        if not allow_insecure_open:
+            console.print(
+                "[red]Error: --open disables authentication. Re-run with "
+                "--open --allow-insecure-open if you really want an open LAN fleet.[/red]"
+            )
+            sys.exit(1)
+        audit_event("fleet.open_mode_enabled", port=port, data_port=data_port)
         resolved_token = None
     else:
         # First run on this Mac? (No explicit token, no env var, no saved
@@ -127,19 +156,25 @@ def join(
                 "by SecurityConfig).[/dim]"
             )
         if token is None:
-            # Token was auto-generated or loaded from file — show it
-            console.print(f"\n[bold green]Fleet token:[/bold green] {resolved_token}")
+            console.print(f"\n[bold green]Fleet token configured[/bold green]")
             console.print(f"[dim]Saved to {TOKEN_FILE}[/dim]")
+            if show_token:
+                console.print(f"[bold yellow]Permanent fleet token:[/bold yellow] {resolved_token}")
+                audit_event("token.revealed", source="join_show_token")
+            else:
+                console.print(
+                    "[dim]Token hidden. Use `macfleet rotate-token` if it was exposed.[/dim]"
+                )
 
         if bootstrap or first_run:
             if resolved_token is None:
                 console.print("[red]Cannot show pairing info: no fleet token available.[/red]")
                 raise SystemExit(1)
-            _show_pairing_block(resolved_token, fleet_id)
+            start_enrollment = True
         elif token is None:
             console.print(
                 "[dim]Pair another Mac: run `macfleet join --bootstrap` here, "
-                "then `macfleet pair` there.[/dim]\n"
+                "then the printed `macfleet pair --host ... --code ...` command there.[/dim]\n"
             )
 
     agent = PoolAgent(
@@ -149,7 +184,24 @@ def join(
     )
 
     async def run():
+        enrollment_server = None
         await agent.start()
+        if start_enrollment and resolved_token is not None:
+            enrollment_server = EnrollmentServer(
+                token=resolved_token,
+                fleet_id=fleet_id,
+                node_id=agent.node_id,
+                ttl_sec=enroll_ttl,
+                max_uses=enroll_uses,
+            )
+            await enrollment_server.start()
+            print_enrollment_info(
+                _best_pairing_host(),
+                enrollment_server.bound_port,
+                enrollment_server.code,
+                enrollment_server.expires_at_epoch,
+                out=sys.stdout,
+            )
         console.print("\n[dim]Press Ctrl+C to leave the pool[/dim]\n")
 
         # Wait for interrupt
@@ -159,8 +211,12 @@ def join(
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop_event.set)
 
-        await stop_event.wait()
-        await agent.stop()
+        try:
+            await stop_event.wait()
+        finally:
+            if enrollment_server is not None:
+                await enrollment_server.stop()
+            await agent.stop()
 
     try:
         asyncio.run(run())
@@ -687,34 +743,75 @@ def _bench_allreduce(size_mb: int, iterations: int):
     asyncio.run(run())
 
 
-# v2.2 PR 16a (Issue 26 CLI): `macfleet pair` reads a pairing URL and writes
-# the token to ~/.macfleet/token. Pairs with `macfleet join --bootstrap` on
-# the other Mac — same URL works via QR scan, Handoff pasteboard sync, or
-# plain text paste.
 @cli.command()
 @click.option(
     "--stdin", "from_stdin", is_flag=True, default=False,
-    help="Read the pairing URL from stdin instead of the pasteboard.",
+    help="Read a legacy token-bearing pairing URL from stdin.",
 )
-def pair(from_stdin: bool):
-    """Pair this Mac with an existing fleet via a pairing URL.
+@click.option(
+    "--host",
+    "enroll_host",
+    default=None,
+    help="Enrollment server in HOST:PORT form from `macfleet join --bootstrap`.",
+)
+@click.option(
+    "--code",
+    "enroll_code",
+    default=None,
+    help="One-time enrollment code from `macfleet join --bootstrap`.",
+)
+def pair(from_stdin: bool, enroll_host: str | None, enroll_code: str | None):
+    """Pair this Mac with an existing fleet.
 
-    Reads `macfleet://pair?token=...&fleet=...` from the system pasteboard
-    (default) or stdin (--stdin). Validates the URL, writes the token to
-    ~/.macfleet/token, and prints the resolved fleet id.
+    Preferred flow: use the short-lived host/code printed by
+    `macfleet join --bootstrap`. Legacy `macfleet://pair?token=...` URLs
+    are still accepted from pasteboard or stdin so existing setups can migrate.
 
     \b
     Typical flow:
-        Mac #1: macfleet join --bootstrap    # prints QR, copies URL to pasteboard
-        Mac #2: macfleet pair                 # reads URL from pasteboard
-        Mac #2: macfleet join                 # joins using the token just written
+        Mac #1: macfleet join --bootstrap
+        Mac #2: macfleet pair --host <Mac-A-IP>:<port> --code <code>
+        Mac #2: macfleet join
     """
     from macfleet.security.auth import TOKEN_FILE, _write_token_file
+    from macfleet.security.audit import audit_event
     from macfleet.security.bootstrap import (
         PairingError,
         parse_pairing_url,
         read_from_pasteboard,
     )
+    from macfleet.security.enrollment import (
+        EnrollmentError,
+        parse_host_port,
+        request_enrollment,
+    )
+
+    if enroll_host or enroll_code:
+        if from_stdin:
+            console.print("[red]Error: --stdin cannot be combined with --host/--code.[/red]")
+            sys.exit(1)
+        if not enroll_host or not enroll_code:
+            console.print("[red]Error: --host and --code must be provided together.[/red]")
+            sys.exit(1)
+        try:
+            host, port = parse_host_port(enroll_host)
+            result = asyncio.run(request_enrollment(host, port, enroll_code))
+        except (EnrollmentError, OSError, asyncio.TimeoutError) as e:
+            console.print(f"[red]Error: enrollment failed: {e}[/red]")
+            sys.exit(1)
+        _write_token_file(result.token)
+        audit_event(
+            "pairing.completed",
+            mode="enrollment",
+            fleet_id=result.fleet_id,
+            server_node=result.server_node,
+        )
+        console.print(
+            f"[green]Paired.[/green] Token written to {TOKEN_FILE}"
+            + (f" (fleet: [bold]{result.fleet_id}[/bold])" if result.fleet_id else "")
+            + f"\n[dim]Server: {result.server_node}. Next: macfleet join[/dim]"
+        )
+        return
 
     if from_stdin:
         url = sys.stdin.read().strip()
@@ -726,9 +823,9 @@ def pair(from_stdin: bool):
         if not url:
             console.print(
                 "[red]Error: couldn't read pairing URL from pasteboard.[/red]\n"
-                "[dim]Copy the URL from `macfleet join --bootstrap`, or use "
-                "--stdin to pipe it in:[/dim]\n"
-                "[dim]  echo 'macfleet://pair?token=...' | macfleet pair --stdin[/dim]"
+                "[dim]Preferred: run `macfleet join --bootstrap` on the first Mac, "
+                "then paste the printed `macfleet pair --host ... --code ...` command here.[/dim]\n"
+                "[dim]Legacy URL fallback: echo 'macfleet://pair?token=...' | macfleet pair --stdin[/dim]"
             )
             sys.exit(1)
         url = url.strip()
@@ -743,8 +840,9 @@ def pair(from_stdin: bool):
         sys.exit(1)
 
     _write_token_file(token)
+    audit_event("pairing.completed", mode="legacy_url", fleet_id=fleet_id)
     console.print(
-        f"[green]Paired.[/green] Token written to {TOKEN_FILE}"
+        f"[green]Paired from legacy token URL.[/green] Token written to {TOKEN_FILE}"
         + (f" (fleet: [bold]{fleet_id}[/bold])" if fleet_id else "")
         + "\n[dim]Next: macfleet join[/dim]"
     )
