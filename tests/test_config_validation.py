@@ -117,6 +117,14 @@ class TestTrainingConfigValidation:
         with pytest.raises(ValueError, match="device"):
             TrainingConfig(device="tpu")
 
+    def test_invalid_checkpoint_dir(self):
+        with pytest.raises(ValueError, match="checkpoint_dir"):
+            TrainingConfig(checkpoint_dir="")
+
+    def test_checkpoint_dir_rejects_control_characters(self):
+        with pytest.raises(ValueError, match="checkpoint_dir"):
+            TrainingConfig(checkpoint_dir="./checkpoints\nspoofed")
+
     def test_from_dict_ignores_unknown_keys(self):
         cfg = TrainingConfig.from_dict({
             "compression": "none",

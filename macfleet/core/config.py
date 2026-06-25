@@ -260,6 +260,10 @@ class TrainingConfig:
             raise ValueError(f"topk_ratio must be in (0.0, 1.0], got {self.topk_ratio}")
         if self.checkpoint_every < 1:
             raise ValueError(f"checkpoint_every must be >= 1, got {self.checkpoint_every}")
+        if not self.checkpoint_dir or not self.checkpoint_dir.strip():
+            raise ValueError("checkpoint_dir must not be empty")
+        if any(ch in self.checkpoint_dir for ch in "\0\r\n"):
+            raise ValueError("checkpoint_dir must not contain control characters")
         if self.calibration_steps < 1:
             raise ValueError(f"calibration_steps must be >= 1, got {self.calibration_steps}")
         if self.device not in ("mps", "cpu", "cuda"):

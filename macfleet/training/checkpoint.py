@@ -13,12 +13,62 @@ from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
+from rich.console import Console
 from torch.optim import Optimizer
 
-from rich.console import Console
-
-
 console = Console()
+
+
+def _atomic_torch_save(obj: Dict[str, Any], path: Path) -> None:
+    """Write a torch checkpoint via temp file + atomic replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp_path, "wb") as f:
+            torch.save(obj, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _atomic_json_dump(data: Dict[str, Any], path: Path) -> None:
+    """Write JSON metadata via temp file + atomic replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def safe_torch_load(
+    path: str | Path,
+    map_location: str = "cpu",
+    *,
+    trusted: bool = False,
+) -> Dict[str, Any]:
+    """Load a checkpoint using PyTorch's safer weights-only mode by default."""
+    try:
+        return torch.load(
+            path,
+            map_location=map_location,
+            weights_only=not trusted,
+        )
+    except TypeError:
+        # Older PyTorch versions do not support weights_only.
+        return torch.load(path, map_location=map_location)
 
 
 @dataclass
@@ -65,6 +115,11 @@ class CheckpointManager:
         self.rank = rank
         self.world_size = world_size
         self.max_checkpoints = max_checkpoints
+
+        if not str(self.checkpoint_dir).strip():
+            raise ValueError("checkpoint_dir must not be empty")
+        if self.max_checkpoints < 1:
+            raise ValueError("max_checkpoints must be >= 1")
 
         # Create directory
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -138,13 +193,13 @@ class CheckpointManager:
         filename = f"checkpoint_epoch{epoch:03d}_step{global_step:06d}.pt"
         filepath = self.checkpoint_dir / filename
 
-        # Save
-        torch.save(checkpoint, filepath)
+        # Save checkpoint atomically so interrupted writes do not corrupt the
+        # last known-good file.
+        _atomic_torch_save(checkpoint, filepath)
 
         # Save metadata as JSON for quick inspection
         metadata_path = self.checkpoint_dir / f"{filename}.json"
-        with open(metadata_path, "w") as f:
-            json.dump(asdict(metadata), f, indent=2)
+        _atomic_json_dump(asdict(metadata), metadata_path)
 
         console.print(f"[green]Checkpoint saved: {filepath}[/green]")
 
@@ -159,6 +214,7 @@ class CheckpointManager:
         optimizer: Optional[Optimizer] = None,
         checkpoint_path: Optional[str] = None,
         device: str = "cpu",
+        trusted: bool = False,
     ) -> Dict[str, Any]:
         """Load a checkpoint.
 
@@ -167,6 +223,7 @@ class CheckpointManager:
             optimizer: Optional optimizer to load state into.
             checkpoint_path: Path to checkpoint. If None, loads latest.
             device: Device to load tensors to.
+            trusted: Allow unsafe pickle loading for checkpoints from trusted sources.
 
         Returns:
             Loaded checkpoint data.
@@ -179,7 +236,7 @@ class CheckpointManager:
 
         console.print(f"[blue]Loading checkpoint: {checkpoint_path}[/blue]")
 
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = safe_torch_load(checkpoint_path, map_location=device, trusted=trusted)
 
         # Load model
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -243,7 +300,7 @@ class CheckpointManager:
 
         # Fall back to loading from checkpoint
         try:
-            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            checkpoint = safe_torch_load(checkpoint_path, map_location="cpu")
             if "metadata" in checkpoint:
                 return CheckpointMetadata(**checkpoint["metadata"])
         except Exception:
@@ -296,7 +353,7 @@ def save_checkpoint(
         "step": step,
         **kwargs,
     }
-    torch.save(checkpoint, path)
+    _atomic_torch_save(checkpoint, Path(path))
 
 
 def load_checkpoint(
@@ -304,6 +361,7 @@ def load_checkpoint(
     model: nn.Module,
     optimizer: Optional[Optimizer] = None,
     device: str = "cpu",
+    trusted: bool = False,
 ) -> Dict[str, Any]:
     """Convenience function to load a single checkpoint.
 
@@ -312,11 +370,12 @@ def load_checkpoint(
         model: Model to load into.
         optimizer: Optional optimizer to load into.
         device: Device to load to.
+        trusted: Allow unsafe pickle loading for checkpoints from trusted sources.
 
     Returns:
         Loaded checkpoint data.
     """
-    checkpoint = torch.load(path, map_location=device)
+    checkpoint = safe_torch_load(path, map_location=device, trusted=trusted)
     model.load_state_dict(checkpoint["model_state_dict"])
 
     if optimizer is not None and "optimizer_state_dict" in checkpoint:

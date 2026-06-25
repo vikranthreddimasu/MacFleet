@@ -779,9 +779,11 @@ class Trainer:
             torch.mps.empty_cache()
         console.print(f"[green]Checkpoint saved: {path}[/green]")
 
-    def load_checkpoint(self, path: str) -> None:
+    def load_checkpoint(self, path: str, trusted: bool = False) -> None:
         """Load a training checkpoint."""
-        checkpoint = torch.load(path, map_location=self._device, weights_only=False)
+        from macfleet.training.checkpoint import safe_torch_load
+
+        checkpoint = safe_torch_load(path, map_location=self._device, trusted=trusted)
 
         self._ddp_model.load_state_dict(checkpoint["model_state_dict"])
         self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
