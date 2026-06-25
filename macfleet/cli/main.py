@@ -156,7 +156,7 @@ def join(
                 "by SecurityConfig).[/dim]"
             )
         if token is None:
-            console.print(f"\n[bold green]Fleet token configured[/bold green]")
+            console.print("\n[bold green]Fleet token configured[/bold green]")
             console.print(f"[dim]Saved to {TOKEN_FILE}[/dim]")
             if show_token:
                 console.print(f"[bold yellow]Permanent fleet token:[/bold yellow] {resolved_token}")
@@ -773,8 +773,8 @@ def pair(from_stdin: bool, enroll_host: str | None, enroll_code: str | None):
         Mac #2: macfleet pair --host <Mac-A-IP>:<port> --code <code>
         Mac #2: macfleet join
     """
-    from macfleet.security.auth import TOKEN_FILE, _write_token_file
     from macfleet.security.audit import audit_event
+    from macfleet.security.auth import TOKEN_FILE, _write_token_file
     from macfleet.security.bootstrap import (
         PairingError,
         parse_pairing_url,

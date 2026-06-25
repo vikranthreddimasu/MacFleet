@@ -1,31 +1,9 @@
-"""Token bootstrap UX: QR codes + pasteboard + pairing URLs.
+"""Legacy token-bearing pairing URL helpers.
 
-v2.2 PR 13 (Issue 26 promoted): zero-config across multiple Macs was
-broken because the auto-generated fleet token had to be manually copied
-to every other Mac. This module closes that gap.
-
-Flow:
-
-    # Mac #1 (first one on the fleet):
-    macfleet join --bootstrap
-    # prints:
-    #   Fleet pairing URL: macfleet://pair?token=...&fleet=default
-    #   Scan this QR from a second Mac's iPhone camera:
-    #   ████ ▄▄▄▄▄ █▀█ █▄▀▄▀ ██▄ ▄▄▄▄▄ ████
-    #   ████ █   █ █▀▀ ▀█▀ ▀██ █   █ ████
-    #   ...
-    #
-    # Mac #2:
-    macfleet pair   # reads URL from pasteboard, writes token to ~/.macfleet/token
-
-A pairing URL encodes `token` + `fleet_id` in a format that's safe for
-QR scanning (handset iOS camera app surfaces it as a tappable link)
-and for copy-paste between terminals. Three transports, one encoding:
-    - QR: works iPhone → Mac with no shared network
-    - Pasteboard: works terminal → terminal on the same Mac (e.g. SSH +
-      macOS Handoff pasteboard sync)
-    - Raw URL: can be texted / iMessage'd across Macs if neither of
-      the above is available
+The current CLI pairing flow lives in `macfleet.security.enrollment` and
+uses short-lived host/code enrollment so the permanent token is not printed.
+This module remains only for migration from older `macfleet://pair?token=...`
+URLs and for parsing pasteboard/stdin input in `macfleet pair`.
 """
 
 from __future__ import annotations
@@ -100,14 +78,14 @@ def parse_pairing_url(url: str) -> tuple[str, Optional[str]]:
 
 
 def render_qr_ascii(content: str) -> str:
-    """Render `content` as a compact ASCII-art QR code.
+    """Render legacy pairing content as a compact ASCII-art QR code.
 
     Uses half-block glyphs so the QR is half the height a naive ASCII
     renderer would produce. Fits on a standard 80-col terminal for
     content up to ~250 chars (typical pairing URL is 60-80).
 
-    Raises ImportError if qrcode isn't installed — the CLI surfaces
-    this as "pip install macfleet[bootstrap]" rather than stack trace.
+    Not used by the current enrollment flow; retained for compatibility
+    with older token-bearing pairing URLs.
     """
     try:
         import qrcode
@@ -196,10 +174,11 @@ def print_pairing_info(
     to_pasteboard: bool = True,
     out: Optional[TextIO] = None,
 ) -> str:
-    """Format the full pairing block (URL + QR + instructions) and return it.
+    """Format the legacy token URL + QR pairing block and return it.
 
     If `to_pasteboard=True` (default), also copies the URL to the local
-    pasteboard so `macfleet pair` on the same Mac picks it up for free.
+    pasteboard. This exposes the permanent token and should not be used
+    for new flows; prefer `print_enrollment_info`.
 
     Returns the rendered text so the CLI can print it; accepts `out`
     override for tests.
@@ -208,11 +187,12 @@ def print_pairing_info(
     qr = render_qr_ascii(url)
     lines = [
         "",
-        "Fleet pairing URL (valid across Macs on the same fleet):",
+        "Legacy fleet pairing URL (contains the permanent token):",
         f"  {url}",
         "",
-        "Scan this QR with a second Mac's iPhone camera,",
-        "or run `macfleet pair` on the second Mac after copying the URL:",
+        "Prefer `macfleet join --bootstrap` enrollment for new pairing.",
+        "This QR/URL is kept for migration from older MacFleet versions:",
+        "  echo '<url>' | macfleet pair --stdin",
         "",
         qr,
         "",

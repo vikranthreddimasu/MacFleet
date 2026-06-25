@@ -25,6 +25,7 @@ from macfleet.comm.protocol import (
     WireMessage,
 )
 from macfleet.pool.network import LinkType
+from macfleet.security.audit import audit_event
 from macfleet.security.auth import (
     CHALLENGE_SIZE,
     HS_LABEL_CLIENT_RESP,
@@ -45,7 +46,6 @@ from macfleet.security.auth import (
     verify_hw_profile,
     verify_response,
 )
-from macfleet.security.audit import audit_event
 
 logger = logging.getLogger(__name__)
 

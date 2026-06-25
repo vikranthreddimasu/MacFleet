@@ -31,8 +31,8 @@ from macfleet.compression.adaptive import (
 )
 from macfleet.engines.base import Engine, TrainingMetrics
 from macfleet.pool.network import LinkType
-from macfleet.security.auth import GradientValidationError, validate_gradients
 from macfleet.security.audit import audit_event
+from macfleet.security.auth import GradientValidationError, validate_gradients
 
 logger = logging.getLogger(__name__)
 

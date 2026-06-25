@@ -962,6 +962,7 @@ class Pool:
         # Legacy cloudpickle fallback (local-only, explicit opt-in).
         import os
         import warnings
+
         import cloudpickle
 
         from macfleet.security.audit import audit_event
@@ -1022,6 +1023,7 @@ class Pool:
 
         # Legacy cloudpickle fallback (local-only, explicit opt-in).
         import warnings
+
         import cloudpickle
 
         from macfleet.security.audit import audit_event

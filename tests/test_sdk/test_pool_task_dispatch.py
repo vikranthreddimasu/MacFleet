@@ -12,8 +12,8 @@ import pytest
 from pydantic import BaseModel
 
 from macfleet import task
-from macfleet.security import audit
 from macfleet.sdk.pool import Pool
+from macfleet.security import audit
 
 # --------------------------------------------------------------------------- #
 # Tasks registered at module level (so ProcessPool workers can re-import them)

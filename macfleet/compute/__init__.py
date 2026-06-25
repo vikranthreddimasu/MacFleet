@@ -11,8 +11,8 @@ Usage (single-node or multi-node):
         result = pool.run(analyze, dataset)
 """
 
-from macfleet.compute.dispatch import TaskDispatcher
 from macfleet.compute.authz import TaskAuthorizationError, TaskAuthorizationPolicy
+from macfleet.compute.dispatch import TaskDispatcher
 from macfleet.compute.models import (
     RemoteTaskError,
     TaskFuture,
