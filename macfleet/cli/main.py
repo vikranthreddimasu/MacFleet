@@ -277,7 +277,12 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool):
     if open_fleet:
         resolved = None
     else:
-        resolved = resolve_token_with_file(token)
+        try:
+            resolved = resolve_token_with_file(token)
+        except OSError as e:
+            console.print(f"[red]Error: couldn't read fleet token at {e.filename or 'configured path'}: {e}[/red]")
+            console.print("[dim]Use `macfleet status --open` to scan unauthenticated open fleets.[/dim]")
+            sys.exit(1)
 
     sec = SecurityConfig(token=resolved, fleet_id=fleet_id) if resolved else None
     if sec and sec.is_secure:
