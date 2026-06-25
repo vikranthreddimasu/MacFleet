@@ -17,6 +17,7 @@ requires file paths), then immediately unlinked.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac as hmac_mod
 import logging
@@ -90,6 +91,26 @@ TOKEN_FILE = os.path.join(TOKEN_DIR, "fleet-token")
 AUTO_TOKEN_LENGTH = 32
 
 
+def _nofollow_flag() -> int:
+    """Return O_NOFOLLOW when the platform exposes it."""
+    return getattr(os, "O_NOFOLLOW", 0)
+
+
+def _ensure_private_token_dir() -> None:
+    """Create or repair the token directory with user-only permissions."""
+    if os.path.islink(TOKEN_DIR):
+        raise PermissionError(
+            f"Refusing to use fleet token directory symlink: {TOKEN_DIR}"
+        )
+    os.makedirs(TOKEN_DIR, mode=0o700, exist_ok=True)
+    st = os.stat(TOKEN_DIR)
+    if not stat.S_ISDIR(st.st_mode):
+        raise PermissionError(f"Fleet token path is not a directory: {TOKEN_DIR}")
+    perms = stat.S_IMODE(st.st_mode)
+    if perms & 0o077:
+        os.chmod(TOKEN_DIR, 0o700)
+
+
 def _read_token_file() -> Optional[str]:
     """Read saved fleet token from ~/.macfleet/fleet-token.
 
@@ -99,17 +120,43 @@ def _read_token_file() -> Optional[str]:
     read their fleet credential.
     """
     try:
-        st = os.stat(TOKEN_FILE)
+        st = os.lstat(TOKEN_FILE)
     except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        logger.warning(
+            "Refusing to read fleet token symlink at %s. Replace it with a "
+            "regular file owned by your user and mode 0600.",
+            TOKEN_FILE,
+        )
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        logger.warning(
+            "Refusing to read fleet token at %s because it is not a regular file.",
+            TOKEN_FILE,
+        )
         return None
     _check_token_file_mode(st.st_mode)
+    flags = os.O_RDONLY | _nofollow_flag()
     try:
-        with open(TOKEN_FILE) as f:
+        fd = os.open(TOKEN_FILE, flags)
+    except FileNotFoundError:
+        # Race: someone deleted it between lstat and open
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            logger.warning("Refusing to read fleet token symlink at %s.", TOKEN_FILE)
+            return None
+        raise
+
+    try:
+        with os.fdopen(fd) as f:
+            fd = -1
             token = f.read().strip()
             return token if token else None
-    except FileNotFoundError:
-        # Race: someone deleted it between stat and open
-        return None
+    finally:
+        if fd != -1:
+            os.close(fd)
 
 
 def _check_token_file_mode(st_mode: int) -> None:
@@ -132,10 +179,20 @@ def _write_token_file(token: str) -> None:
     chmod after the write to enforce 0o600 on every call (repairs a
     previously-mis-permissioned file).
     """
-    os.makedirs(TOKEN_DIR, mode=0o700, exist_ok=True)
-    fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    _ensure_private_token_dir()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _nofollow_flag()
+    try:
+        fd = os.open(TOKEN_FILE, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise PermissionError(
+                f"Refusing to write fleet token through symlink: {TOKEN_FILE}"
+            ) from exc
+        raise
     try:
         os.write(fd, token.encode("utf-8"))
+        os.fsync(fd)
+        os.fchmod(fd, 0o600)
     finally:
         os.close(fd)
     # Re-enforce 0600 in case the file pre-existed with broader mode

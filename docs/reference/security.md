@@ -161,6 +161,11 @@ slow attackers get dropped quickly.
 to group or other — a soft tripwire that catches users who copied the
 file around with `cp` on a poorly-configured system.
 
+The containing `~/.macfleet` directory is repaired to mode 0o700 before
+MacFleet writes a token. The token path must be a regular file: MacFleet
+refuses to read or write `fleet-token` when it is a symlink, which prevents
+local symlink tricks from redirecting the credential to another path.
+
 ## Pairing and rotation
 
 `macfleet join --bootstrap` starts a short-lived enrollment listener

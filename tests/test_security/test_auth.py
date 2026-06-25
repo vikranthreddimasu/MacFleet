@@ -663,6 +663,40 @@ class TestTokenFilePermissions:
         mode = _stat.S_IMODE(token_file.stat().st_mode)
         assert mode == 0o600, f"expected 0o600 after write, got {oct(mode)}"
 
+    def test_write_repairs_token_directory_mode(self, tmp_path, monkeypatch):
+        """Existing token directory is tightened to 0700 before writing."""
+        import stat as _stat
+
+        from macfleet.security import auth as auth_mod
+
+        token_dir = tmp_path / "macfleet"
+        token_dir.mkdir()
+        os.chmod(token_dir, 0o755)
+        token_file = token_dir / "fleet-token"
+        monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(token_file))
+        monkeypatch.setattr(auth_mod, "TOKEN_DIR", str(token_dir))
+
+        auth_mod._write_token_file("new-token-value-long-enough-to-pass")
+
+        mode = _stat.S_IMODE(token_dir.stat().st_mode)
+        assert mode == 0o700, f"expected token dir mode 0o700, got {oct(mode)}"
+
+    def test_write_refuses_token_symlink(self, tmp_path, monkeypatch):
+        """Writing must not follow a symlink at the token path."""
+        from macfleet.security import auth as auth_mod
+
+        target = tmp_path / "target-token"
+        target.write_text("do-not-overwrite")
+        token_file = tmp_path / "fleet-token"
+        token_file.symlink_to(target)
+        monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(token_file))
+        monkeypatch.setattr(auth_mod, "TOKEN_DIR", str(tmp_path))
+
+        with pytest.raises(PermissionError, match="symlink"):
+            auth_mod._write_token_file("new-token-value-long-enough-to-pass")
+
+        assert target.read_text() == "do-not-overwrite"
+
     def test_read_warns_on_permissive_mode(self, tmp_path, monkeypatch, caplog):
         """_read_token_file emits a warning when mode has group/other bits set."""
         import logging as _logging
@@ -699,6 +733,24 @@ class TestTokenFilePermissions:
         assert token == "token-value"
         perm_warnings = [r for r in caplog.records if "permissive mode" in r.message]
         assert not perm_warnings, f"unexpected warnings: {perm_warnings}"
+
+    def test_read_refuses_token_symlink(self, tmp_path, monkeypatch, caplog):
+        """Reading must not follow a symlink at the token path."""
+        import logging as _logging
+
+        from macfleet.security import auth as auth_mod
+
+        target = tmp_path / "target-token"
+        target.write_text("linked-token-value")
+        token_file = tmp_path / "fleet-token"
+        token_file.symlink_to(target)
+        monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(token_file))
+
+        with caplog.at_level(_logging.WARNING, logger="macfleet.security.auth"):
+            token = auth_mod._read_token_file()
+
+        assert token is None
+        assert any("symlink" in rec.message for rec in caplog.records)
 
     def test_read_returns_none_when_file_missing(self, tmp_path, monkeypatch):
         """Missing file returns None without crashing or warning."""
