@@ -20,6 +20,7 @@ def test_train_rejects_invalid_numeric_options_before_runtime(monkeypatch):
         (["train", "--batch-size", "0"], "--batch-size"),
         (["train", "--lr", "0"], "--lr"),
         (["train", "--lr", "-0.1"], "--lr"),
+        (["train", "--compression", "topk"], "--compression"),
     ]
 
     for args, option in cases:

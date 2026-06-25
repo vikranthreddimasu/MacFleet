@@ -26,6 +26,7 @@ from rich.table import Table
 import macfleet
 
 console = Console()
+TRAINING_COMPRESSION_CHOICES = ("none", "light", "moderate", "aggressive", "adaptive")
 
 
 @click.group()
@@ -487,7 +488,12 @@ def diagnose():
 @click.option("--epochs", default=10, type=click.IntRange(1), help="Number of training epochs")
 @click.option("--batch-size", default=128, type=click.IntRange(1), help="Global batch size")
 @click.option("--lr", default=0.001, type=click.FloatRange(0.0, min_open=True), help="Learning rate")
-@click.option("--compression", default="none", help="Compression: none, topk, fp16, topk_fp16")
+@click.option(
+    "--compression",
+    default="none",
+    type=click.Choice(TRAINING_COMPRESSION_CHOICES),
+    help="Distributed compression mode",
+)
 @click.option("--config", "config_path", default=None, help="YAML config file")
 def train(
     script: str | None,
