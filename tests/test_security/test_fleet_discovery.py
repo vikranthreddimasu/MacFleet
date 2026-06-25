@@ -2,8 +2,34 @@
 
 from __future__ import annotations
 
+import pytest
+
 from macfleet.pool.discovery import MACFLEET_SERVICE_TYPE, ServiceRegistry
 from macfleet.security.auth import DEFAULT_SERVICE_TYPE, SecurityConfig
+
+
+class _TrackedAwaitable:
+    def __init__(self):
+        self.awaited = False
+
+    def __await__(self):
+        self.awaited = True
+        if False:
+            yield None
+        return None
+
+
+class _FakeAsyncZeroconf:
+    def __init__(self):
+        self.zeroconf = object()
+        self.unregister_broadcast = _TrackedAwaitable()
+        self.closed = False
+
+    async def async_unregister_service(self, service_info):
+        return self.unregister_broadcast
+
+    async def async_close(self):
+        self.closed = True
 
 
 class TestFleetScopedServiceType:
@@ -73,6 +99,22 @@ class TestServiceRegistryWithSecurity:
         r1 = ServiceRegistry(security=s1)
         r2 = ServiceRegistry(security=s2)
         assert r1._service_type != r2._service_type
+
+    @pytest.mark.asyncio
+    async def test_async_stop_awaits_unregister_broadcast(self):
+        registry = ServiceRegistry()
+        fake = _FakeAsyncZeroconf()
+        registry._async_zeroconf = fake
+        registry._zeroconf = fake.zeroconf
+        registry._service_info = object()
+
+        await registry.async_stop()
+
+        assert fake.unregister_broadcast.awaited is True
+        assert fake.closed is True
+        assert registry._service_info is None
+        assert registry._async_zeroconf is None
+        assert registry._zeroconf is None
 
 
 class TestMdnsInfoMinimization:

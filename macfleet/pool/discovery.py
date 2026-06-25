@@ -223,7 +223,11 @@ class ServiceRegistry:
             self._browser.cancel()
             self._browser = None
         if self._service_info and self._async_zeroconf:
-            await self._async_zeroconf.async_unregister_service(self._service_info)
+            unregister_broadcast = await self._async_zeroconf.async_unregister_service(
+                self._service_info
+            )
+            if unregister_broadcast is not None:
+                await unregister_broadcast
             self._service_info = None
         if self._async_zeroconf:
             await self._async_zeroconf.async_close()
