@@ -224,6 +224,10 @@ async def _distributed_train_torch(
             "rank": mesh.rank,
             "world_size": mesh.world_size,
             "avg_sync_time_sec": dp.avg_sync_time_sec,
+            "degraded": dp.degraded,
+            "unsynced_steps": dp.unsynced_steps,
+            "validation_fallback_steps": dp.validation_fallback_steps,
+            "last_sync_error": dp.last_sync_error,
             "params_sha256": params_sha,
         }
     finally:
@@ -342,6 +346,10 @@ async def _distributed_train_mlx(
             "rank": mesh.rank,
             "world_size": mesh.world_size,
             "avg_sync_time_sec": dp.avg_sync_time_sec,
+            "degraded": dp.degraded,
+            "unsynced_steps": dp.unsynced_steps,
+            "validation_fallback_steps": dp.validation_fallback_steps,
+            "last_sync_error": dp.last_sync_error,
             "params_sha256": params_sha,
         }
     finally:

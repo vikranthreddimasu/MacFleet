@@ -32,6 +32,7 @@ from macfleet.compression.adaptive import (
 from macfleet.engines.base import Engine, TrainingMetrics
 from macfleet.pool.network import LinkType
 from macfleet.security.auth import GradientValidationError, validate_gradients
+from macfleet.security.audit import audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,9 @@ class DataParallel:
         # property stays defined; remove together with Issue 3 wiring.
         self._bytes_saved = 0
         self._expected_grad_size: Optional[int] = None
+        self._unsynced_steps = 0
+        self._validation_fallback_steps = 0
+        self._last_sync_error: Optional[str] = None
 
         # Setup compression
         self._compressor = self._make_compressor(link_type)
@@ -102,6 +106,26 @@ class DataParallel:
     @property
     def is_coordinator(self) -> bool:
         return self.rank == 0
+
+    @property
+    def unsynced_steps(self) -> int:
+        """Steps that used local gradients because fleet sync failed."""
+        return self._unsynced_steps
+
+    @property
+    def validation_fallback_steps(self) -> int:
+        """Steps that discarded a synchronized gradient due to validation."""
+        return self._validation_fallback_steps
+
+    @property
+    def degraded(self) -> bool:
+        """True when this rank had to fall back from synchronized training."""
+        return self._unsynced_steps > 0 or self._validation_fallback_steps > 0
+
+    @property
+    def last_sync_error(self) -> Optional[str]:
+        """Last sync/degradation reason, if any."""
+        return self._last_sync_error
 
     @property
     def avg_sync_time_sec(self) -> float:
@@ -253,6 +277,13 @@ class DataParallel:
                 "Local gradients contain NaN/Inf (likely from NaN loss). "
                 "Zeroing gradients for this step to avoid poisoning the fleet."
             )
+            self._validation_fallback_steps += 1
+            self._last_sync_error = "local_gradients_nan_or_inf"
+            audit_event(
+                "training.gradient_validation_failed",
+                rank=self.rank,
+                reason=self._last_sync_error,
+            )
             flat_grads = np.zeros_like(flat_grads)
 
         # Record expected size on first call for shape validation
@@ -284,6 +315,13 @@ class DataParallel:
             # SECURITY: Metadata bomb or corrupt compressed gradient from peer.
             logger.error("Gradient deserialization failed: %s", e)
             logger.warning("Falling back to local gradients (discarding allreduce result)")
+            self._unsynced_steps += 1
+            self._last_sync_error = f"gradient_deserialization_failed:{e}"
+            audit_event(
+                "training.sync_degraded",
+                rank=self.rank,
+                reason="gradient_deserialization_failed",
+            )
             averaged = flat_grads
         except (
             asyncio.TimeoutError,
@@ -302,6 +340,14 @@ class DataParallel:
                 "Falling back to local gradients. Training continues but "
                 "this step is not synchronized across the fleet."
             )
+            self._unsynced_steps += 1
+            self._last_sync_error = f"allreduce_failed:{type(e).__name__}"
+            audit_event(
+                "training.sync_degraded",
+                rank=self.rank,
+                reason="allreduce_failed",
+                error_type=type(e).__name__,
+            )
             averaged = flat_grads
 
         # SECURITY: Validate gradients before applying to model.
@@ -311,6 +357,13 @@ class DataParallel:
         except GradientValidationError as e:
             logger.error("Gradient validation failed: %s", e)
             logger.warning("Falling back to local gradients (discarding allreduce result)")
+            self._validation_fallback_steps += 1
+            self._last_sync_error = f"gradient_validation_failed:{e}"
+            audit_event(
+                "training.gradient_validation_failed",
+                rank=self.rank,
+                reason="synced_gradient_invalid",
+            )
             averaged = flat_grads  # use own gradients only
 
         # Guard: verify allreduce didn't corrupt the shape
@@ -320,6 +373,13 @@ class DataParallel:
                 "Falling back to local gradients.",
                 self._expected_grad_size,
                 averaged.size,
+            )
+            self._validation_fallback_steps += 1
+            self._last_sync_error = "gradient_shape_mismatch"
+            audit_event(
+                "training.gradient_validation_failed",
+                rank=self.rank,
+                reason="shape_mismatch",
             )
             averaged = flat_grads
 
