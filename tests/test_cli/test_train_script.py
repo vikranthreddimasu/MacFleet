@@ -120,3 +120,16 @@ def main(dataset):
     assert "cannot provide" in result.output
     assert "dataset" in result.output
     assert "Traceback" not in result.output
+
+
+def test_train_script_reports_non_callable_main(tmp_path: Path):
+    script = tmp_path / "train_job.py"
+    script.write_text("main = 123\n")
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["train", str(script)])
+
+    assert result.exit_code == 1
+    assert "main" in result.output
+    assert "not callable" in result.output
+    assert "Traceback" not in result.output

@@ -620,6 +620,10 @@ def _train_from_script(
     # Expect the script to define a `main()` function.
     if hasattr(module, "main"):
         main_fn = module.main
+        if not callable(main_fn):
+            console.print(f"[red]Error: Script attribute 'main' in {script} is not callable.[/red]")
+            console.print("[dim]Define a function named main(), then retry.[/dim]")
+            sys.exit(1)
         options = {
             "engine": engine_type,
             "epochs": epochs,
