@@ -147,6 +147,30 @@ def generate_fleet_token() -> str:
     return secrets.token_hex(AUTO_TOKEN_LENGTH)
 
 
+def save_fleet_token(token: str) -> None:
+    """Persist a fleet token with private file permissions."""
+    if len(token) < MIN_TOKEN_LENGTH:
+        raise ValueError(
+            f"Token must be at least {MIN_TOKEN_LENGTH} characters "
+            f"(got {len(token)})."
+        )
+    _write_token_file(token)
+
+
+def rotate_saved_fleet_token() -> str:
+    """Generate and persist a new fleet token.
+
+    Running agents keep using the token they started with; users should restart
+    every Mac after rotation.
+    """
+    from macfleet.security.audit import audit_event
+
+    token = generate_fleet_token()
+    _write_token_file(token)
+    audit_event("token.rotated", token_file=TOKEN_FILE)
+    return token
+
+
 def resolve_token(token: Optional[str] = None) -> Optional[str]:
     """Resolve token from explicit value or MACFLEET_TOKEN env var.
 

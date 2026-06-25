@@ -848,6 +848,40 @@ def pair(from_stdin: bool, enroll_host: str | None, enroll_code: str | None):
     )
 
 
+@cli.command("rotate-token")
+@click.option("--yes", is_flag=True, default=False, help="Do not prompt before replacing an existing token.")
+@click.option("--show-token", is_flag=True, default=False, help="Reveal the new permanent token in the terminal.")
+def rotate_token(yes: bool, show_token: bool):
+    """Rotate the saved fleet token on this Mac.
+
+    Rotation invalidates future joins that use the old token. Restart running
+    MacFleet agents and re-pair other Macs with `macfleet join --bootstrap`.
+    """
+    import os
+
+    from macfleet.security.audit import audit_event
+    from macfleet.security.auth import TOKEN_FILE, rotate_saved_fleet_token
+
+    if os.path.exists(TOKEN_FILE) and not yes:
+        confirmed = click.confirm(
+            "Replace the saved fleet token on this Mac? "
+            "Running agents and other Macs must be restarted/re-paired.",
+            default=False,
+        )
+        if not confirmed:
+            console.print("[yellow]Token rotation cancelled.[/yellow]")
+            raise click.exceptions.Exit(1)
+
+    token = rotate_saved_fleet_token()
+    console.print(f"[green]Rotated fleet token.[/green] Saved to {TOKEN_FILE}")
+    if show_token:
+        console.print(f"[bold yellow]New permanent fleet token:[/bold yellow] {token}")
+        audit_event("token.revealed", source="rotate_token_show_token")
+    else:
+        console.print("[dim]Token hidden. Run `macfleet join --bootstrap` to pair other Macs safely.[/dim]")
+    console.print("[dim]Restart MacFleet on every Mac and re-pair peers with the new token.[/dim]")
+
+
 # v2.2 PR 16 (D10): `macfleet doctor` is a friendlier alias for `diagnose`.
 # Users trained by `brew doctor` / `rustup doctor` look for this name first.
 @cli.command()
