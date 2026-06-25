@@ -14,6 +14,7 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import errno
 import signal
 import sys
 import time
@@ -193,38 +194,73 @@ def join(
 
     async def run():
         enrollment_server = None
-        await agent.start()
-        if start_enrollment and resolved_token is not None:
-            enrollment_server = EnrollmentServer(
-                token=resolved_token,
-                fleet_id=fleet_id,
-                node_id=agent.node_id,
-                ttl_sec=enroll_ttl,
-                max_uses=enroll_uses,
-            )
-            await enrollment_server.start()
-            print_enrollment_info(
-                _best_pairing_host(),
-                enrollment_server.bound_port,
-                enrollment_server.code,
-                enrollment_server.expires_at_epoch,
-                out=sys.stdout,
-            )
-        console.print("\n[dim]Press Ctrl+C to leave the pool[/dim]\n")
+        agent_started = False
 
-        # Wait for interrupt
-        stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop_event.set)
+        async def cleanup_failed_start() -> None:
+            try:
+                await agent.stop()
+            except Exception as cleanup_error:
+                console.print(f"[dim]Cleanup after failed startup also failed: {cleanup_error}[/dim]")
 
         try:
+            await agent.start()
+            agent_started = True
+        except OSError as e:
+            await cleanup_failed_start()
+            console.print(f"[red]Error: couldn't start MacFleet agent: {e}[/red]")
+            if e.errno == errno.EADDRINUSE:
+                console.print(
+                    f"[dim]Port conflict detected. Stop the other MacFleet process or "
+                    f"retry with --port {port + 10} --data-port {data_port + 10}.[/dim]"
+                )
+            elif e.errno == errno.EACCES:
+                console.print("[dim]Permission denied while binding a local port. Try ports above 1024.[/dim]")
+            else:
+                console.print("[dim]Run `macfleet doctor` to check local networking.[/dim]")
+            raise click.exceptions.Exit(1) from e
+        except Exception as e:
+            await cleanup_failed_start()
+            console.print(f"[red]Error: couldn't start MacFleet agent: {e}[/red]")
+            console.print("[dim]Run `macfleet doctor` to check local networking and token state.[/dim]")
+            raise click.exceptions.Exit(1) from e
+
+        try:
+            if start_enrollment and resolved_token is not None:
+                try:
+                    enrollment_server = EnrollmentServer(
+                        token=resolved_token,
+                        fleet_id=fleet_id,
+                        node_id=agent.node_id,
+                        ttl_sec=enroll_ttl,
+                        max_uses=enroll_uses,
+                    )
+                    await enrollment_server.start()
+                except Exception as e:
+                    console.print(f"[red]Error: couldn't start enrollment server: {e}[/red]")
+                    console.print("[dim]Retry without --bootstrap, or run `macfleet doctor` for local checks.[/dim]")
+                    raise click.exceptions.Exit(1) from e
+                print_enrollment_info(
+                    _best_pairing_host(),
+                    enrollment_server.bound_port,
+                    enrollment_server.code,
+                    enrollment_server.expires_at_epoch,
+                    out=sys.stdout,
+                )
+            console.print("\n[dim]Press Ctrl+C to leave the pool[/dim]\n")
+
+            # Wait for interrupt
+            stop_event = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stop_event.set)
+
             await stop_event.wait()
         finally:
             if enrollment_server is not None:
                 await enrollment_server.stop()
-            await agent.stop()
+            if agent_started:
+                await agent.stop()
 
     try:
         asyncio.run(run())
