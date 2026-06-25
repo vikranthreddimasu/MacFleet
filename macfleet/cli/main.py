@@ -925,7 +925,7 @@ def rotate_token(yes: bool, show_token: bool):
     from macfleet.security.audit import audit_event
     from macfleet.security.auth import TOKEN_FILE, rotate_saved_fleet_token
 
-    if os.path.exists(TOKEN_FILE) and not yes:
+    if os.path.lexists(TOKEN_FILE) and not yes:
         confirmed = click.confirm(
             "Replace the saved fleet token on this Mac? "
             "Running agents and other Macs must be restarted/re-paired.",
@@ -935,7 +935,11 @@ def rotate_token(yes: bool, show_token: bool):
             console.print("[yellow]Token rotation cancelled.[/yellow]")
             raise click.exceptions.Exit(1)
 
-    token = rotate_saved_fleet_token()
+    try:
+        token = rotate_saved_fleet_token()
+    except OSError as e:
+        console.print(f"[red]Error: couldn't rotate fleet token at {TOKEN_FILE}: {e}[/red]")
+        sys.exit(1)
     console.print(f"[green]Rotated fleet token.[/green] Saved to {TOKEN_FILE}")
     if show_token:
         console.print(f"[bold yellow]New permanent fleet token:[/bold yellow] {token}")
