@@ -176,6 +176,9 @@ class CollectiveGroup:
         Returns:
             Reduced array (identical on all nodes).
         """
+        if op not in ("mean", "sum"):
+            raise ValueError(f"Unknown reduction op: {op!r}. Valid ops: 'mean', 'sum'")
+
         if self.world_size == 1:
             return array
 

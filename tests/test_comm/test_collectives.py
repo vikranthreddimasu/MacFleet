@@ -151,6 +151,44 @@ class TestAllReduce:
         np.testing.assert_array_equal(result, arr)
 
     @pytest.mark.asyncio
+    async def test_invalid_op_raises_for_any_world_size(self):
+        """Unknown op raises ValueError regardless of world_size."""
+        t = PeerTransport(local_id="solo", config=CONFIG)
+        group = CollectiveGroup(rank=0, world_size=1, transport=t, rank_to_peer={})
+        arr = np.array([1.0, 2.0], dtype=np.float32)
+        with pytest.raises(ValueError, match="Unknown reduction op"):
+            await group.allreduce(arr, op="product")
+
+    @pytest.mark.asyncio
+    async def test_invalid_op_raises_for_two_node_ring(self):
+        """Unknown op raises ValueError for 2-node (direct-exchange) path."""
+        transports, _ = await _setup_mesh(2)
+        try:
+            groups = _make_groups(transports)
+            arr = np.array([1.0, 2.0], dtype=np.float32)
+            with pytest.raises(ValueError, match="Unknown reduction op"):
+                await asyncio.gather(
+                    groups[0].allreduce(arr, op="product"),
+                    groups[1].allreduce(arr, op="product"),
+                )
+        finally:
+            await _teardown_mesh(transports)
+
+    @pytest.mark.asyncio
+    async def test_invalid_op_raises_for_three_node_ring(self):
+        """Unknown op raises ValueError for 3-node (ring) path, not silently wrong."""
+        transports, _ = await _setup_mesh(3)
+        try:
+            groups = _make_groups(transports)
+            arr = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+            with pytest.raises(ValueError, match="Unknown reduction op"):
+                await asyncio.gather(
+                    *(groups[i].allreduce(arr, op="max") for i in range(3))
+                )
+        finally:
+            await _teardown_mesh(transports)
+
+    @pytest.mark.asyncio
     async def test_two_nodes_mean(self):
         """AllReduce mean with 2 nodes produces the average."""
         transports, _ = await _setup_mesh(2)
