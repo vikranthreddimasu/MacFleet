@@ -9,6 +9,48 @@ from click.testing import CliRunner
 from macfleet.cli.main import cli
 
 
+def test_join_rejects_invalid_port_before_runtime(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("PoolAgent should not be constructed for invalid CLI input")
+
+    monkeypatch.setattr("macfleet.pool.agent.PoolAgent", fail_if_called)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["join", "--port", "-1"])
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--port'" in result.output
+
+
+def test_join_rejects_invalid_data_port_before_runtime(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("PoolAgent should not be constructed for invalid CLI input")
+
+    monkeypatch.setattr("macfleet.pool.agent.PoolAgent", fail_if_called)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["join", "--data-port", "70000"])
+
+    assert result.exit_code == 2
+    assert "Invalid value for '--data-port'" in result.output
+
+
+def test_join_rejects_nonpositive_enrollment_options_before_runtime(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("PoolAgent should not be constructed for invalid CLI input")
+
+    monkeypatch.setattr("macfleet.pool.agent.PoolAgent", fail_if_called)
+
+    runner = CliRunner()
+    ttl_result = runner.invoke(cli, ["join", "--enroll-ttl", "0"])
+    uses_result = runner.invoke(cli, ["join", "--enroll-uses", "0"])
+
+    assert ttl_result.exit_code == 2
+    assert "Invalid value for '--enroll-ttl'" in ttl_result.output
+    assert uses_result.exit_code == 2
+    assert "Invalid value for '--enroll-uses'" in uses_result.output
+
+
 def test_join_reports_agent_start_failure_and_cleans_up(monkeypatch):
     events: list[str] = []
 

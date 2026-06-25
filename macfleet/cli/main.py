@@ -51,8 +51,18 @@ def _best_pairing_host() -> str:
 
 @cli.command()
 @click.option("--name", default=None, help="Custom node name")
-@click.option("--port", default=50051, help="Heartbeat / discovery port")
-@click.option("--data-port", default=50052, help="Data transport port (training)")
+@click.option(
+    "--port",
+    default=50051,
+    type=click.IntRange(0, 65535),
+    help="Heartbeat / discovery port",
+)
+@click.option(
+    "--data-port",
+    default=50052,
+    type=click.IntRange(0, 65535),
+    help="Data transport port (training)",
+)
 @click.option("--token", default=None, envvar="MACFLEET_TOKEN", help="Pool token (or set MACFLEET_TOKEN env var)")
 @click.option("--fleet-id", default=None, help="Fleet identifier (isolates pool on network)")
 @click.option(
@@ -78,12 +88,14 @@ def _best_pairing_host() -> str:
 @click.option(
     "--enroll-ttl",
     default=300.0,
+    type=click.FloatRange(0.0, min_open=True),
     show_default=True,
     help="Seconds that the one-time enrollment code remains valid.",
 )
 @click.option(
     "--enroll-uses",
     default=1,
+    type=click.IntRange(1),
     show_default=True,
     help="Number of Macs that may pair with this enrollment code.",
 )
