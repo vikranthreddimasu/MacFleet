@@ -394,6 +394,12 @@ class Pool:
         from macfleet.security.auth import resolve_token_with_file
 
         self.name = name
+        if open and token is not None:
+            raise ValueError(
+                "Pool(open=True) disables authentication and cannot be combined "
+                "with an explicit token. Remove open=True to join a secure fleet, "
+                "or remove token to create an unauthenticated local/open pool."
+            )
         if open:
             self.token = None
         else:

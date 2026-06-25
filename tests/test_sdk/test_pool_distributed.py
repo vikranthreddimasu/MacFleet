@@ -18,6 +18,24 @@ import pytest
 class TestPoolFeatureFlagDefault:
     """Default behavior (flag off) must remain legacy single-node."""
 
+    def test_open_and_explicit_token_are_rejected(self):
+        from macfleet.sdk.pool import Pool
+
+        with pytest.raises(ValueError, match="cannot be combined"):
+            Pool(open=True, token="this-token-is-long-enough")
+
+    def test_open_mode_ignores_environment_token(self, monkeypatch):
+        from macfleet.sdk.pool import Pool
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("open=True should not resolve token material")
+
+        monkeypatch.setenv("MACFLEET_TOKEN", "env-token-that-should-not-be-read")
+        monkeypatch.setattr("macfleet.security.auth.resolve_token_with_file", fail_if_called)
+
+        pool = Pool(open=True)
+        assert pool.token is None
+
     def test_join_is_noop_by_default(self):
         """Without the flag, Pool.join doesn't spin up an agent."""
         from macfleet.sdk.pool import Pool
