@@ -32,24 +32,73 @@ from macfleet.comm.transport import PeerTransport
 # Format: [dtype_len:H][dtype_str][ndims:H][shape:ndims*I][data]              #
 # --------------------------------------------------------------------------- #
 
+MAX_ARRAY_DTYPE_LEN = 32
+MAX_ARRAY_NDIMS = 8
+MAX_ARRAY_NUMEL = 2_000_000_000
+ALLOWED_ARRAY_DTYPES = frozenset({
+    "bool",
+    "uint8",
+    "int8",
+    "uint16",
+    "int16",
+    "uint32",
+    "int32",
+    "uint64",
+    "int64",
+    "float16",
+    "float32",
+    "float64",
+})
+
 
 def pack_array(array: np.ndarray) -> bytes:
     """Serialize a numpy array to bytes with shape/dtype metadata."""
     dtype_str = str(array.dtype).encode("utf-8")
     ndims = len(array.shape)
+    if len(dtype_str) > MAX_ARRAY_DTYPE_LEN:
+        raise ValueError(f"dtype string too long: {len(dtype_str)}")
+    if ndims > MAX_ARRAY_NDIMS:
+        raise ValueError(f"array has too many dimensions: {ndims}")
+    if str(array.dtype) not in ALLOWED_ARRAY_DTYPES:
+        raise ValueError(f"unsupported array dtype: {array.dtype}")
     header = struct.pack(f"!HH{'I' * ndims}", len(dtype_str), ndims, *array.shape)
     return header + dtype_str + array.tobytes()  # type: ignore[no-any-return]
 
 
 def unpack_array(data: bytes) -> np.ndarray:
     """Deserialize bytes back to a numpy array."""
+    if len(data) < 4:
+        raise ValueError("Array payload too short for metadata header")
     dtype_len, ndims = struct.unpack("!HH", data[:4])
+    if dtype_len == 0 or dtype_len > MAX_ARRAY_DTYPE_LEN:
+        raise ValueError(f"Invalid dtype length: {dtype_len}")
+    if ndims > MAX_ARRAY_NDIMS:
+        raise ValueError(f"Invalid array rank: {ndims}")
     shape_start = 4
     shape_end = shape_start + ndims * 4
+    if shape_end > len(data):
+        raise ValueError("Array payload truncated before shape metadata")
     shape = struct.unpack(f"!{'I' * ndims}", data[shape_start:shape_end])
+    dtype_end = shape_end + dtype_len
+    if dtype_end > len(data):
+        raise ValueError("Array payload truncated before dtype metadata")
     dtype_str = data[shape_end : shape_end + dtype_len].decode("utf-8")
-    data_start = shape_end + dtype_len
-    array = np.frombuffer(data[data_start:], dtype=np.dtype(dtype_str)).reshape(shape)
+    if dtype_str not in ALLOWED_ARRAY_DTYPES:
+        raise ValueError(f"Unsupported array dtype: {dtype_str!r}")
+    dtype = np.dtype(dtype_str)
+    numel = 1
+    for dim in shape:
+        numel *= int(dim)
+        if numel > MAX_ARRAY_NUMEL:
+            raise ValueError(f"Array element count {numel} exceeds limit {MAX_ARRAY_NUMEL}")
+    data_start = dtype_end
+    payload = data[data_start:]
+    expected_bytes = numel * dtype.itemsize
+    if len(payload) != expected_bytes:
+        raise ValueError(
+            f"Array payload size mismatch: expected {expected_bytes}B, got {len(payload)}B"
+        )
+    array = np.frombuffer(payload, dtype=dtype).reshape(shape)
     return array.copy()  # own the memory (frombuffer returns read-only view)
 
 
