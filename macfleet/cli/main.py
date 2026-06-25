@@ -622,7 +622,19 @@ def _train_from_script(
 @click.option("--fn", "fn_name", default="main", help="Function to execute (default: main)")
 @click.option("--token", default=None, envvar="MACFLEET_TOKEN", help="Pool token")
 @click.option("--open", "open_fleet", is_flag=True, default=False, help="Disable security")
-def run_command(script: str, fn_name: str, token: str | None, open_fleet: bool):
+@click.option(
+    "--allow-insecure-open",
+    is_flag=True,
+    default=False,
+    help="Required with --open. Makes unauthenticated execution explicit.",
+)
+def run_command(
+    script: str,
+    fn_name: str,
+    token: str | None,
+    open_fleet: bool,
+    allow_insecure_open: bool,
+):
     """Run a Python script on the pool.
 
     The script must define the named function (default: main).
@@ -635,6 +647,17 @@ def run_command(script: str, fn_name: str, token: str | None, open_fleet: bool):
     """
     import importlib.util
     import os
+
+    if open_fleet:
+        if token:
+            console.print("[red]Error: --open and --token are mutually exclusive.[/red]")
+            sys.exit(1)
+        if not allow_insecure_open:
+            console.print(
+                "[red]Error: --open disables authentication for execution. Re-run with "
+                "--open --allow-insecure-open if you really want an open LAN pool.[/red]"
+            )
+            sys.exit(1)
 
     if not os.path.isfile(script):
         console.print(f"[red]Error: Script not found: {script}[/red]")
