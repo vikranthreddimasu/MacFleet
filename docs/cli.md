@@ -67,6 +67,31 @@ does not silently trust pasteboard contents. If a saved fleet token
 already exists, `pair` asks before replacing it; `--stdin` requires
 `--yes` because stdin is already carrying the legacy URL.
 
+## `macfleet train`
+
+Run the built-in demo or a custom training script.
+
+```
+macfleet train [SCRIPT] [--engine torch|mlx] [--epochs N]
+               [--batch-size N] [--lr FLOAT]
+               [--compression none|light|moderate|aggressive|adaptive]
+               [--config PATH]
+```
+
+`--config` accepts `.json`, `.yaml`, or `.yml`. Config files may set:
+`engine`, `epochs`, `batch_size`, `lr`, and `compression`. Hyphenated
+aliases like `batch-size` are accepted. Explicit CLI flags override
+config values.
+
+For script mode, define `main()` in the target file. MacFleet keeps
+old no-argument scripts working, and injects CLI/config values when
+`main` names any of these parameters:
+
+```python
+def main(engine, epochs, batch_size, lr, compression, config_path):
+    ...
+```
+
 ## `macfleet rotate-token`
 
 Replace the saved local fleet token.

@@ -494,8 +494,10 @@ def diagnose():
     type=click.Choice(TRAINING_COMPRESSION_CHOICES),
     help="Distributed compression mode",
 )
-@click.option("--config", "config_path", default=None, help="YAML config file")
+@click.option("--config", "config_path", default=None, help="JSON/YAML config file")
+@click.pass_context
 def train(
+    ctx: click.Context,
     script: str | None,
     engine: str,
     epochs: int,
@@ -512,12 +514,158 @@ def train(
     the matching CLI values are passed in. Otherwise, runs a built-in demo
     (small MLP on synthetic data) useful for testing the pipeline.
     """
+    if config_path is not None:
+        engine, epochs, batch_size, lr, compression = _apply_train_config(
+            ctx,
+            config_path,
+            engine=engine,
+            epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            compression=compression,
+        )
     if script:
         _train_from_script(
             script, engine, epochs, batch_size, lr, compression, config_path
         )
     else:
         _train_demo(engine, epochs, batch_size, lr)
+
+
+def _apply_train_config(
+    ctx: click.Context,
+    config_path: str,
+    *,
+    engine: str,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    compression: str,
+) -> tuple[str, int, int, float, str]:
+    """Load training config values, letting explicit CLI flags win."""
+    config = _load_train_config(config_path)
+    values: dict[str, object] = {
+        "engine": engine,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "lr": lr,
+        "compression": compression,
+    }
+    for name in values:
+        if (
+            name in config
+            and ctx.get_parameter_source(name) == click.core.ParameterSource.DEFAULT
+        ):
+            values[name] = config[name]
+
+    return (
+        _coerce_train_config_value("engine", values["engine"]),
+        _coerce_train_config_value("epochs", values["epochs"]),
+        _coerce_train_config_value("batch_size", values["batch_size"]),
+        _coerce_train_config_value("lr", values["lr"]),
+        _coerce_train_config_value("compression", values["compression"]),
+    )
+
+
+def _load_train_config(config_path: str) -> dict[str, object]:
+    """Load and validate a JSON/YAML training config file."""
+    import json
+    from pathlib import Path
+
+    path = Path(config_path)
+    if not path.is_file():
+        raise click.ClickException(f"Training config not found: {config_path}")
+
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".json":
+            loaded = json.loads(path.read_text())
+        elif suffix in {".yaml", ".yml"}:
+            try:
+                import yaml
+            except ImportError as e:
+                raise click.ClickException(
+                    "Reading YAML configs requires PyYAML. Install with "
+                    "`pip install 'macfleet[yaml]'`, or use a .json config."
+                ) from e
+            try:
+                loaded = yaml.safe_load(path.read_text())
+            except yaml.YAMLError as e:
+                raise click.ClickException(
+                    f"Couldn't parse training config {config_path}: {e}"
+                ) from e
+        else:
+            raise click.ClickException(
+                "Training config must be a .json, .yaml, or .yml file."
+            )
+    except OSError as e:
+        raise click.ClickException(f"Couldn't read training config {config_path}: {e}") from e
+    except (json.JSONDecodeError, ValueError) as e:
+        raise click.ClickException(f"Couldn't parse training config {config_path}: {e}") from e
+
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise click.ClickException("Training config must contain a mapping/object at the top level.")
+
+    normalized: dict[str, object] = {}
+    aliases = {
+        "batch-size": "batch_size",
+        "learning-rate": "lr",
+        "learning_rate": "lr",
+    }
+    allowed = {"engine", "epochs", "batch_size", "lr", "compression"}
+    for raw_key, value in loaded.items():
+        key = aliases.get(str(raw_key), str(raw_key).replace("-", "_"))
+        if key not in allowed:
+            allowed_list = ", ".join(sorted(allowed))
+            raise click.ClickException(
+                f"Unknown training config key {raw_key!r}. Supported keys: {allowed_list}."
+            )
+        normalized[key] = value
+    return normalized
+
+
+def _coerce_train_config_value(name: str, value: object):
+    """Coerce config-file values to the same shape Click returns."""
+    import math
+
+    if name == "engine":
+        if not isinstance(value, str) or value not in ("torch", "mlx"):
+            raise click.ClickException("Training config 'engine' must be 'torch' or 'mlx'.")
+        return value
+    if name == "compression":
+        if not isinstance(value, str) or value not in TRAINING_COMPRESSION_CHOICES:
+            choices = ", ".join(TRAINING_COMPRESSION_CHOICES)
+            raise click.ClickException(
+                f"Training config 'compression' must be one of: {choices}."
+            )
+        return value
+    if name in {"epochs", "batch_size"}:
+        if isinstance(value, bool):
+            raise click.ClickException(f"Training config '{name}' must be a positive integer.")
+        try:
+            coerced = int(value)
+        except (TypeError, ValueError) as e:
+            raise click.ClickException(
+                f"Training config '{name}' must be a positive integer."
+            ) from e
+        if coerced < 1 or str(value).strip() != str(coerced):
+            raise click.ClickException(f"Training config '{name}' must be a positive integer.")
+        return coerced
+    if name == "lr":
+        if isinstance(value, bool):
+            raise click.ClickException("Training config 'lr' must be a positive finite number.")
+        try:
+            coerced_lr = float(value)
+        except (TypeError, ValueError) as e:
+            raise click.ClickException(
+                "Training config 'lr' must be a positive finite number."
+            ) from e
+        if not math.isfinite(coerced_lr) or coerced_lr <= 0:
+            raise click.ClickException("Training config 'lr' must be a positive finite number.")
+        return coerced_lr
+    return value
 
 
 def _train_demo(engine_type: str, epochs: int, batch_size: int, lr: float):
