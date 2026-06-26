@@ -861,7 +861,7 @@ def _train_from_script(
     if hasattr(module, "main"):
         main_fn = module.main
         if not callable(main_fn):
-            console.print(f"[red]Error: Script attribute 'main' in {script} is not callable.[/red]")
+            console.print(f"[red]Error: Script attribute 'main' in {script} is not callable.[/red]", soft_wrap=True)
             console.print("[dim]Define a function named main(), then retry.[/dim]")
             sys.exit(1)
         options = {
