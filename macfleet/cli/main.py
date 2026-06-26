@@ -318,8 +318,11 @@ def info():
 @click.option("--token", default=None, envvar="MACFLEET_TOKEN", help="Pool token (scopes discovery to fleet)")
 @click.option("--fleet-id", default=None, help="Fleet identifier")
 @click.option("--open", "open_fleet", is_flag=True, default=False, help="Scan open fleet (ignore saved token)")
-def status(token: str | None, fleet_id: str | None, open_fleet: bool):
+@click.option("--json", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def status(token: str | None, fleet_id: str | None, open_fleet: bool, json_output: bool):
     """Show pool status (discovers peers for 3 seconds)."""
+    import json
+
     from macfleet.pool.discovery import ServiceRegistry
     from macfleet.security.auth import SecurityConfig, resolve_token_with_file
 
@@ -334,10 +337,11 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool):
             sys.exit(1)
 
     sec = SecurityConfig(token=resolved, fleet_id=fleet_id) if resolved else None
-    if sec and sec.is_secure:
+    secure = bool(sec and sec.is_secure)
+    if not json_output and secure:
         fleet_label = fleet_id or "default"
         console.print(f"[bold]Scanning fleet '{fleet_label}' for members...[/bold]")
-    else:
+    elif not json_output:
         console.print("[bold]Scanning for pool members...[/bold]")
 
     registry = ServiceRegistry(security=sec)
@@ -345,6 +349,17 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool):
         peers = registry.find_peers(timeout=3.0)
     finally:
         registry.stop()
+
+    sorted_peers = sorted(peers, key=lambda n: -n.compute_score)
+    if json_output:
+        payload = {
+            "secure": secure,
+            "fleet_id": fleet_id or ("default" if secure else None),
+            "count": len(sorted_peers),
+            "nodes": [_status_node_to_dict(node) for node in sorted_peers],
+        }
+        click.echo(json.dumps(payload, sort_keys=True))
+        return
 
     if not peers:
         console.print("[yellow]No pool members found on the network.[/yellow]")
@@ -359,7 +374,7 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool):
     table.add_column("IP / heartbeat / data")
     table.add_column("Score", justify="right")
 
-    for node in sorted(peers, key=lambda n: -n.compute_score):
+    for node in sorted_peers:
         table.add_row(
             node.hostname,
             node.chip_name,
@@ -370,6 +385,23 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool):
         )
 
     console.print(table)
+
+
+def _status_node_to_dict(node) -> dict[str, object]:
+    """Return stable JSON for `macfleet status --json`."""
+    return {
+        "hostname": node.hostname,
+        "node_id": node.node_id,
+        "ip_address": node.ip_address,
+        "heartbeat_port": node.port,
+        "data_port": node.data_port,
+        "gpu_cores": node.gpu_cores,
+        "ram_gb": node.ram_gb,
+        "chip_name": node.chip_name,
+        "link_types": node.link_type_list,
+        "pool_version": node.pool_version,
+        "compute_score": node.compute_score,
+    }
 
 
 @cli.command()

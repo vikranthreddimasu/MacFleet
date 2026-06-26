@@ -37,7 +37,7 @@ macfleet join [--name NAME] [--port PORT] [--data-port PORT]
 One-shot snapshot of the current fleet.
 
 ```
-macfleet status
+macfleet status [--json] [--open]
 ```
 
 Outputs a table:
@@ -47,6 +47,11 @@ Node                    IP                Chip             GPU  Fleet
 mac-mini-studio         192.168.1.10      Apple M2 Max     30   (coordinator)
 macbook-pro             192.168.1.11      Apple M1 Pro     16
 ```
+
+Use `--json` for scripts and monitors. It suppresses human banners and
+prints stable JSON with `secure`, `fleet_id`, `count`, and `nodes`.
+Use `--open` to scan unauthenticated open fleets without reading the
+saved local fleet token.
 
 ## `macfleet pair`
 
