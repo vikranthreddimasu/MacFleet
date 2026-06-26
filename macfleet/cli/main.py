@@ -405,62 +405,77 @@ def _status_node_to_dict(node) -> dict[str, object]:
 
 
 @cli.command()
-def diagnose():
+@click.option("--json", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def diagnose(json_output: bool):
     """Run system health checks."""
+    import json
+    import os
+    import platform
+    import stat as stat_mod
+
     from macfleet.monitoring.thermal import get_thermal_state
     from macfleet.pool.agent import _check_mlx_available, _check_mps_available, profile_hardware
     from macfleet.pool.network import detect_interfaces
-
-    console.print("[bold]Running diagnostics...[/bold]\n")
-
-    checks_passed = 0
-    checks_total = 0
-
-    def check(name: str, passed: bool, detail: str = ""):
-        nonlocal checks_passed, checks_total
-        checks_total += 1
-        if passed:
-            checks_passed += 1
-            console.print(f"  [green]PASS[/green] {name}" + (f" — {detail}" if detail else ""))
-        else:
-            console.print(f"  [red]FAIL[/red] {name}" + (f" — {detail}" if detail else ""))
-
-    # Hardware
-    console.print("[bold]Hardware[/bold]")
-    hw = profile_hardware()
-    check("Apple Silicon detected", "apple" in hw.chip_name.lower() or "m" in hw.chip_name.lower(), hw.chip_name)
-    check("GPU cores detected", hw.gpu_cores > 0, f"{hw.gpu_cores} cores")
-    check("RAM detected", hw.ram_gb > 0, f"{hw.ram_gb:.0f} GB")
-    check("RAM >= 8 GB", hw.ram_gb >= 8, f"{hw.ram_gb:.0f} GB")
-
-    # Frameworks
-    console.print("\n[bold]ML Frameworks[/bold]")
-    check("MPS available", _check_mps_available())
-    check("MLX available", _check_mlx_available())
-
-    # Thermal
-    console.print("\n[bold]Thermal[/bold]")
-    thermal = get_thermal_state()
-    check("Not throttling", not thermal.is_throttling, thermal.pressure.value)
-
-    # Network
-    console.print("\n[bold]Network[/bold]")
-    links = detect_interfaces()
-    check("Network interfaces found", len(links) > 0, f"{len(links)} interfaces")
-    has_non_loopback = any(l.link_type.value != "loopback" for l in links)
-    check("Non-loopback interface", has_non_loopback)
-
-    # Security
-    console.print("\n[bold]Security[/bold]")
-    import os
-    import stat as stat_mod
-
     from macfleet.security.auth import (
         RECOMMENDED_TOKEN_LENGTH,
         TOKEN_FILE,
         resolve_token_with_file,
     )
 
+    checks: list[dict[str, object]] = []
+
+    def add_check(section: str, name: str, passed: bool, detail: str = ""):
+        checks.append(
+            {
+                "id": _diagnostic_check_id(section, name),
+                "section": section,
+                "name": name,
+                "status": "ok" if passed else "fail",
+                "passed": bool(passed),
+                "detail": detail,
+            }
+        )
+
+    # Runtime
+    add_check(
+        "Runtime",
+        "Python >= 3.11",
+        sys.version_info >= (3, 11),
+        ".".join(str(part) for part in sys.version_info[:3]),
+    )
+    system = platform.system() or "unknown"
+    mac_version = platform.mac_ver()[0] or platform.release()
+    add_check("Runtime", "macOS detected", system == "Darwin", f"{system} {mac_version}".strip())
+    machine = platform.machine() or "unknown"
+    add_check("Runtime", "Apple Silicon architecture", machine == "arm64", machine)
+
+    # Hardware
+    hw = profile_hardware()
+    add_check(
+        "Hardware",
+        "Apple Silicon detected",
+        "apple" in hw.chip_name.lower() or "m" in hw.chip_name.lower(),
+        hw.chip_name,
+    )
+    add_check("Hardware", "GPU cores detected", hw.gpu_cores > 0, f"{hw.gpu_cores} cores")
+    add_check("Hardware", "RAM detected", hw.ram_gb > 0, f"{hw.ram_gb:.0f} GB")
+    add_check("Hardware", "RAM >= 8 GB", hw.ram_gb >= 8, f"{hw.ram_gb:.0f} GB")
+
+    # Frameworks
+    add_check("ML Frameworks", "MPS available", _check_mps_available())
+    add_check("ML Frameworks", "MLX available", _check_mlx_available())
+
+    # Thermal
+    thermal = get_thermal_state()
+    add_check("Thermal", "Not throttling", not thermal.is_throttling, thermal.pressure.value)
+
+    # Network
+    links = detect_interfaces()
+    add_check("Network", "Network interfaces found", len(links) > 0, f"{len(links)} interfaces")
+    has_non_loopback = any(l.link_type.value != "loopback" for l in links)
+    add_check("Network", "Non-loopback interface", has_non_loopback)
+
+    # Security
     token_read_error = None
     try:
         tok = resolve_token_with_file(None)
@@ -468,15 +483,17 @@ def diagnose():
         tok = None
         token_read_error = e
     if token_read_error is not None:
-        check("Fleet token readable", False, str(token_read_error))
+        add_check("Security", "Fleet token readable", False, str(token_read_error))
     else:
-        check(
+        add_check(
+            "Security",
             "Fleet token configured",
             tok is not None,
             "" if tok else "run 'macfleet join' once to auto-generate",
         )
     if tok is not None:
-        check(
+        add_check(
+            "Security",
             f"Token length >= {RECOMMENDED_TOKEN_LENGTH}",
             len(tok) >= RECOMMENDED_TOKEN_LENGTH,
             f"{len(tok)} chars" + (
@@ -488,17 +505,19 @@ def diagnose():
         try:
             token_stat = os.lstat(TOKEN_FILE)
         except OSError as e:
-            check("Token file metadata readable", False, str(e))
+            add_check("Security", "Token file metadata readable", False, str(e))
         else:
             is_regular = stat_mod.S_ISREG(token_stat.st_mode)
-            check(
+            add_check(
+                "Security",
                 "Token file is regular file",
                 is_regular,
                 "" if is_regular else f"must not be a symlink or directory: {TOKEN_FILE}",
             )
             if is_regular:
                 mode = stat_mod.S_IMODE(token_stat.st_mode)
-                check(
+                add_check(
+                    "Security",
                     "Token file private (0600)",
                     (mode & 0o077) == 0,
                     f"mode {oct(mode)}" + (
@@ -506,9 +525,50 @@ def diagnose():
                     ),
                 )
 
-    # Summary
-    console.print(f"\n[bold]{checks_passed}/{checks_total} checks passed[/bold]")
-    if checks_passed == checks_total:
+    passed_count = sum(1 for check in checks if check["passed"])
+    total_count = len(checks)
+    report = {
+        "status": "ok" if passed_count == total_count else "fail",
+        "ready": passed_count == total_count,
+        "passed": passed_count,
+        "failed": total_count - passed_count,
+        "total": total_count,
+        "checks": checks,
+    }
+
+    if json_output:
+        click.echo(json.dumps(report, sort_keys=True))
+        return
+
+    _print_diagnostics_report(report)
+
+
+def _diagnostic_check_id(section: str, name: str) -> str:
+    raw = f"{section}.{name}".lower()
+    return "".join(char if char.isalnum() else "_" for char in raw).strip("_")
+
+
+def _print_diagnostics_report(report: dict[str, object]):
+    console.print("[bold]Running diagnostics...[/bold]\n")
+    current_section = None
+    checks = report["checks"]
+    assert isinstance(checks, list)
+    for check in checks:
+        assert isinstance(check, dict)
+        section = check["section"]
+        if section != current_section:
+            if current_section is not None:
+                console.print()
+            console.print(f"[bold]{section}[/bold]")
+            current_section = section
+
+        passed = bool(check["passed"])
+        label = "[green]PASS[/green]" if passed else "[red]FAIL[/red]"
+        detail = check["detail"]
+        console.print(f"  {label} {check['name']}" + (f" — {detail}" if detail else ""))
+
+    console.print(f"\n[bold]{report['passed']}/{report['total']} checks passed[/bold]")
+    if report["ready"]:
         console.print("[green]System is ready for MacFleet![/green]")
     else:
         console.print("[yellow]Some checks failed. See above for details.[/yellow]")
@@ -1323,12 +1383,13 @@ def rotate_token(yes: bool, show_token: bool):
 # v2.2 PR 16 (D10): `macfleet doctor` is a friendlier alias for `diagnose`.
 # Users trained by `brew doctor` / `rustup doctor` look for this name first.
 @cli.command()
+@click.option("--json", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
 @click.pass_context
-def doctor(ctx):
+def doctor(ctx, json_output: bool):
     """System health check (alias for `diagnose`)."""
     # Delegate through Click's context so diagnose runs with a proper context
     # (obj, exception handling) instead of a bare callback() call.
-    ctx.invoke(diagnose)
+    ctx.invoke(diagnose, json_output=json_output)
 
 
 # v2.2 PR 16 (D10): `macfleet quickstart` scaffolds a demo training script.

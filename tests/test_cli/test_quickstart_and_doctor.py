@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -76,13 +77,52 @@ class TestDoctor:
         assert "Thermal" in result.output
         assert "Network" in result.output
 
+    def test_doctor_json_outputs_machine_readable_report(self, monkeypatch):
+        """`macfleet doctor --json` is parseable and does not leak tokens."""
+        secret = "super-secret-token-for-json-doctor"
+        monkeypatch.setenv("MACFLEET_TOKEN", secret)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["doctor", "--json"])
+
+        assert result.exit_code == 0
+        assert "Running diagnostics" not in result.output
+        assert secret not in result.output
+        payload = json.loads(result.output)
+        assert payload["total"] == len(payload["checks"])
+        assert payload["passed"] + payload["failed"] == payload["total"]
+        assert payload["status"] in {"ok", "fail"}
+        assert isinstance(payload["ready"], bool)
+        sections = {check["section"] for check in payload["checks"]}
+        assert {
+            "Runtime",
+            "Hardware",
+            "ML Frameworks",
+            "Thermal",
+            "Network",
+            "Security",
+        } <= sections
+        assert all(
+            {"id", "section", "name", "status", "passed", "detail"} <= set(check)
+            for check in payload["checks"]
+        )
+        assert any(check["name"] == "Fleet token configured" for check in payload["checks"])
+
+    def test_diagnose_json_alias_outputs_machine_readable_report(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["diagnose", "--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["total"] == len(payload["checks"])
+
     def test_doctor_alias_for_diagnose(self):
         """Both commands should produce the same section structure."""
         runner = CliRunner()
         doctor_out = runner.invoke(cli, ["doctor"]).output
         diagnose_out = runner.invoke(cli, ["diagnose"]).output
         # Headers match; detailed content may differ (random hw_id etc)
-        for section in ("Hardware", "ML Frameworks", "Thermal", "Network"):
+        for section in ("Runtime", "Hardware", "ML Frameworks", "Thermal", "Network"):
             assert section in doctor_out
             assert section in diagnose_out
 

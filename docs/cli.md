@@ -115,7 +115,7 @@ old manual setup.
 Diagnoses common environment issues.
 
 ```
-macfleet doctor
+macfleet doctor [--json]
 ```
 
 Checks:
@@ -130,6 +130,9 @@ Checks:
 - Token file regular-file shape and permissions
 
 Prints a checklist. Green = OK, yellow = warning, red = blocker.
+Use `--json` for CI and local monitors. It prints `status`, `ready`,
+summary counts, and a `checks` array with stable ids, sections, names,
+statuses, and redacted details.
 
 ## `macfleet leave`
 
