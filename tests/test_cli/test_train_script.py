@@ -199,7 +199,7 @@ def main():
 def test_train_script_can_receive_config_alias(tmp_path: Path):
     script = tmp_path / "train_job.py"
     output = tmp_path / "config-path.txt"
-    config_file = tmp_path / "settings.yaml"
+    config_file = tmp_path / "settings.json"
     config_file.write_text("{}")
     script.write_text(
         f"""
