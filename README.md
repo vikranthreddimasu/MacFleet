@@ -7,6 +7,7 @@
 Run PyTorch or MLX across multiple Macs with secure peer discovery,
 TLS/HMAC authentication, and framework-agnostic gradient synchronization.
 
+
 ```bash
 pip install macfleet
 macfleet join --bootstrap
