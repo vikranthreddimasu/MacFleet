@@ -41,8 +41,14 @@ def test_run_open_with_ack_passes_open_mode_to_pool(
     created: list[dict[str, object]] = []
 
     class FakePool:
-        def __init__(self, *, token=None, open=False):
-            created.append({"token": token, "open": open})
+        def __init__(self, *, token=None, open=False, allow_legacy_pickle=False):
+            created.append(
+                {
+                    "token": token,
+                    "open": open,
+                    "allow_legacy_pickle": allow_legacy_pickle,
+                }
+            )
 
         def __enter__(self):
             return self
@@ -58,12 +64,43 @@ def test_run_open_with_ack_passes_open_mode_to_pool(
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["run", str(script), "--open", "--allow-insecure-open"],
+        [
+            "run",
+            str(script),
+            "--open",
+            "--allow-insecure-open",
+            "--allow-legacy-pickle",
+        ],
     )
 
     assert result.exit_code == 0
-    assert created == [{"token": None, "open": True}]
+    assert created == [
+        {"token": None, "open": True, "allow_legacy_pickle": True}
+    ]
     assert "Result: done" in result.output
+
+
+def test_run_rejects_undecorated_function_without_explicit_pickle_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+):
+    script = tmp_path / "job.py"
+    script.write_text("def main():\n    return 'done'\n")
+
+    def fail_pool_import():
+        raise AssertionError("pool should not be imported")
+
+    monkeypatch.setattr("macfleet.sdk.pool.Pool", fail_pool_import)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["run", str(script), "--open", "--allow-insecure-open"],
+    )
+
+    assert result.exit_code == 1
+    assert "@macfleet.task" in result.output
+    assert "--allow-legacy-pickle" in result.output
 
 
 def test_run_script_can_import_sibling_modules(tmp_path: Path, monkeypatch):
@@ -85,7 +122,7 @@ def main():
     )
 
     class FakePool:
-        def __init__(self, *, token=None, open=False):
+        def __init__(self, *, token=None, open=False, allow_legacy_pickle=False):
             pass
 
         def __enter__(self):
@@ -102,7 +139,13 @@ def main():
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["run", str(script), "--open", "--allow-insecure-open"],
+        [
+            "run",
+            str(script),
+            "--open",
+            "--allow-insecure-open",
+            "--allow-legacy-pickle",
+        ],
     )
 
     assert result.exit_code == 0
@@ -116,3 +159,4 @@ def test_run_help_includes_insecure_ack_flag():
 
     assert result.exit_code == 0
     assert "--allow-insecure-open" in result.output
+    assert "--allow-legacy-pickle" in result.output

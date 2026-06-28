@@ -974,12 +974,19 @@ def _train_from_script(
     default=False,
     help="Required with --open. Makes unauthenticated execution explicit.",
 )
+@click.option(
+    "--allow-legacy-pickle",
+    is_flag=True,
+    default=False,
+    help="Allow trusted local-only execution of undecorated functions.",
+)
 def run_command(
     script: str,
     fn_name: str,
     token: str | None,
     open_fleet: bool,
     allow_insecure_open: bool,
+    allow_legacy_pickle: bool,
 ):
     """Run a Python script on the pool.
 
@@ -1023,13 +1030,27 @@ def run_command(
         console.print(f"[red]Error: Function '{fn_name}' not found in {script}[/red]")
         console.print(f"[dim]The script must define a callable named '{fn_name}'.[/dim]")
         sys.exit(1)
+    if not allow_legacy_pickle and not hasattr(fn, "task_name"):
+        console.print(
+            "[red]Error: macfleet run requires a function decorated with "
+            "@macfleet.task by default.[/red]"
+        )
+        console.print(
+            "[dim]Decorate the function, or re-run with --allow-legacy-pickle "
+            "for trusted local-only migration code.[/dim]"
+        )
+        sys.exit(1)
 
     console.print(f"[bold blue]MacFleet Run[/bold blue] — {script}:{fn_name}()")
 
     from macfleet.sdk.pool import Pool
 
     with _script_import_context(script):
-        with Pool(token=token, open=open_fleet) as pool:
+        with Pool(
+            token=token,
+            open=open_fleet,
+            allow_legacy_pickle=allow_legacy_pickle,
+        ) as pool:
             t0 = time.time()
             result = pool.run(fn)
             elapsed = time.time() - t0
