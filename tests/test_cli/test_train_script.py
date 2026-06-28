@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -114,6 +115,34 @@ def main(engine, epochs, batch_size, lr, compression):
         "lr": 0.03,
         "compression": "light",
     }
+
+
+def test_train_script_can_import_sibling_modules(tmp_path: Path):
+    helper = tmp_path / "train_helpers.py"
+    script = tmp_path / "train_job.py"
+    output = tmp_path / "result.txt"
+    helper.write_text(
+        """
+def format_result(epochs):
+    return f"epochs={epochs}"
+""".lstrip()
+    )
+    script.write_text(
+        f"""
+from train_helpers import format_result
+
+def main(epochs):
+    with open({str(output)!r}, "w") as f:
+        f.write(format_result(epochs))
+""".lstrip()
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["train", str(script), "--epochs", "7"])
+
+    assert result.exit_code == 0
+    assert output.read_text() == "epochs=7"
+    assert str(tmp_path) not in sys.path
 
 
 def test_train_cli_options_override_config_values(tmp_path: Path):
