@@ -91,6 +91,32 @@ macfleet info
 If `MPS Available` is no, that is okay for the smoke tests below because they
 default to CPU. The goal here is to test MacFleet's distributed plumbing.
 
+## Verify Each Mac First (single-machine self-check)
+
+Before involving the network at all, confirm MacFleet itself is sane on each
+Mac. This needs only one machine and takes a few seconds. Run it on both:
+
+```bash
+source .venv/bin/activate
+python tools/two_mac_verify.py --self-check
+```
+
+It checks import and version, network-interface detection, deterministic
+topology address selection, network-link serialization, and a single-node
+`Pool.train` that must actually reduce loss. Expect:
+
+```
+  5/5 checks passed
+```
+
+The process exits `0` only when every check passes, so you can gate a script on
+it. If a Mac fails here, fix that Mac before pairing — a broken install will
+only look like a confusing distributed bug later.
+
+If you installed from PyPI rather than this repo, copy
+`tools/two_mac_verify.py` from this repository onto each Mac and run it the same
+way.
+
 ## Pair The Macs
 
 On the stronger Mac:
@@ -169,10 +195,48 @@ Pass condition:
 
 If this fails, focus on basic networking before debugging `Pool.train`.
 
+## Verify The Full Fleet (automated, recommended)
+
+The fastest way to confirm the two Macs work together is the distributed mode
+of the same verifier you ran per-Mac. Make sure both `macfleet join` terminals
+are stopped first (see the port note above), then run this on **both** Macs
+within about 45 seconds of each other:
+
+```bash
+source .venv/bin/activate
+python tools/two_mac_verify.py
+```
+
+On each Mac it forms quorum, checks the registry (two distinct nodes, each with
+a data port and a chip name), exercises topology peer-address selection, and
+runs a distributed `Pool.train`. Each Mac prints a summary and a single machine
+-readable line, and writes `~/.macfleet/verify-<hostname>.json`:
+
+```
+  4/4 checks passed
+VERIFY-RESULT host=strong-mac world_size=2 degraded=False params_sha256=ab12cd...
+```
+
+Pass condition (this is the whole point of two Macs):
+
+- Both Macs print `4/4 checks passed`.
+- Both `VERIFY-RESULT` lines show `world_size=2` and `degraded=False`.
+- The `params_sha256` on the two Macs is **identical** — that proves the
+  gradient allreduce kept the model in sync across machines.
+
+If the two hashes differ, that is a real synchronization bug. Keep both
+`~/.macfleet/verify-*.json` artifacts and both terminal logs.
+
+Knobs (same on both Macs) match the smoke script: `DEVICE`, `COMPRESSION`,
+`EPOCHS`, `BATCH_SIZE`, `QUORUM_TIMEOUT`, and `MACFLEET_PEERS` (comma-separated
+`IP:PORT` peers when mDNS is blocked). Set `VERIFY_TRACEBACK=1` to print full
+tracebacks for any failing check.
+
 ## Smoke Test The Real Pool.train Path
 
-Now run the high-level test. This is the most useful beginner test because it
-uses the real `Pool(enable_pool_distributed=True)` API.
+The verifier above is the recommended check. This section keeps the smaller,
+hand-rolled smoke script for when you want to read exactly what the high-level
+`Pool(enable_pool_distributed=True)` API does, step by step.
 
 If you installed from this repository, run the included smoke script on both
 Macs from the repo root:
