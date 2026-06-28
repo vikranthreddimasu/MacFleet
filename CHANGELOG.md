@@ -79,6 +79,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decreasing loss, matching step counts, compression path, routing
   guards. MLX twin auto-skips when MLX is absent.
 
+### Developer tooling
+
+- Added `tools/two_mac_verify.py`, a structured PASS/FAIL verification
+  harness for two-Mac setups. `--self-check` validates a single machine
+  (import + version, interface detection, deterministic topology
+  selection, link serialization, and a single-node `Pool.train` that
+  must reduce loss); distributed mode confirms quorum, registry sanity,
+  topology peer-address selection, and a distributed `Pool.train` whose
+  `params_sha256` must match across both Macs with no degraded steps. The
+  process exit code is the number of failed checks, and distributed runs
+  write `~/.macfleet/verify-<hostname>.json` for cross-Mac comparison.
+- Added `tests/test_tools/test_two_mac_verify.py`, CI-safe coverage that
+  runs the harness self-check in-process on a single machine.
+
 ## [2.2.1] — 2026-06-28
 
 ### Added

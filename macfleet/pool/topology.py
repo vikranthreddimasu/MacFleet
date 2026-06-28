@@ -209,11 +209,11 @@ def deserialize_network_links(payload: str) -> tuple[NetworkLink, ...]:
                     link_type=link_type,
                     ip_address=ip_address,
                     bandwidth_mbps=float(
-                        item.get("b", item.get("bandwidth_mbps", 0.0))
+                        item.get("b") or item.get("bandwidth_mbps") or 0.0
                     ),
-                    latency_ms=float(item.get("l", item.get("latency_ms", 0.0))),
-                    loss_rate=float(item.get("r", item.get("loss_rate", 0.0))),
-                    mtu=int(item.get("m", item.get("mtu", 1500))),
+                    latency_ms=float(item.get("l") or item.get("latency_ms") or 0.0),
+                    loss_rate=float(item.get("r") or item.get("loss_rate") or 0.0),
+                    mtu=int(item.get("m") or item.get("mtu") or 1500),
                 )
             )
         except (KeyError, TypeError, ValueError):
