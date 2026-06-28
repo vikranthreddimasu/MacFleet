@@ -18,6 +18,7 @@ import errno
 import signal
 import sys
 import time
+from contextlib import contextmanager
 
 import click
 from rich.console import Console
@@ -48,6 +49,26 @@ def _best_pairing_host() -> str:
     except Exception:
         pass
     return "127.0.0.1"
+
+
+@contextmanager
+def _script_import_context(script: str):
+    """Temporarily import sibling modules like `python path/to/script.py`."""
+    import os
+
+    script_dir = os.path.abspath(os.path.dirname(script) or ".")
+    inserted = False
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+        inserted = True
+    try:
+        yield
+    finally:
+        if inserted:
+            try:
+                sys.path.remove(script_dir)
+            except ValueError:
+                pass
 
 
 @cli.command()
@@ -855,7 +876,8 @@ def _train_from_script(
         console.print(f"[red]Error: Cannot load script '{script}' as a Python module.[/red]")
         sys.exit(1)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with _script_import_context(script):
+        spec.loader.exec_module(module)
 
     # Expect the script to define a `main()` function.
     if hasattr(module, "main"):
@@ -875,7 +897,8 @@ def _train_from_script(
         try:
             signature = inspect.signature(main_fn)
         except (TypeError, ValueError):
-            main_fn()
+            with _script_import_context(script):
+                main_fn()
             return
 
         params = signature.parameters
@@ -926,7 +949,8 @@ def _train_from_script(
             )
             sys.exit(1)
 
-        main_fn(**kwargs)
+        with _script_import_context(script):
+            main_fn(**kwargs)
     else:
         console.print("[red]Error: Script must define a main() function.[/red]")
         console.print("[dim]Example:[/dim]")
@@ -991,7 +1015,8 @@ def run_command(
         console.print(f"[red]Error: Cannot load script '{script}' as a Python module.[/red]")
         sys.exit(1)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with _script_import_context(script):
+        spec.loader.exec_module(module)
 
     fn = getattr(module, fn_name, None)
     if fn is None or not callable(fn):
@@ -1003,10 +1028,11 @@ def run_command(
 
     from macfleet.sdk.pool import Pool
 
-    with Pool(token=token, open=open_fleet) as pool:
-        t0 = time.time()
-        result = pool.run(fn)
-        elapsed = time.time() - t0
+    with _script_import_context(script):
+        with Pool(token=token, open=open_fleet) as pool:
+            t0 = time.time()
+            result = pool.run(fn)
+            elapsed = time.time() - t0
 
     console.print(f"\n[green]Completed in {elapsed:.2f}s[/green]")
     if result is not None:
