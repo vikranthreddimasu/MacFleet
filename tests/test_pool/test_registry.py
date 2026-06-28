@@ -1,6 +1,7 @@
 """Tests for the cluster registry and coordinator election."""
 
 from macfleet.engines.base import HardwareProfile
+from macfleet.pool.network import LinkType, NetworkLink
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
 
 
@@ -51,6 +52,30 @@ class TestClusterRegistry:
         assert reg.world_size == 1
         reg.mark_alive("node-b")
         assert reg.world_size == 2
+
+    def test_update_hardware_preserves_network_links(self):
+        reg = ClusterRegistry("node-a")
+        rec = _make_node("node-a")
+        rec.network_links = (
+            NetworkLink("bridge0", LinkType.THUNDERBOLT, "10.0.0.1"),
+        )
+        reg.register(rec)
+        new_hw = HardwareProfile(
+            hostname="host-node-a",
+            node_id="node-a",
+            gpu_cores=12,
+            ram_gb=32.0,
+            memory_bandwidth_gbps=200.0,
+            has_ane=True,
+            chip_name="Apple M4 Pro",
+        )
+
+        reg.update_hardware("node-a", new_hw, new_data_port=60000)
+
+        updated = reg.get_node("node-a")
+        assert updated is not None
+        assert updated.network_links == rec.network_links
+        assert updated.data_port == 60000
 
 
 class TestCoordinatorElection:

@@ -14,6 +14,7 @@ from typing import Optional
 
 from macfleet.engines.base import HardwareProfile, ThermalPressure
 from macfleet.pool.heartbeat import NodeStatus
+from macfleet.pool.network import NetworkLink
 
 
 @dataclass
@@ -38,6 +39,7 @@ class NodeRecord:
     last_heartbeat: float = field(default_factory=time.monotonic)
     throughput_samples_sec: float = 0.0
     current_weight: float = 0.0  # assigned by scheduler
+    network_links: tuple[NetworkLink, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.data_port == 0:
@@ -177,6 +179,7 @@ class ClusterRegistry:
                 last_heartbeat=old.last_heartbeat,
                 throughput_samples_sec=old.throughput_samples_sec,
                 current_weight=old.current_weight,
+                network_links=old.network_links,
             )
             self._elect_coordinator_locked()
 

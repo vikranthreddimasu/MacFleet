@@ -140,6 +140,7 @@ class TestMdnsInfoMinimization:
         assert b"ram_gb" not in props
         assert b"chip_name" not in props
         assert b"link_types" not in props
+        assert b"network_links" not in props
         assert b"compute_score" not in props
 
     def test_open_properties_full(self):
@@ -155,6 +156,7 @@ class TestMdnsInfoMinimization:
         assert b"ram_gb" in props
         assert b"chip_name" in props
         assert b"link_types" in props
+        assert b"network_links" in props
         assert b"compute_score" in props
         assert b"data_port" in props
         assert props[b"data_port"] == b"50052"

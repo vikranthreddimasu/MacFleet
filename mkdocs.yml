@@ -61,6 +61,7 @@ nav:
     - Installation: getting-started/installation.md
     - Quickstart: getting-started/quickstart.md
     - Pairing Macs: getting-started/pairing.md
+    - Two-Mac Testing: getting-started/two-mac-testing.md
   - Guides:
     - Training with Pool.train: guides/train.md
     - Registered tasks (@macfleet.task): guides/tasks.md

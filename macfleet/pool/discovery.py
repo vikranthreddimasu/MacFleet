@@ -16,6 +16,8 @@ from zeroconf import ServiceBrowser, ServiceInfo, ServiceListener, Zeroconf
 from zeroconf.asyncio import AsyncZeroconf
 
 import macfleet
+from macfleet.pool.network import NetworkLink
+from macfleet.pool.topology import deserialize_network_links, serialize_network_links
 from macfleet.security.auth import DEFAULT_SERVICE_TYPE, SecurityConfig
 
 MACFLEET_SERVICE_TYPE = DEFAULT_SERVICE_TYPE
@@ -43,6 +45,7 @@ class DiscoveredNode:
     pool_version: str
     compute_score: float = 0.0
     data_port: int = 0  # training transport port (default 50052, 0 = not advertised)
+    network_links: tuple[NetworkLink, ...] = ()
 
     def __post_init__(self) -> None:
         # Backward compat: 2.1.x peers don't advertise data_port. Fall back to
@@ -160,6 +163,9 @@ class PoolServiceListener(ServiceListener):
             # data_port advertised since v2.2; 2.1.x peers lack this. DiscoveredNode
             # __post_init__ falls back to heartbeat port + 1 when 0.
             data_port = int(_prop(b"data_port", b"0").decode())
+            network_links = deserialize_network_links(
+                _prop(b"network_links", b"").decode()
+            )
 
             if info.port is None:
                 return None
@@ -176,6 +182,7 @@ class PoolServiceListener(ServiceListener):
                 pool_version=pool_version,
                 compute_score=compute_score,
                 data_port=data_port,
+                network_links=network_links,
             )
         except (ValueError, AttributeError):
             return None
@@ -245,6 +252,7 @@ class ServiceRegistry:
         link_types: str,
         compute_score: float,
         data_port: int,
+        network_links: tuple[NetworkLink, ...] = (),
     ) -> dict[bytes, bytes]:
         """Build mDNS service properties.
 
@@ -268,6 +276,7 @@ class ServiceRegistry:
             b"ram_gb": str(ram_gb).encode(),
             b"chip_name": chip_name.encode(),
             b"link_types": link_types.encode(),
+            b"network_links": serialize_network_links(network_links).encode(),
             b"pool_version": macfleet.__version__.encode(),
             b"compute_score": f"{compute_score:.1f}".encode(),
             b"data_port": str(data_port).encode(),
@@ -285,6 +294,7 @@ class ServiceRegistry:
         link_types: str = "",
         compute_score: float = 0.0,
         data_port: int = 0,
+        network_links: tuple[NetworkLink, ...] = (),
     ) -> None:
         """Register this node in the pool via mDNS.
 
@@ -298,7 +308,8 @@ class ServiceRegistry:
 
         service_name = f"{node_id}.{self._service_type}"
         properties = self._build_properties(
-            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score, data_port,
+            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score,
+            data_port, network_links,
         )
 
         self._service_info = ServiceInfo(
@@ -323,6 +334,7 @@ class ServiceRegistry:
         link_types: str = "",
         compute_score: float = 0.0,
         data_port: int = 0,
+        network_links: tuple[NetworkLink, ...] = (),
     ) -> None:
         """Register this node in the pool via mDNS (async).
 
@@ -336,7 +348,8 @@ class ServiceRegistry:
 
         service_name = f"{node_id}.{self._service_type}"
         properties = self._build_properties(
-            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score, data_port,
+            node_id, gpu_cores, ram_gb, chip_name, link_types, compute_score,
+            data_port, network_links,
         )
 
         self._service_info = ServiceInfo(

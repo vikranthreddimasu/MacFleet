@@ -738,7 +738,12 @@ class Pool:
 
         records = agent.registry.alive_nodes
         nodes = [
-            NodeSpec(node_id=r.node_id, ip_address=r.ip_address, data_port=r.data_port)
+            NodeSpec(
+                node_id=r.node_id,
+                ip_address=r.ip_address,
+                data_port=r.data_port,
+                network_links=r.network_links,
+            )
             for r in records
         ]
         local_id = agent.node_id

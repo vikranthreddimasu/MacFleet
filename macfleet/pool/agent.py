@@ -368,6 +368,7 @@ class PoolAgent:
             port=self.port,
             data_port=self.data_port,
             hardware=self.hardware,
+            network_links=tuple(topology.links),
         ))
 
         # 5. Register via mDNS (async to avoid EventLoopBlocked)
@@ -382,6 +383,7 @@ class PoolAgent:
             link_types=link_types_str,
             compute_score=self.hardware.compute_score,
             data_port=self.data_port,
+            network_links=tuple(topology.links),
         )
 
         # 6. Start discovery
@@ -809,6 +811,7 @@ class PoolAgent:
             port=node.port,
             data_port=node.data_port,
             hardware=hw,
+            network_links=node.network_links,
         ))
 
         # Use locally-computed score, not the broadcast one. Guard against the

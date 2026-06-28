@@ -42,6 +42,8 @@ from macfleet.comm.transport import (
     PeerTransport,
     TransportConfig,
 )
+from macfleet.pool.network import NetworkLink
+from macfleet.pool.topology import NodeTopology, best_peer_address
 from macfleet.security.auth import SecurityConfig
 
 # How long to wait between outbound connect attempts / inbound polls.
@@ -68,6 +70,14 @@ class NodeSpec:
     node_id: str
     ip_address: str
     data_port: int
+    network_links: Sequence[NetworkLink] = ()
+
+    def topology(self) -> NodeTopology:
+        return NodeTopology(
+            node_id=self.node_id,
+            default_ip=self.ip_address,
+            links=tuple(self.network_links),
+        )
 
 
 @dataclass
@@ -143,6 +153,7 @@ async def form_mesh(
     rank = ranks[local_id]
     world_size = len(nodes)
     local_spec = by_id[local_id]
+    local_topology = local_spec.topology()
 
     transport = PeerTransport(
         local_id=local_id,
@@ -170,9 +181,10 @@ async def form_mesh(
     inbound_ids = [spec.node_id for spec in nodes if spec.node_id < local_id]
 
     async def _connect_with_retry(spec: NodeSpec) -> None:
+        peer_address = best_peer_address(local_topology, spec.topology())
         while True:
             try:
-                await transport.connect(spec.node_id, spec.ip_address, spec.data_port)
+                await transport.connect(spec.node_id, peer_address, spec.data_port)
                 return
             except PeerAuthError:
                 # Wrong token can't be fixed by retrying — and each retry
@@ -182,7 +194,7 @@ async def form_mesh(
                 if time.monotonic() >= deadline:
                     raise MeshFormationError(
                         f"Could not connect to peer {spec.node_id} at "
-                        f"{spec.ip_address}:{spec.data_port} within "
+                        f"{peer_address}:{spec.data_port} within "
                         f"{rendezvous_timeout_sec:.0f}s. Check that the peer is "
                         f"running the same training script, and that "
                         f"'macfleet status' shows it as alive."

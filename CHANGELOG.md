@@ -79,6 +79,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   decreasing loss, matching step counts, compression path, routing
   guards. MLX twin auto-skips when MLX is absent.
 
+## [2.2.1] — 2026-06-28
+
+### Added
+
+- Added a lightweight pool topology model and deterministic peer-address
+  selection so distributed training can prefer likely reachable faster links
+  while preserving the existing single-IP fallback.
+- Added `docs/getting-started/two-mac-testing.md`, a beginner-friendly
+  walkthrough for testing MacFleet with a stronger Mac plus an M1 MacBook Air.
+- Added `tools/two_mac_pool_smoke.py`, a small high-level `Pool.train` smoke
+  test that verifies world size, degraded state, unsynced steps, and matching
+  final parameter hashes across two Macs.
+
+### Changed
+
+- Open-fleet mDNS now advertises compact per-interface network facts for
+  topology-aware mesh formation. Secure fleets still minimize broadcast
+  metadata and do not expose the extra interface list through mDNS.
+- Distributed `Pool.train()` now passes registry network-link facts into mesh
+  formation when available.
+
+### Tests
+
+- Added topology tests for Thunderbolt preference, off-subnet link avoidance,
+  IPv6 link-local filtering, network-link serialization, and registry
+  preservation of interface facts.
+
 ## [2.2.0] — 2026-05-01
 
 Graduates v2.2.0-rc1 to stable. Same shipped features (Phase B
