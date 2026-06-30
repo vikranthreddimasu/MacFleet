@@ -783,13 +783,27 @@ def _coerce_train_config_value(name: str, value: object):
 
 def _train_demo(engine_type: str, epochs: int, batch_size: int, lr: float):
     """Run a built-in demo training on synthetic data (single-node)."""
-    import torch
-    import torch.nn as nn
-    from torch.utils.data import DataLoader, TensorDataset
+    if engine_type == "mlx":
+        _train_demo_mlx(epochs, batch_size, lr)
+        return
+    _train_demo_torch(epochs, batch_size, lr)
+
+
+def _train_demo_torch(epochs: int, batch_size: int, lr: float) -> None:
+    """Run the built-in PyTorch demo training on synthetic data."""
+    try:
+        import torch
+        import torch.nn as nn
+        from torch.utils.data import DataLoader, TensorDataset
+    except ImportError as e:
+        raise click.ClickException(
+            "PyTorch demo training requires PyTorch. Install with "
+            "`pip install 'macfleet[torch]'`, or run `macfleet train --engine mlx`."
+        ) from e
 
     from macfleet.engines.torch_engine import TorchEngine
 
-    console.print("[bold blue]MacFleet Demo Training[/bold blue]")
+    console.print("[bold blue]MacFleet Demo Training[/bold blue] — torch")
     console.print("[dim]Single-node training on synthetic data (no peers needed)[/dim]\n")
 
     # Synthetic classification: 4 features, 2 classes
@@ -839,6 +853,88 @@ def _train_demo(engine_type: str, epochs: int, batch_size: int, lr: float):
         elapsed = time.time() - t0
         acc = correct / total * 100
         avg_loss = epoch_loss / max(len(dataloader), 1)
+        console.print(
+            f"  Epoch {epoch + 1:3d}/{epochs}  "
+            f"loss={avg_loss:.4f}  acc={acc:.1f}%  "
+            f"time={elapsed:.2f}s"
+        )
+
+    console.print("\n[green]Training complete![/green]")
+    console.print("[dim]To train across multiple Macs, use the Python SDK:[/dim]")
+    console.print("[dim]  macfleet.Pool().train(model, dataset, epochs=10)[/dim]")
+
+
+def _train_demo_mlx(epochs: int, batch_size: int, lr: float) -> None:
+    """Run the built-in MLX demo training on synthetic data."""
+    try:
+        import mlx.core as mx
+        import mlx.nn as nn
+        import mlx.optimizers as optim
+        import numpy as np
+    except ImportError as e:
+        raise click.ClickException(
+            "MLX demo training requires MLX. Install with "
+            "`pip install 'macfleet[mlx]'`, or run `macfleet train --engine torch`."
+        ) from e
+
+    from macfleet.engines.mlx_engine import MLXEngine
+
+    class TinyMLXModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.linear1 = nn.Linear(4, 32)
+            self.linear2 = nn.Linear(32, 2)
+
+        def __call__(self, x):
+            return self.linear2(nn.relu(self.linear1(x)))
+
+    def loss_fn(model, x, y):
+        return nn.losses.cross_entropy(model(x), y, reduction="mean")
+
+    console.print("[bold blue]MacFleet Demo Training[/bold blue] — mlx")
+    console.print("[dim]Single-node training on synthetic data (no peers needed)[/dim]\n")
+
+    rng = np.random.default_rng(42)
+    n_samples = 1000
+    x_np = rng.normal(size=(n_samples, 4)).astype(np.float32)
+    y_np = (x_np[:, 0] + x_np[:, 1] > 0).astype(np.int32)
+
+    model = TinyMLXModel()
+    optimizer = optim.Adam(learning_rate=lr)
+    eng = MLXEngine()
+    eng.load_model(model, optimizer, loss_fn=loss_fn)
+
+    console.print(f"  Model params: {eng.param_count():,}")
+    console.print(f"  Dataset size: {n_samples}")
+    console.print(f"  Batch size:   {batch_size}")
+    console.print(f"  Epochs:       {epochs}")
+    console.print("  Device:       mlx\n")
+
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        correct = 0
+        total = 0
+        t0 = time.time()
+        order = rng.permutation(n_samples)
+
+        for start in range(0, n_samples, batch_size):
+            batch_idx = order[start:start + batch_size]
+            batch_x = mx.array(x_np[batch_idx])
+            batch_y = mx.array(y_np[batch_idx])
+
+            eng.zero_grad()
+            loss = eng.forward((batch_x, batch_y))
+            eng.backward(loss)
+            logits = model(batch_x)
+            eng.step()
+
+            epoch_loss += float(loss)
+            correct += int((np.array(logits).argmax(axis=1) == y_np[batch_idx]).sum())
+            total += len(batch_idx)
+
+        elapsed = time.time() - t0
+        acc = correct / total * 100
+        avg_loss = epoch_loss / max((n_samples + batch_size - 1) // batch_size, 1)
         console.print(
             f"  Epoch {epoch + 1:3d}/{epochs}  "
             f"loss={avg_loss:.4f}  acc={acc:.1f}%  "
