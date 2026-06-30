@@ -38,6 +38,25 @@ logger = logging.getLogger(__name__)
 # Bounds on wire payload sizes — prevent OOM from malicious or corrupt messages.
 MAX_ARGS_BYTES = 64 * 1024 * 1024  # 64 MB msgpack args
 MAX_RESULT_BYTES = 256 * 1024 * 1024  # 256 MB msgpack result
+MAX_ERROR_TEXT_CHARS = 64 * 1024  # 64 KiB remote traceback/error text
+
+
+def _truncate_error_text(text: str) -> str:
+    """Bound remote error text while preserving the start and final exception."""
+    if len(text) <= MAX_ERROR_TEXT_CHARS:
+        return text
+
+    marker = (
+        f"\n\n...[remote error truncated from {len(text)} "
+        f"to {MAX_ERROR_TEXT_CHARS} chars]...\n\n"
+    )
+    available = MAX_ERROR_TEXT_CHARS - len(marker)
+    if available <= 0:
+        return text[:MAX_ERROR_TEXT_CHARS]
+
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return f"{text[:head_chars]}{marker}{text[-tail_chars:]}"
 
 
 class RemoteTaskError(Exception):
@@ -209,6 +228,10 @@ class TaskResult:
     ok: bool
     value: Any = None
     error: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.error, str):
+            self.error = _truncate_error_text(self.error)
 
     @classmethod
     def success(cls, task_id: str, value: Any) -> TaskResult:
