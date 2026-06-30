@@ -548,7 +548,7 @@ def diagnose(json_output: bool):
 
     passed_count = sum(1 for check in checks if check["passed"])
     total_count = len(checks)
-    report = {
+    report: dict[str, object] = {
         "status": "ok" if passed_count == total_count else "fail",
         "ready": passed_count == total_count,
         "passed": passed_count,
@@ -757,6 +757,8 @@ def _coerce_train_config_value(name: str, value: object):
     if name in {"epochs", "batch_size"}:
         if isinstance(value, bool):
             raise click.ClickException(f"Training config '{name}' must be a positive integer.")
+        if not isinstance(value, (str, bytes, bytearray, int)):
+            raise click.ClickException(f"Training config '{name}' must be a positive integer.")
         try:
             coerced = int(value)
         except (TypeError, ValueError) as e:
@@ -768,6 +770,8 @@ def _coerce_train_config_value(name: str, value: object):
         return coerced
     if name == "lr":
         if isinstance(value, bool):
+            raise click.ClickException("Training config 'lr' must be a positive finite number.")
+        if not isinstance(value, (str, bytes, bytearray, int, float)):
             raise click.ClickException("Training config 'lr' must be a positive finite number.")
         try:
             coerced_lr = float(value)
