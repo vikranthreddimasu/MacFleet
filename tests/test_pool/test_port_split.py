@@ -100,3 +100,28 @@ class TestPoolAgentPortSplit:
         agent = PoolAgent()  # no token = open fleet
         assert agent.port == 50051
         assert agent.data_port == 50052
+
+
+class TestPoolAgentRegistryLifecycle:
+    """Peer callbacks should tolerate startup/shutdown race windows."""
+
+    def test_peer_callbacks_noop_before_registry_exists(self):
+        agent = PoolAgent(token="secret-token-long-enough-to-pass-min")
+        node = DiscoveredNode(
+            hostname="peer",
+            node_id="peer-1",
+            ip_address="127.0.0.1",
+            port=50051,
+            gpu_cores=8,
+            ram_gb=16,
+            chip_name="Apple M4",
+            link_types="wifi",
+            pool_version="2.2.0",
+        )
+
+        agent._on_peer_discovered(node)
+        agent._on_peer_failed("peer-1")
+        agent._on_peer_recovered("peer-1")
+        agent._on_peer_hw_received("peer-1", b"not-json")
+
+        assert agent.registry is None
