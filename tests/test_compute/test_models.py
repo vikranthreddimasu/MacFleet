@@ -122,6 +122,31 @@ class TestTaskSpec:
         with pytest.raises(ValueError, match="exceeds max"):
             TaskSpec.unpack(giant)
 
+    def test_unpack_rejects_missing_required_fields(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "name": add_one.task_name,
+            "args": [],
+            "kwargs": {},
+            "timeout": 300.0,
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="task_id"):
+            TaskSpec.unpack(data)
+
+    def test_unpack_rejects_bad_field_shapes(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "abc123",
+            "name": add_one.task_name,
+            "args": "not-a-list",
+            "kwargs": {},
+            "timeout": 300.0,
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="args"):
+            TaskSpec.unpack(data)
+
 
 # --------------------------------------------------------------------------- #
 # Pydantic schema validation                                                  #
@@ -246,6 +271,18 @@ class TestTaskResult:
         assert len(restored.error) == MAX_ERROR_TEXT_CHARS
         assert restored.error.startswith("begin-")
         assert restored.error.endswith("-end")
+
+    def test_unpack_rejects_bad_result_shape(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "task-bad-result",
+            "ok": "false",
+            "value": None,
+            "error": "bad",
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="ok"):
+            TaskResult.unpack(data)
 
     def test_unwrap_failure_raises(self):
         result = TaskResult(task_id="bad", ok=False, error="kaboom")
