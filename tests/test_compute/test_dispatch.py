@@ -14,6 +14,7 @@ import asyncio
 import pytest
 
 from macfleet import task
+from macfleet.comm.protocol import MessageType
 from macfleet.comm.transport import PeerTransport, TransportConfig
 from macfleet.compute.authz import TaskAuthorizationPolicy
 from macfleet.compute.dispatch import TaskDispatcher
@@ -182,6 +183,54 @@ class TestDispatcherWorkerIntegration:
             with pytest.raises(RemoteTaskError) as exc_info:
                 await blocked.result(timeout=5.0)
             assert "not in the worker allowlist" in exc_info.value.remote_traceback
+
+            await tw.stop()
+            await dispatcher.stop()
+        finally:
+            await _teardown(coordinator, worker)
+
+    @pytest.mark.asyncio
+    async def test_worker_ignores_malformed_task_frame(self):
+        """A malformed TASK frame must not kill the worker listener."""
+        coordinator, worker, _ = await _setup_pair()
+        try:
+            dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+            tw = TaskWorker(worker, "coordinator", max_workers=1)
+
+            await dispatcher.start()
+            await tw.start()
+
+            await coordinator.send("worker-0", b"\x91\x01", msg_type=MessageType.TASK)
+            await asyncio.sleep(0.05)
+            assert tw._listener_task is not None
+            assert not tw._listener_task.done()
+
+            future = await dispatcher.submit(times_two, 21, timeout=5.0)
+            assert await future.result(timeout=5.0) == 42
+
+            await tw.stop()
+            await dispatcher.stop()
+        finally:
+            await _teardown(coordinator, worker)
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_ignores_malformed_result_frame(self):
+        """A malformed RESULT frame must not kill the coordinator listener."""
+        coordinator, worker, _ = await _setup_pair()
+        try:
+            dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+            tw = TaskWorker(worker, "coordinator", max_workers=1)
+
+            await dispatcher.start()
+            await tw.start()
+
+            await worker.send("coordinator", b"\x91\x01", msg_type=MessageType.RESULT)
+            await asyncio.sleep(0.05)
+            listener = dispatcher._worker_listeners["worker-0"]
+            assert not listener.done()
+
+            future = await dispatcher.submit(times_two, 21, timeout=5.0)
+            assert await future.result(timeout=5.0) == 42
 
             await tw.stop()
             await dispatcher.stop()

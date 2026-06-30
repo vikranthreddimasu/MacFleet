@@ -116,11 +116,9 @@ class TestTaskSpecBounds:
         # AttributeError leak.
         try:
             TaskSpec.unpack(blob)
-        except (ValueError, msgpack.exceptions.UnpackException, KeyError, TypeError):
-            # KeyError fires when required field 'task_id' is missing.
-            # TypeError fires when msgpack returns a non-dict at top level
-            # — the parser raises ValueError but caller can also see
-            # TypeError on bad input shape inside dataclass. All bounded.
+        except ValueError:
+            # Invalid msgpack, wrong top-level shape, missing fields, and bad
+            # field types are all normalized to ValueError.
             pass
 
 
@@ -142,12 +140,10 @@ class TestTaskSpecMalformedShape:
         ),
     )
     @settings(max_examples=50, deadline=None)
-    def test_args_wrong_shape_does_not_crash(self, bad_args):
+    def test_args_wrong_shape_is_rejected(self, bad_args):
         # Coordinator could pack a TaskSpec with args set to a non-list.
-        # The Pydantic schema (if declared) would catch it; without one,
-        # the worker iterates spec.args. Iteration over a string yields
-        # one-char strings which the user fn might or might not accept.
-        # Important: unpacking itself doesn't crash.
+        # The worker should reject this at decode time rather than iterating
+        # arbitrary objects later.
         payload = msgpack.packb({
             "task_id": "abc123",
             "name": "fuzz.target",
@@ -155,20 +151,18 @@ class TestTaskSpecMalformedShape:
             "kwargs": {},
             "timeout": 60.0,
         }, use_bin_type=True)
-        # Should not raise here — the field is just stored as-is until
-        # the worker fn tries to use it.
-        spec = TaskSpec.unpack(payload)
-        assert spec.task_id == "abc123"
+        with pytest.raises(ValueError, match="args"):
+            TaskSpec.unpack(payload)
 
     def test_missing_required_field_raises(self):
-        # Missing task_id → KeyError on construction
+        # Missing task_id is rejected as a malformed wire message.
         payload = msgpack.packb({
             "name": "fuzz.target",
             "args": [],
             "kwargs": {},
             "timeout": 60.0,
         }, use_bin_type=True)
-        with pytest.raises(KeyError):
+        with pytest.raises(ValueError, match="task_id"):
             TaskSpec.unpack(payload)
 
     def test_top_level_not_dict_raises(self):

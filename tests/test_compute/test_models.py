@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from macfleet import task
 from macfleet.compute.models import (
+    MAX_ERROR_TEXT_CHARS,
     RemoteTaskError,
     TaskFuture,
     TaskNotRegisteredError,
@@ -121,6 +122,31 @@ class TestTaskSpec:
         with pytest.raises(ValueError, match="exceeds max"):
             TaskSpec.unpack(giant)
 
+    def test_unpack_rejects_missing_required_fields(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "name": add_one.task_name,
+            "args": [],
+            "kwargs": {},
+            "timeout": 300.0,
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="task_id"):
+            TaskSpec.unpack(data)
+
+    def test_unpack_rejects_bad_field_shapes(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "abc123",
+            "name": add_one.task_name,
+            "args": "not-a-list",
+            "kwargs": {},
+            "timeout": 300.0,
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="args"):
+            TaskSpec.unpack(data)
+
 
 # --------------------------------------------------------------------------- #
 # Pydantic schema validation                                                  #
@@ -189,6 +215,29 @@ class TestTaskResult:
         assert "ValueError" in result.error
         assert "bad input" in result.error
 
+    def test_failure_error_text_is_bounded(self):
+        try:
+            raise RuntimeError("x" * (MAX_ERROR_TEXT_CHARS * 2))
+        except RuntimeError as e:
+            result = TaskResult.failure("abc123", e)
+
+        assert result.error is not None
+        assert len(result.error) == MAX_ERROR_TEXT_CHARS
+        assert "remote error truncated" in result.error
+        assert "RuntimeError" in result.error
+
+    def test_direct_failure_error_text_is_bounded(self):
+        result = TaskResult(
+            task_id="task-long-error",
+            ok=False,
+            error="prefix-" + ("x" * (MAX_ERROR_TEXT_CHARS * 2)) + "-suffix",
+        )
+
+        assert result.error is not None
+        assert len(result.error) == MAX_ERROR_TEXT_CHARS
+        assert result.error.startswith("prefix-")
+        assert result.error.endswith("-suffix")
+
     def test_pack_unpack_success(self):
         result = TaskResult.success("task-1", 42)
         data = result.pack()
@@ -206,6 +255,34 @@ class TestTaskResult:
         assert restored.task_id == "task-2"
         assert restored.ok is False
         assert restored.error == "Something broke"
+
+    def test_unpack_truncates_oversized_error_field(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "task-oversized-error",
+            "ok": False,
+            "value": None,
+            "error": "begin-" + ("x" * (MAX_ERROR_TEXT_CHARS * 2)) + "-end",
+        }, use_bin_type=True)
+        restored = TaskResult.unpack(data)
+
+        assert restored.error is not None
+        assert len(restored.error) == MAX_ERROR_TEXT_CHARS
+        assert restored.error.startswith("begin-")
+        assert restored.error.endswith("-end")
+
+    def test_unpack_rejects_bad_result_shape(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "task-bad-result",
+            "ok": "false",
+            "value": None,
+            "error": "bad",
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="ok"):
+            TaskResult.unpack(data)
 
     def test_unwrap_failure_raises(self):
         result = TaskResult(task_id="bad", ok=False, error="kaboom")

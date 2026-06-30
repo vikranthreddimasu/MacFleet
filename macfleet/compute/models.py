@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -38,6 +39,50 @@ logger = logging.getLogger(__name__)
 # Bounds on wire payload sizes — prevent OOM from malicious or corrupt messages.
 MAX_ARGS_BYTES = 64 * 1024 * 1024  # 64 MB msgpack args
 MAX_RESULT_BYTES = 256 * 1024 * 1024  # 256 MB msgpack result
+MAX_ERROR_TEXT_CHARS = 64 * 1024  # 64 KiB remote traceback/error text
+
+
+def _truncate_error_text(text: str) -> str:
+    """Bound remote error text while preserving the start and final exception."""
+    if len(text) <= MAX_ERROR_TEXT_CHARS:
+        return text
+
+    marker = (
+        f"\n\n...[remote error truncated from {len(text)} "
+        f"to {MAX_ERROR_TEXT_CHARS} chars]...\n\n"
+    )
+    available = MAX_ERROR_TEXT_CHARS - len(marker)
+    if available <= 0:
+        return text[:MAX_ERROR_TEXT_CHARS]
+
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return f"{text[:head_chars]}{marker}{text[-tail_chars:]}"
+
+
+def _unpack_msgpack_dict(data: bytes, label: str) -> dict:
+    """Decode msgpack and require a top-level mapping."""
+    try:
+        payload = msgpack.unpackb(data, raw=False)
+    except msgpack.exceptions.UnpackException as e:
+        raise ValueError(f"{label} payload is not valid msgpack") from e
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} payload not a dict: {type(payload).__name__}")
+    return payload
+
+
+def _require_str(payload: dict, key: str, label: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{label} field {key!r} must be a non-empty string")
+    return value
+
+
+def _require_bool(payload: dict, key: str, label: str) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} field {key!r} must be a bool")
+    return value
 
 
 class RemoteTaskError(Exception):
@@ -154,15 +199,24 @@ class TaskSpec:
             raise ValueError(
                 f"TaskSpec size {len(data)}B exceeds max {MAX_ARGS_BYTES}B"
             )
-        d = msgpack.unpackb(data, raw=False)
-        if not isinstance(d, dict):
-            raise ValueError(f"TaskSpec payload not a dict: {type(d).__name__}")
+        d = _unpack_msgpack_dict(data, "TaskSpec")
+        args = d["args"] if "args" in d else []
+        kwargs = d["kwargs"] if "kwargs" in d else {}
+        timeout = d.get("timeout", 300.0)
+        if not isinstance(args, list):
+            raise ValueError("TaskSpec field 'args' must be a list")
+        if not isinstance(kwargs, dict):
+            raise ValueError("TaskSpec field 'kwargs' must be a dict")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError("TaskSpec field 'timeout' must be a number")
+        if not math.isfinite(float(timeout)) or float(timeout) <= 0:
+            raise ValueError("TaskSpec field 'timeout' must be positive and finite")
         return cls(
-            task_id=d["task_id"],
-            task_name=d["name"],
-            args=d.get("args", []) or [],
-            kwargs=d.get("kwargs", {}) or {},
-            timeout_sec=d.get("timeout", 300.0),
+            task_id=_require_str(d, "task_id", "TaskSpec"),
+            task_name=_require_str(d, "name", "TaskSpec"),
+            args=args,
+            kwargs=kwargs,
+            timeout_sec=float(timeout),
         )
 
     def resolve(self) -> TaskEntry:
@@ -210,6 +264,10 @@ class TaskResult:
     value: Any = None
     error: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        if isinstance(self.error, str):
+            self.error = _truncate_error_text(self.error)
+
     @classmethod
     def success(cls, task_id: str, value: Any) -> TaskResult:
         """Create a successful result.
@@ -249,12 +307,10 @@ class TaskResult:
             raise ValueError(
                 f"TaskResult size {len(data)}B exceeds max {MAX_RESULT_BYTES}B"
             )
-        d = msgpack.unpackb(data, raw=False)
-        if not isinstance(d, dict):
-            raise ValueError(f"TaskResult payload not a dict: {type(d).__name__}")
+        d = _unpack_msgpack_dict(data, "TaskResult")
         return cls(
-            task_id=d["task_id"],
-            ok=d["ok"],
+            task_id=_require_str(d, "task_id", "TaskResult"),
+            ok=_require_bool(d, "ok", "TaskResult"),
             value=d.get("value"),
             error=d.get("error"),
         )

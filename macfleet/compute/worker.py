@@ -140,7 +140,11 @@ class TaskWorker:
                     timeout=self._transport.config.recv_timeout_sec,
                 )
                 if msg.msg_type == MessageType.TASK:
-                    spec = TaskSpec.unpack(msg.payload)
+                    try:
+                        spec = TaskSpec.unpack(msg.payload)
+                    except ValueError as e:
+                        logger.warning("Ignoring malformed TASK from %s: %s", self._coordinator, e)
+                        continue
                     inflight = asyncio.create_task(self._execute_and_reply(spec))
                     self._inflight.add(inflight)
                     inflight.add_done_callback(self._inflight.discard)

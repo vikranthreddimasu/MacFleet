@@ -199,7 +199,11 @@ class TaskDispatcher:
                     timeout=self._transport.config.recv_timeout_sec,
                 )
                 if msg.msg_type == MessageType.RESULT:
-                    result = TaskResult.unpack(msg.payload)
+                    try:
+                        result = TaskResult.unpack(msg.payload)
+                    except ValueError as e:
+                        logger.warning("Ignoring malformed RESULT from %s: %s", worker_id, e)
+                        continue
                     future = self._pending.pop(result.task_id, None)
                     self._task_to_worker.pop(result.task_id, None)
                     if future:
