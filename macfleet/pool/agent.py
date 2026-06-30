@@ -754,7 +754,11 @@ class PoolAgent:
                     has_ane=True,
                     chip_name="unknown (manual peer)",
                 )
-            self._registry.register(NodeRecord(  # type: ignore[union-attr]
+            registry = self._registry
+            heartbeat = self._heartbeat
+            if registry is None or heartbeat is None:
+                raise RuntimeError("PoolAgent manual peer registration requires start() first")
+            registry.register(NodeRecord(
                 node_id=peer_node_id,
                 hostname=peer_node_id,
                 ip_address=host,
@@ -762,7 +766,7 @@ class PoolAgent:
                 data_port=peer_data_port,
                 hardware=hw,
             ))
-            self._heartbeat.add_peer(peer_node_id, host, port, hw.compute_score)  # type: ignore[union-attr]
+            heartbeat.add_peer(peer_node_id, host, port, hw.compute_score)
 
             hw_label = (
                 f"{hw.chip_name}, {hw.gpu_cores} GPU cores, {hw.ram_gb:.0f} GB"
@@ -789,6 +793,10 @@ class PoolAgent:
         """Called when a new peer is discovered via mDNS."""
         if node.node_id == self.node_id:
             return  # Ignore self
+        registry = self._registry
+        if registry is None:
+            logger.debug("Ignoring discovered peer %s before registry initialization", node.node_id)
+            return
 
         # SECURITY: Create HardwareProfile from discovery data and compute
         # score locally from reported hardware specs. Never trust the
@@ -804,7 +812,7 @@ class PoolAgent:
             chip_name=node.chip_name,
         )
 
-        self._registry.register(NodeRecord(  # type: ignore[union-attr]
+        registry.register(NodeRecord(
             node_id=node.node_id,
             hostname=node.hostname,
             ip_address=node.ip_address,
@@ -821,10 +829,10 @@ class PoolAgent:
 
         console.print(f"[cyan]Discovered[/cyan] {node.hostname} ({node.chip_name}, {node.gpu_cores} GPU cores)")
 
-        if self._registry.is_coordinator:  # type: ignore[union-attr]
+        if registry.is_coordinator:
             console.print(
                 f"[bold yellow]This node is the coordinator[/bold yellow] "
-                f"(world_size={self._registry.world_size})"  # type: ignore[union-attr]
+                f"(world_size={registry.world_size})"
             )
 
     def _on_peer_removed(self, hostname: str) -> None:
@@ -837,12 +845,20 @@ class PoolAgent:
 
     def _on_peer_failed(self, node_id: str) -> None:
         """Called when a peer is confirmed failed."""
-        self._registry.mark_failed(node_id)  # type: ignore[union-attr]
-        console.print(f"[red]Peer failed:[/red] {node_id} (world_size={self._registry.world_size})")  # type: ignore[union-attr]
+        registry = self._registry
+        if registry is None:
+            logger.debug("Ignoring failed peer %s before registry initialization", node_id)
+            return
+        registry.mark_failed(node_id)
+        console.print(f"[red]Peer failed:[/red] {node_id} (world_size={registry.world_size})")
 
     def _on_peer_recovered(self, node_id: str) -> None:
         """Called when a suspected peer recovers."""
-        self._registry.mark_alive(node_id)  # type: ignore[union-attr]
+        registry = self._registry
+        if registry is None:
+            logger.debug("Ignoring recovered peer %s before registry initialization", node_id)
+            return
+        registry.mark_alive(node_id)
         console.print(f"[green]Peer recovered:[/green] {node_id}")
 
     def _gossip_local_hw_bytes(self) -> Optional[bytes]:
@@ -863,7 +879,8 @@ class PoolAgent:
         compute_score=0. After one successful APONG v2, this callback
         replaces the placeholder profile with the peer's real specs.
         """
-        if self._registry is None:
+        registry = self._registry
+        if registry is None:
             return
         try:
             peer_hw = HardwareExchange.from_json_bytes(peer_hw_json)
@@ -875,4 +892,4 @@ class PoolAgent:
         # mutated atomically under self._registry._lock and the coordinator
         # re-election runs in the same critical section.
         new_data_port = peer_hw.data_port if peer_hw.data_port > 0 else None
-        self._registry.update_hardware(peer_node_id, new_hw, new_data_port=new_data_port)
+        registry.update_hardware(peer_node_id, new_hw, new_data_port=new_data_port)
