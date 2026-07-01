@@ -77,6 +77,28 @@ class TestWireMessage:
         with pytest.raises(ValueError, match="CRC32 mismatch"):
             WireMessage.unpack(bytes(packed))
 
+    def test_truncated_payload_rejected(self):
+        msg = WireMessage(
+            stream_id=0,
+            msg_type=MessageType.CONTROL,
+            flags=MessageFlags.NONE,
+            sequence=0,
+            payload=b"important data",
+        )
+        with pytest.raises(ValueError, match="length mismatch"):
+            WireMessage.unpack(msg.pack()[:-1])
+
+    def test_trailing_bytes_rejected(self):
+        msg = WireMessage(
+            stream_id=0,
+            msg_type=MessageType.CONTROL,
+            flags=MessageFlags.NONE,
+            sequence=0,
+            payload=b"important data",
+        )
+        with pytest.raises(ValueError, match="length mismatch"):
+            WireMessage.unpack(msg.pack() + b"extra")
+
     def test_flags(self):
         msg = WireMessage(
             stream_id=0,

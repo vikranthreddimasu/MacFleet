@@ -139,16 +139,14 @@ class TestWireMessageMaxSize:
 
     def test_at_max_payload_is_acceptable(self):
         # Don't actually allocate 256 MB — just check the size cap accepts
-        # the boundary value when paired with that many bytes (we feed a
-        # short buffer, which then surfaces as a CRC mismatch rather than
-        # a size rejection).
+        # the boundary value and the parser then rejects the incomplete frame
+        # as a length mismatch rather than a size rejection.
         fake_header = struct.pack(
             HEADER_FORMAT,
             0, MessageType.TENSOR, MessageFlags.NONE,
             MAX_PAYLOAD_SIZE, 0, 0, 0,
         )
-        # Short buffer → CRC32 mismatch error, not size rejection.
-        with pytest.raises(ValueError, match="CRC32"):
+        with pytest.raises(ValueError, match="length mismatch"):
             WireMessage.unpack(fake_header + b"\x00" * 32)
 
 
@@ -162,7 +160,7 @@ class TestWireMessageRandomBytes:
     @settings(max_examples=400, deadline=None)
     def test_random_bytes_safe(self, data):
         # Arbitrary attacker-controlled bytes. Allowed: ValueError (size
-        # cap, CRC, MessageType validation), struct.error (header parse).
+        # cap, length, CRC, MessageType validation), struct.error (header parse).
         try:
             WireMessage.unpack(data)
         except (ValueError, struct.error):
@@ -171,7 +169,7 @@ class TestWireMessageRandomBytes:
     @given(data=st.binary(min_size=0, max_size=HEADER_SIZE - 1))
     @settings(max_examples=50, deadline=None)
     def test_short_buffer_raises_struct_error(self, data):
-        # Buffer shorter than the header — struct.unpack rejects it.
+        # Buffer shorter than the header is rejected before unpacking.
         with pytest.raises((struct.error, ValueError)):
             WireMessage.unpack(data)
 

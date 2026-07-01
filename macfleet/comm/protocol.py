@@ -85,6 +85,10 @@ class WireMessage:
     @classmethod
     def unpack(cls, data: bytes) -> "WireMessage":
         """Deserialize from bytes."""
+        if len(data) < HEADER_SIZE:
+            raise ValueError(
+                f"Incomplete wire header: expected {HEADER_SIZE} bytes, got {len(data)}"
+            )
         header = data[:HEADER_SIZE]
         stream_id, msg_type, flags, payload_size, sequence, checksum, _ = struct.unpack(
             HEADER_FORMAT, header
@@ -93,6 +97,11 @@ class WireMessage:
             raise ValueError(
                 f"Payload size {payload_size} exceeds maximum {MAX_PAYLOAD_SIZE} "
                 f"— possible OOM attack or corrupt header"
+            )
+        expected_size = HEADER_SIZE + payload_size
+        if len(data) != expected_size:
+            raise ValueError(
+                f"Wire message length mismatch: expected {expected_size} bytes, got {len(data)}"
             )
         payload = data[HEADER_SIZE : HEADER_SIZE + payload_size]
 
@@ -140,5 +149,4 @@ class WireMessage:
             payload=payload,
             checksum=checksum,
         )
-
 
