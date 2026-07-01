@@ -23,7 +23,7 @@ Deferred work from reviews. Grouped by release target.
 ### Code quality
 
 - **Issues 10, 11, 12, 14.** Pre-allocated flat gradient buffers (10). MLXEngine forward_backward to avoid 2x forward (11). In-place ring division (12). `async def async_find_peers` (14).
-- **mypy cleanup.** CI currently runs mypy with `continue-on-error: true` — 57 pre-existing Optional-unwrap + type narrowing errors in `macfleet/pool/agent.py` and `macfleet/cli/main.py`. Fix by: (a) tightening `self._registry: ClusterRegistry` (non-optional, assigned in `__init__`) instead of defaulting to None, (b) early-return guards for the `str | bytes` formatting warnings, (c) `assert spec is not None` before `module_from_spec(spec)` in cli/main.py. Then remove `continue-on-error: true` from `.github/workflows/test.yml`.
+- **Strict local typing.** CI now fails on `mypy macfleet/ --ignore-missing-imports`. The next cleanup step is to add third-party stubs or targeted overrides for optional dependencies (`qrcode`, `msgpack`, `cloudpickle`, `yaml`) so contributors can also run `mypy macfleet/` without the ignore flag.
 
 ### Performance (after v2.2 real multi-node profiling data)
 
@@ -84,4 +84,3 @@ Review history:
 
 - **2026-06-01 to 2026-06-10 — WWDC '26 hard pause.** No v2.2 release merges during keynote week. Read signals first.
 - **2027-06 — WWDC '27 revisit.** Repeat kill-switch eval.
-
