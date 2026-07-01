@@ -23,7 +23,7 @@ Deferred work from reviews. Grouped by release target.
 ### Code quality
 
 - **Issues 10, 11, 12, 14.** Pre-allocated flat gradient buffers (10). MLXEngine forward_backward to avoid 2x forward (11). In-place ring division (12). `async def async_find_peers` (14).
-- **Strict local typing.** CI now fails on `mypy macfleet/ --ignore-missing-imports`. The next cleanup step is to add third-party stubs or targeted overrides for optional dependencies (`qrcode`, `msgpack`, `cloudpickle`, `yaml`) so contributors can also run `mypy macfleet/` without the ignore flag.
+- **Strict local typing.** CI now fails on plain `mypy macfleet/`. `cloudpickle` and `msgpack` still need targeted `ignore_missing_imports` overrides because public stub packages are not available; remove those overrides if the projects publish `py.typed` metadata or external stubs.
 
 ### Performance (after v2.2 real multi-node profiling data)
 

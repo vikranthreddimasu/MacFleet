@@ -63,6 +63,10 @@ dev = [
     "pytest-cov>=4.1.0",
     # tests/test_fuzz/ uses hypothesis-based property tests
     "hypothesis>=6.0.0",
+    # Keep local `mypy macfleet/` useful without requiring contributors to
+    # remember ad-hoc stub installs.
+    "types-PyYAML>=6.0.12",
+    "types-qrcode>=8.2.0",
 ]
 docs = [
     # v2.2 PR 15 (D1): mkdocs-material docs site. Not in core deps because
@@ -103,3 +107,7 @@ ignore = ["E402", "E701", "E741"]
 python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["cloudpickle", "msgpack"]
+ignore_missing_imports = true
