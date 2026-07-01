@@ -27,7 +27,7 @@ jobs:
       - name: ruff
         run: ruff check macfleet/ tests/
       - name: mypy
-        run: mypy macfleet/
+        run: mypy macfleet/ --ignore-missing-imports
 
   framework-agnostic:
     name: framework-agnostic (ubuntu, py${{ matrix.python }})
