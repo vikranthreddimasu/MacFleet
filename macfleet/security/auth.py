@@ -784,6 +784,13 @@ def validate_gradient_metadata(
     Raises:
         GradientValidationError: If metadata is suspicious.
     """
+    if (
+        not isinstance(original_numel, int)
+        or isinstance(original_numel, bool)
+        or not isinstance(topk_count, int)
+        or isinstance(topk_count, bool)
+    ):
+        raise GradientValidationError("Gradient metadata counts must be integers.")
     if original_numel < 0 or original_numel > GRADIENT_MAX_NUMEL:
         raise GradientValidationError(
             f"Suspicious gradient metadata: original_numel={original_numel} "

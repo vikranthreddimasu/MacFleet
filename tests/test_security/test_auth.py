@@ -339,6 +339,14 @@ class TestGradientValidation:
 
 
 class TestGradientMetadataValidation:
+    @pytest.mark.parametrize(
+        ("original_numel", "topk_count"),
+        [(1.5, 1), (1, 0.5), (True, 1), (1, False)],
+    )
+    def test_non_integer_metadata_rejected(self, original_numel, topk_count):
+        with pytest.raises(GradientValidationError, match="integers"):
+            validate_gradient_metadata(original_numel, topk_count)
+
     def test_valid_metadata_passes(self):
         validate_gradient_metadata(1000, 100)  # should not raise
 
