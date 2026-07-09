@@ -20,7 +20,7 @@ from macfleet.compute.models import (
     TaskResult,
     TaskSpec,
 )
-from macfleet.compute.registry import get_default_registry
+from macfleet.compute.registry import TaskRegistry, get_default_registry
 
 # --------------------------------------------------------------------------- #
 # Tasks registered at module level for reuse across tests                     #
@@ -414,3 +414,19 @@ class TestTaskRegistry:
     def test_names_sorted(self):
         names = get_default_registry().names()
         assert names == sorted(names)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "exception", "message"),
+        [
+            ({"name": ""}, ValueError, "task name"),
+            ({"roles": ("",)}, ValueError, "roles"),
+            ({"roles": "worker"}, ValueError, "roles"),
+            ({}, TypeError, "callable"),
+        ],
+    )
+    def test_registry_rejects_invalid_registration_inputs(self, kwargs, exception, message):
+        registry = TaskRegistry()
+        fn = None if exception is TypeError else (lambda: None)
+
+        with pytest.raises(exception, match=message):
+            registry.register(fn, **kwargs)

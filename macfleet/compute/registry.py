@@ -88,9 +88,15 @@ class TaskRegistry:
         callables) shows up in normal logging output rather than
         silently masking one of them.
         """
+        if not callable(fn):
+            raise TypeError("registered task must be callable")
+        if name is not None and (not isinstance(name, str) or not name):
+            raise ValueError("task name must be a non-empty string")
         task_name = name or f"{fn.__module__}.{fn.__qualname__}"
-        if not roles:
+        if isinstance(roles, str) or not roles:
             raise ValueError("roles must contain at least one role")
+        if any(not isinstance(role, str) or not role for role in roles):
+            raise ValueError("roles must contain only non-empty strings")
         entry = TaskEntry(
             name=task_name,
             fn=fn,
