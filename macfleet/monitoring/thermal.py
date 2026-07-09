@@ -5,6 +5,7 @@ to detect throttling and trigger workload rebalancing.
 """
 
 import asyncio
+import math
 import subprocess
 import time
 from dataclasses import dataclass
@@ -163,6 +164,13 @@ class ThermalMonitor:
         on_throttle: Optional[Callable[[ThermalState], None]] = None,
         on_recover: Optional[Callable[[ThermalState], None]] = None,
     ):
+        if (
+            isinstance(poll_interval_sec, bool)
+            or not isinstance(poll_interval_sec, (int, float))
+            or not math.isfinite(float(poll_interval_sec))
+            or poll_interval_sec <= 0
+        ):
+            raise ValueError("poll_interval_sec must be a positive finite number")
         self._interval = poll_interval_sec
         self._on_throttle = on_throttle
         self._on_recover = on_recover
