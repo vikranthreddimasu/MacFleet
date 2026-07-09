@@ -367,6 +367,8 @@ class AuthRateLimiter:
     """
 
     def __init__(self, max_entries: int = 10_000):
+        if not isinstance(max_entries, int) or isinstance(max_entries, bool) or max_entries < 1:
+            raise ValueError("max_entries must be a positive integer")
         # ip -> (consecutive_failures, last_failure_time)
         self._failures: dict[str, tuple[int, float]] = {}
         self._max_entries = max_entries

@@ -358,6 +358,11 @@ class TestGradientMetadataValidation:
 
 
 class TestAuthRateLimiter:
+    @pytest.mark.parametrize("max_entries", [0, -1, True, 1.5])
+    def test_rejects_invalid_capacity(self, max_entries):
+        with pytest.raises(ValueError, match="max_entries"):
+            AuthRateLimiter(max_entries=max_entries)
+
     def test_no_failures_not_banned(self):
         rl = AuthRateLimiter()
         assert not rl.is_banned("1.2.3.4")
