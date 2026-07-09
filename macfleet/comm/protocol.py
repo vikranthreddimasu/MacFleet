@@ -94,9 +94,11 @@ class WireMessage:
                 f"Incomplete wire header: expected {HEADER_SIZE} bytes, got {len(data)}"
             )
         header = data[:HEADER_SIZE]
-        stream_id, msg_type, flags, payload_size, sequence, checksum, _ = struct.unpack(
+        stream_id, msg_type, flags, payload_size, sequence, checksum, reserved = struct.unpack(
             HEADER_FORMAT, header
         )
+        if reserved != 0:
+            raise ValueError(f"Reserved wire header field must be zero, got {reserved}")
         try:
             parsed_msg_type = MessageType(msg_type)
         except ValueError as exc:
@@ -133,9 +135,11 @@ class WireMessage:
     async def read_from_stream(cls, reader) -> "WireMessage":
         """Read a single message from an asyncio StreamReader."""
         header_data = await reader.readexactly(HEADER_SIZE)
-        stream_id, msg_type, flags, payload_size, sequence, checksum, _ = struct.unpack(
+        stream_id, msg_type, flags, payload_size, sequence, checksum, reserved = struct.unpack(
             HEADER_FORMAT, header_data
         )
+        if reserved != 0:
+            raise ValueError(f"Reserved wire header field must be zero, got {reserved}")
         try:
             parsed_msg_type = MessageType(msg_type)
         except ValueError as exc:

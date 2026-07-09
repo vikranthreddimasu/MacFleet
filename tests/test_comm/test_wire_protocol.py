@@ -98,6 +98,22 @@ class TestWireMessage:
         assert MessageFlags.CHUNKED in unpacked.flags
         assert MessageFlags.LAST_CHUNK not in unpacked.flags
 
+    def test_reserved_header_field_must_be_zero(self):
+        payload = b"data"
+        packed = struct.pack(
+            HEADER_FORMAT,
+            0,
+            MessageType.TENSOR,
+            MessageFlags.NONE,
+            len(payload),
+            0,
+            0,
+            1,
+        ) + payload
+
+        with pytest.raises(ValueError, match="Reserved wire header field"):
+            WireMessage.unpack(packed)
+
     def test_pack_rejects_payload_larger_than_wire_limit(self, monkeypatch):
         monkeypatch.setattr(protocol, "MAX_PAYLOAD_SIZE", 4)
         msg = WireMessage(
