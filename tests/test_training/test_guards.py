@@ -128,8 +128,24 @@ class TestCheckDatasetSufficient:
         assert "10 batch" in str(exc.value)
 
     def test_world_size_must_be_positive(self):
-        with pytest.raises(DatasetSizeError, match="world_size must be >= 1"):
+        with pytest.raises(DatasetSizeError, match="world_size must be a positive"):
             check_dataset_sufficient(1000, 32, 0)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "field"),
+        [
+            ({"dataset_len": True}, "dataset_len"),
+            ({"batch_size": 0}, "batch_size"),
+            ({"world_size": 1.5}, "world_size"),
+            ({"min_batches": 0}, "min_batches"),
+        ],
+    )
+    def test_invalid_count_inputs_are_rejected(self, kwargs, field):
+        values = {"dataset_len": 100, "batch_size": 10, "world_size": 1, "min_batches": 1}
+        values.update(kwargs)
+
+        with pytest.raises(DatasetSizeError, match=field):
+            check_dataset_sufficient(**values)
 
     def test_exactly_one_batch_sufficient(self):
         """dataset_len == batch_size → exactly 1 batch → OK."""

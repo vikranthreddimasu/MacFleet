@@ -97,14 +97,21 @@ def check_dataset_sufficient(
         3. smaller than one per-rank batch → tell them some ranks would
            starve, with both the global and per-rank minimums
     """
+    for name, value, minimum in (
+        ("dataset_len", dataset_len, 0),
+        ("batch_size", batch_size, 1),
+        ("world_size", world_size, 1),
+        ("min_batches", min_batches, 1),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+            qualifier = "non-negative" if minimum == 0 else "positive"
+            raise DatasetSizeError(f"{name} must be a {qualifier} integer, got {value!r}")
+
     if dataset_len <= 0:
         raise DatasetSizeError(
             "Dataset is empty. Check that your DataLoader/Dataset produces "
             "samples before calling pool.train()."
         )
-
-    if world_size < 1:
-        raise DatasetSizeError(f"world_size must be >= 1, got {world_size}")
 
     per_rank = batch_size // world_size
     if per_rank < 1:
