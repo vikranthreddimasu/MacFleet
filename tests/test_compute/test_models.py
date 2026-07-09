@@ -10,6 +10,7 @@ import asyncio
 import pytest
 from pydantic import BaseModel
 
+import macfleet.compute.models as models
 from macfleet import task
 from macfleet.compute.models import (
     MAX_ERROR_TEXT_CHARS,
@@ -121,6 +122,13 @@ class TestTaskSpec:
         giant = b"\x00" * (MAX_ARGS_BYTES + 100)
         with pytest.raises(ValueError, match="exceeds max"):
             TaskSpec.unpack(giant)
+
+    def test_pack_rejects_payload_larger_than_limit(self, monkeypatch):
+        monkeypatch.setattr(models, "MAX_ARGS_BYTES", 1)
+        spec = TaskSpec.from_call(add_one, args=(1,))
+
+        with pytest.raises(ValueError, match="TaskSpec size"):
+            spec.pack()
 
     def test_unpack_rejects_missing_required_fields(self):
         import msgpack
@@ -283,6 +291,12 @@ class TestTaskResult:
         }, use_bin_type=True)
         with pytest.raises(ValueError, match="ok"):
             TaskResult.unpack(data)
+
+    def test_pack_rejects_result_larger_than_limit(self, monkeypatch):
+        monkeypatch.setattr(models, "MAX_RESULT_BYTES", 1)
+
+        with pytest.raises(ValueError, match="TaskResult size"):
+            TaskResult.success("task", "value").pack()
 
     def test_unwrap_failure_raises(self):
         result = TaskResult(task_id="bad", ok=False, error="kaboom")

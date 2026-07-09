@@ -180,13 +180,16 @@ class TaskSpec:
 
     def pack(self) -> bytes:
         """Serialize to msgpack bytes for wire transport."""
-        return msgpack.packb({  # type: ignore[no-any-return]
+        packed = msgpack.packb({  # type: ignore[no-any-return]
             "task_id": self.task_id,
             "name": self.task_name,
             "args": self.args,
             "kwargs": self.kwargs,
             "timeout": self.timeout_sec,
         }, use_bin_type=True)
+        if len(packed) > MAX_ARGS_BYTES:
+            raise ValueError(f"TaskSpec size {len(packed)}B exceeds max {MAX_ARGS_BYTES}B")
+        return packed
 
     @classmethod
     def unpack(cls, data: bytes) -> TaskSpec:
@@ -293,12 +296,15 @@ class TaskResult:
 
     def pack(self) -> bytes:
         """Serialize to msgpack bytes for wire transport."""
-        return msgpack.packb({  # type: ignore[no-any-return]
+        packed = msgpack.packb({  # type: ignore[no-any-return]
             "task_id": self.task_id,
             "ok": self.ok,
             "value": self.value,
             "error": self.error,
         }, use_bin_type=True)
+        if len(packed) > MAX_RESULT_BYTES:
+            raise ValueError(f"TaskResult size {len(packed)}B exceeds max {MAX_RESULT_BYTES}B")
+        return packed
 
     @classmethod
     def unpack(cls, data: bytes) -> TaskResult:
