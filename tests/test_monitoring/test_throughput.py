@@ -41,6 +41,11 @@ class TestStepMetrics:
 
 
 class TestThroughputTracker:
+    @pytest.mark.parametrize("window_size", [0, -1, True, 1.5])
+    def test_rejects_invalid_window_size(self, window_size):
+        with pytest.raises(ValueError, match="window_size"):
+            ThroughputTracker(window_size=window_size)
+
     def test_empty_tracker(self):
         tracker = ThroughputTracker()
         assert tracker.avg_throughput == 0.0

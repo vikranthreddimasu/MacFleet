@@ -64,6 +64,8 @@ class ThroughputTracker:
     """
 
     def __init__(self, window_size: int = 50):
+        if not isinstance(window_size, int) or isinstance(window_size, bool) or window_size < 1:
+            raise ValueError("window_size must be a positive integer")
         self._window_size = window_size
         self._history: deque[StepMetrics] = deque(maxlen=window_size)
         self._total_steps = 0
