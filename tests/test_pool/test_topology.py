@@ -1,5 +1,7 @@
 """Tests for pool topology helpers."""
 
+import json
+
 import pytest
 
 from macfleet.pool.network import LinkType, NetworkLink
@@ -135,3 +137,13 @@ def test_network_link_serialization_round_trips_and_skips_loopback():
 def test_deserialize_network_links_ignores_bad_payloads():
     assert deserialize_network_links("not-json") == ()
     assert deserialize_network_links('{"not":"a list"}') == ()
+
+
+def test_deserialize_network_links_rejects_unusable_advertisements():
+    payload = json.dumps([
+        {"i": "", "t": "wifi", "ip": "192.168.1.20"},
+        {"i": "en0", "t": "wifi", "ip": "0.0.0.0"},
+        {"i": "lo0", "t": "loopback", "ip": "127.0.0.1"},
+    ])
+
+    assert deserialize_network_links(payload) == ()

@@ -207,8 +207,16 @@ def deserialize_network_links(payload: str) -> tuple[NetworkLink, ...]:
             continue
         try:
             link_type = LinkType(str(item.get("t", item.get("link_type"))))
-            interface = str(item.get("i", item.get("interface")))
-            ip_address = str(item.get("ip", item.get("ip_address")))
+            interface = item.get("i", item.get("interface"))
+            ip_address = item.get("ip", item.get("ip_address"))
+            if (
+                not isinstance(interface, str)
+                or not interface
+                or not isinstance(ip_address, str)
+                or not _is_dialable_address(ip_address)
+                or link_type == LinkType.LOOPBACK
+            ):
+                continue
             links.append(
                 NetworkLink(
                     interface=interface,
