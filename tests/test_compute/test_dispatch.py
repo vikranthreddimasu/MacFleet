@@ -346,3 +346,19 @@ class TestDispatcherEdgeCases:
             await dispatcher.stop()
 
         asyncio.run(run())
+
+    @pytest.mark.parametrize("max_workers", [0, -1, True, 1.5])
+    def test_worker_rejects_invalid_max_workers(self, max_workers):
+        with pytest.raises(ValueError, match="max_workers"):
+            TaskWorker(PeerTransport(local_id="solo", config=CONFIG), "coordinator", max_workers=max_workers)
+
+    def test_worker_cannot_start_twice(self):
+        worker = TaskWorker(PeerTransport(local_id="solo", config=CONFIG), "coordinator")
+
+        async def run():
+            await worker.start()
+            with pytest.raises(RuntimeError, match="already running"):
+                await worker.start()
+            await worker.stop()
+
+        asyncio.run(run())

@@ -86,6 +86,10 @@ class TaskWorker:
         max_workers: Optional[int] = None,
         policy: Optional[TaskAuthorizationPolicy] = None,
     ):
+        if max_workers is not None and (
+            not isinstance(max_workers, int) or isinstance(max_workers, bool) or max_workers < 1
+        ):
+            raise ValueError("max_workers must be a positive integer when provided")
         self._transport = transport
         self._coordinator = coordinator_peer_id
         self._max_workers = max_workers or min(os.cpu_count() or 1, 4)
@@ -100,6 +104,8 @@ class TaskWorker:
 
     async def start(self) -> None:
         """Start listening for tasks from the coordinator."""
+        if self._running:
+            raise RuntimeError("TaskWorker is already running")
         self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
         self._running = True
         self._listener_task = asyncio.create_task(self._listen_tasks())
