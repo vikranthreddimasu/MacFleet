@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,6 +23,25 @@ class TaskAuthorizationPolicy:
     allowed_tasks: Optional[frozenset[str]] = None
     denied_tasks: frozenset[str] = field(default_factory=frozenset)
     max_timeout_sec: float = 300.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.role, str) or not self.role:
+            raise ValueError("role must be a non-empty string")
+        for name, task_names in (
+            ("allowed_tasks", self.allowed_tasks),
+            ("denied_tasks", self.denied_tasks),
+        ):
+            if task_names is not None and any(
+                not isinstance(task_name, str) or not task_name for task_name in task_names
+            ):
+                raise ValueError(f"{name} must contain only non-empty task names")
+        if (
+            isinstance(self.max_timeout_sec, bool)
+            or not isinstance(self.max_timeout_sec, (int, float))
+            or not math.isfinite(float(self.max_timeout_sec))
+            or self.max_timeout_sec <= 0
+        ):
+            raise ValueError("max_timeout_sec must be a positive finite number")
 
     def authorize(self, spec, entry) -> None:
         """Raise TaskAuthorizationError if this task is not permitted."""
