@@ -221,6 +221,7 @@ async def _distributed_train_torch(
             "rank": mesh.rank,
             "world_size": mesh.world_size,
             "avg_sync_time_sec": dp.avg_sync_time_sec,
+            "unsynced_steps": dp.unsynced_steps,
             "params_sha256": params_sha,
         }
     finally:
@@ -339,6 +340,7 @@ async def _distributed_train_mlx(
             "rank": mesh.rank,
             "world_size": mesh.world_size,
             "avg_sync_time_sec": dp.avg_sync_time_sec,
+            "unsynced_steps": dp.unsynced_steps,
             "params_sha256": params_sha,
         }
     finally:

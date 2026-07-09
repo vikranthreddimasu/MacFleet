@@ -98,6 +98,8 @@ class TestDistributedTorchTrain:
         assert r0["loss_history"][-1] < r0["loss_history"][0]
         assert r1["loss_history"][-1] < r1["loss_history"][0]
         assert r0["avg_sync_time_sec"] > 0.0
+        assert r0["unsynced_steps"] == 0
+        assert r1["unsynced_steps"] == 0
 
     @pytest.mark.asyncio
     async def test_compression_path(self):
@@ -123,6 +125,8 @@ class TestDistributedTorchTrain:
         r0, r1 = await asyncio.gather(_run(0), _run(1))
         assert r0["params_sha256"] == r1["params_sha256"]
         assert r0["steps"] == r1["steps"] > 0
+        assert r0["unsynced_steps"] == 0
+        assert r1["unsynced_steps"] == 0
 
 
 class TestPoolTrainRouting:
@@ -212,3 +216,5 @@ class TestDistributedMLXTrain:
         assert r0["params_sha256"] == r1["params_sha256"]
         assert r0["steps"] == r1["steps"] > 0
         assert r0["loss_history"][-1] < r0["loss_history"][0]
+        assert r0["unsynced_steps"] == 0
+        assert r1["unsynced_steps"] == 0

@@ -80,6 +80,7 @@ class DataParallel:
         self.config = config or DataParallelConfig()
         self._step_count = 0
         self._sync_time_sec = 0.0
+        self._unsynced_steps = 0
         self._bytes_sent = 0
         # _bytes_saved is reserved for the future sparse-on-wire path
         # (TODOS Issue 3). v2.2 transmits dense gradients, so it stays
@@ -124,6 +125,11 @@ class DataParallel:
         if total == 0:
             return 1.0
         return self._bytes_sent / total
+
+    @property
+    def unsynced_steps(self) -> int:
+        """Number of steps that fell back to local (unsynced) gradients."""
+        return self._unsynced_steps
 
     def _make_compressor(self, link_type: LinkType) -> Optional[AdaptiveCompressor]:
         """Create compressor based on config."""
@@ -285,6 +291,7 @@ class DataParallel:
             logger.error("Gradient deserialization failed: %s", e)
             logger.warning("Falling back to local gradients (discarding allreduce result)")
             averaged = flat_grads
+            self._unsynced_steps += 1
         except (
             asyncio.TimeoutError,
             asyncio.IncompleteReadError,
@@ -303,6 +310,7 @@ class DataParallel:
                 "this step is not synchronized across the fleet."
             )
             averaged = flat_grads
+            self._unsynced_steps += 1
 
         # SECURITY: Validate gradients before applying to model.
         # Prevents gradient poisoning attacks (NaN, Inf, extreme magnitudes).
@@ -312,6 +320,7 @@ class DataParallel:
             logger.error("Gradient validation failed: %s", e)
             logger.warning("Falling back to local gradients (discarding allreduce result)")
             averaged = flat_grads  # use own gradients only
+            self._unsynced_steps += 1
 
         # Guard: verify allreduce didn't corrupt the shape
         if averaged.size != self._expected_grad_size:
@@ -322,6 +331,7 @@ class DataParallel:
                 averaged.size,
             )
             averaged = flat_grads
+            self._unsynced_steps += 1
 
         # Write averaged gradients back to model
         self.engine.apply_flat_gradients(averaged)

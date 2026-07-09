@@ -313,6 +313,7 @@ class TestDataParallelMetrics:
 
             assert dp0.avg_sync_time_sec > 0
             assert dp0._step_count == 1
+            assert dp0.unsynced_steps == 0
         finally:
             await _teardown_mesh(transports)
 
@@ -422,3 +423,31 @@ class TestEmptyGradientGuard:
 
         elapsed = await dp.sync_gradients()
         assert elapsed == 0.0
+
+
+class _FailingAllReduceGroup:
+    """Minimal group stub that forces the fallback path in sync_gradients()."""
+
+    world_size = 2
+    rank = 0
+
+    async def allreduce(self, array, op="mean"):
+        raise OSError("simulated dropout")
+
+
+class TestUnsyncedFallbackMetric:
+    @pytest.mark.asyncio
+    async def test_unsynced_steps_increments_on_allreduce_failure(self):
+        _, engine = _make_model_and_engine(seed=42)
+        dp = DataParallel(engine, _FailingAllReduceGroup())
+
+        engine.zero_grad()
+        loss = engine.forward(torch.randn(3, 4))
+        engine.backward(loss)
+        local = engine.get_flat_gradients().copy()
+
+        # Should fall back to local gradients, not raise.
+        await dp.sync_gradients()
+
+        np.testing.assert_allclose(engine.get_flat_gradients(), local, rtol=1e-6)
+        assert dp.unsynced_steps == 1
