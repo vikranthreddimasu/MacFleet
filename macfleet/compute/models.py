@@ -28,7 +28,7 @@ import math
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import msgpack
 
@@ -47,10 +47,7 @@ def _truncate_error_text(text: str) -> str:
     if len(text) <= MAX_ERROR_TEXT_CHARS:
         return text
 
-    marker = (
-        f"\n\n...[remote error truncated from {len(text)} "
-        f"to {MAX_ERROR_TEXT_CHARS} chars]...\n\n"
-    )
+    marker = f"\n\n...[remote error truncated from {len(text)} to {MAX_ERROR_TEXT_CHARS} chars]...\n\n"
     available = MAX_ERROR_TEXT_CHARS - len(marker)
     if available <= 0:
         return text[:MAX_ERROR_TEXT_CHARS]
@@ -95,9 +92,7 @@ class RemoteTaskError(Exception):
     def __init__(self, task_id: str, remote_traceback: str):
         self.task_id = task_id
         self.remote_traceback = remote_traceback
-        super().__init__(
-            f"Task {task_id} failed on remote worker:\n{remote_traceback}"
-        )
+        super().__init__(f"Task {task_id} failed on remote worker:\n{remote_traceback}")
 
 
 class TaskNotRegisteredError(Exception):
@@ -110,10 +105,7 @@ class TaskNotRegisteredError(Exception):
     def __init__(self, task_name: str, known: list[str]):
         self.task_name = task_name
         self.known = known
-        super().__init__(
-            f"Task {task_name!r} not registered on this worker. "
-            f"Known tasks: {known}"
-        )
+        super().__init__(f"Task {task_name!r} not registered on this worker. Known tasks: {known}")
 
 
 @dataclass
@@ -152,10 +144,7 @@ class TaskSpec:
         """
         task_name = getattr(fn, "task_name", None)
         if task_name is None:
-            raise ValueError(
-                f"Function {fn!r} is not registered. "
-                "Decorate it with @macfleet.task first."
-            )
+            raise ValueError(f"Function {fn!r} is not registered. Decorate it with @macfleet.task first.")
         if (
             isinstance(timeout, bool)
             or not isinstance(timeout, (int, float))
@@ -187,13 +176,19 @@ class TaskSpec:
 
     def pack(self) -> bytes:
         """Serialize to msgpack bytes for wire transport."""
-        packed = msgpack.packb({  # type: ignore[no-any-return]
-            "task_id": self.task_id,
-            "name": self.task_name,
-            "args": self.args,
-            "kwargs": self.kwargs,
-            "timeout": self.timeout_sec,
-        }, use_bin_type=True)
+        packed = cast(
+            bytes,
+            msgpack.packb(
+                {
+                    "task_id": self.task_id,
+                    "name": self.task_name,
+                    "args": self.args,
+                    "kwargs": self.kwargs,
+                    "timeout": self.timeout_sec,
+                },
+                use_bin_type=True,
+            ),
+        )
         if len(packed) > MAX_ARGS_BYTES:
             raise ValueError(f"TaskSpec size {len(packed)}B exceeds max {MAX_ARGS_BYTES}B")
         return packed
@@ -206,9 +201,7 @@ class TaskSpec:
         coordinator from OOMing the worker with a huge args blob.
         """
         if len(data) > MAX_ARGS_BYTES:
-            raise ValueError(
-                f"TaskSpec size {len(data)}B exceeds max {MAX_ARGS_BYTES}B"
-            )
+            raise ValueError(f"TaskSpec size {len(data)}B exceeds max {MAX_ARGS_BYTES}B")
         d = _unpack_msgpack_dict(data, "TaskSpec")
         args = d["args"] if "args" in d else []
         kwargs = d["kwargs"] if "kwargs" in d else {}
@@ -303,12 +296,18 @@ class TaskResult:
 
     def pack(self) -> bytes:
         """Serialize to msgpack bytes for wire transport."""
-        packed = msgpack.packb({  # type: ignore[no-any-return]
-            "task_id": self.task_id,
-            "ok": self.ok,
-            "value": self.value,
-            "error": self.error,
-        }, use_bin_type=True)
+        packed = cast(
+            bytes,
+            msgpack.packb(
+                {
+                    "task_id": self.task_id,
+                    "ok": self.ok,
+                    "value": self.value,
+                    "error": self.error,
+                },
+                use_bin_type=True,
+            ),
+        )
         if len(packed) > MAX_RESULT_BYTES:
             raise ValueError(f"TaskResult size {len(packed)}B exceeds max {MAX_RESULT_BYTES}B")
         return packed
@@ -317,9 +316,7 @@ class TaskResult:
     def unpack(cls, data: bytes) -> TaskResult:
         """Deserialize from msgpack bytes."""
         if len(data) > MAX_RESULT_BYTES:
-            raise ValueError(
-                f"TaskResult size {len(data)}B exceeds max {MAX_RESULT_BYTES}B"
-            )
+            raise ValueError(f"TaskResult size {len(data)}B exceeds max {MAX_RESULT_BYTES}B")
         d = _unpack_msgpack_dict(data, "TaskResult")
         return cls(
             task_id=_require_str(d, "task_id", "TaskResult"),
@@ -357,9 +354,7 @@ class TaskFuture:
     def set_result(self, result: TaskResult) -> None:
         """Called by the dispatcher when the result arrives."""
         if result.task_id != self.task_id:
-            raise ValueError(
-                f"result task_id {result.task_id!r} does not match future {self.task_id!r}"
-            )
+            raise ValueError(f"result task_id {result.task_id!r} does not match future {self.task_id!r}")
         if self.done:
             raise RuntimeError(f"result for task {self.task_id!r} was already set")
         self._result = result
