@@ -290,6 +290,11 @@ class TestHeartbeatAuth:
 
 
 class TestGradientValidation:
+    @pytest.mark.parametrize("gradients", [[1.0], np.array(["bad"], dtype=object)])
+    def test_non_numeric_gradient_inputs_rejected(self, gradients):
+        with pytest.raises(GradientValidationError, match="numeric numpy array"):
+            validate_gradients(gradients)
+
     def test_valid_gradients_pass(self):
         grads = np.random.randn(1000).astype(np.float32)
         validate_gradients(grads)  # should not raise
@@ -326,6 +331,11 @@ class TestGradientValidation:
         grads = np.array([50.0], dtype=np.float32)
         with pytest.raises(GradientValidationError):
             validate_gradients(grads, max_magnitude=10.0)
+
+    @pytest.mark.parametrize("max_magnitude", [0, -1, True, float("nan"), float("inf")])
+    def test_invalid_max_magnitude_rejected(self, max_magnitude):
+        with pytest.raises(GradientValidationError, match="max_magnitude"):
+            validate_gradients(np.array([1.0], dtype=np.float32), max_magnitude=max_magnitude)
 
 
 class TestGradientMetadataValidation:

@@ -21,6 +21,7 @@ import errno
 import hashlib
 import hmac as hmac_mod
 import logging
+import math
 import os
 import secrets
 import ssl
@@ -735,6 +736,15 @@ def validate_gradients(
     Raises:
         GradientValidationError: If gradients contain invalid values.
     """
+    if not isinstance(gradients, np.ndarray) or not np.issubdtype(gradients.dtype, np.number):
+        raise GradientValidationError("Received gradients must be a numeric numpy array.")
+    if (
+        isinstance(max_magnitude, bool)
+        or not isinstance(max_magnitude, (int, float))
+        or not math.isfinite(float(max_magnitude))
+        or max_magnitude <= 0
+    ):
+        raise GradientValidationError("max_magnitude must be a positive finite number.")
     # Empty arrays vacuously pass isfinite().all() and then crash .max() with a
     # ValueError (not GradientValidationError) — reject them explicitly so a peer
     # cannot bypass the validator with a zero-length payload.
