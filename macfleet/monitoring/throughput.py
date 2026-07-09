@@ -81,6 +81,8 @@ class ThroughputTracker:
         Returns:
             StepContext to track timing within the step.
         """
+        if not isinstance(samples, int) or isinstance(samples, bool) or samples < 1:
+            raise ValueError("samples must be a positive integer")
         if self._start_time is None:
             self._start_time = time.monotonic()
         return StepContext(self, samples)

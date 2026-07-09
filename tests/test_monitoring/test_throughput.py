@@ -52,6 +52,11 @@ class TestThroughputTracker:
         assert tracker.total_steps == 0
         assert tracker.total_samples == 0
 
+    @pytest.mark.parametrize("samples", [0, -1, True, 1.5])
+    def test_rejects_invalid_step_sample_count(self, samples):
+        with pytest.raises(ValueError, match="samples"):
+            ThroughputTracker().step(samples)
+
     def test_record_step(self):
         tracker = ThroughputTracker()
         m = StepMetrics(step=0, samples=32, compute_time_sec=0.08, sync_time_sec=0.02, step_time_sec=0.1)
