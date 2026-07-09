@@ -206,6 +206,8 @@ def generate_fleet_token() -> str:
 
 def save_fleet_token(token: str) -> None:
     """Persist a fleet token with private file permissions."""
+    if not isinstance(token, str):
+        raise ValueError("Token must be a string")
     if len(token) < MIN_TOKEN_LENGTH:
         raise ValueError(
             f"Token must be at least {MIN_TOKEN_LENGTH} characters "
@@ -278,12 +280,18 @@ class SecurityConfig:
         fleet_id: Optional[str] = None,
         tls: bool = False,
     ):
+        if fleet_id is not None and (not isinstance(fleet_id, str) or not fleet_id):
+            raise ValueError("fleet_id must be a non-empty string when provided")
+        if not isinstance(tls, bool):
+            raise ValueError("tls must be a boolean")
         self.fleet_id = fleet_id
 
         # Resolve token from env var if not passed directly
         resolved = resolve_token(token)
 
         if resolved is not None:
+            if not isinstance(resolved, str):
+                raise ValueError("Token must be a string")
             if len(resolved) < MIN_TOKEN_LENGTH:
                 raise ValueError(
                     f"Token must be at least {MIN_TOKEN_LENGTH} characters "

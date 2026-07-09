@@ -25,6 +25,7 @@ from macfleet.security.auth import (
     generate_fleet_token,
     resolve_token,
     resolve_token_with_file,
+    save_fleet_token,
     sign_heartbeat,
     validate_gradient_metadata,
     validate_gradients,
@@ -126,6 +127,18 @@ class TestSecurityConfig:
         """Empty string token is rejected."""
         with pytest.raises(ValueError, match="at least"):
             SecurityConfig(token="")
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"token": b"not-a-string"}, "Token must be a string"),
+            ({"fleet_id": ""}, "fleet_id"),
+            ({"tls": "yes"}, "tls"),
+        ],
+    )
+    def test_invalid_config_types_are_rejected(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            SecurityConfig(**kwargs)
 
 
 # ------------------------------------------------------------------ #
@@ -570,6 +583,10 @@ class TestTokenFileManagement:
         t1 = generate_fleet_token()
         t2 = generate_fleet_token()
         assert t1 != t2
+
+    def test_save_token_rejects_non_string_value(self):
+        with pytest.raises(ValueError, match="Token must be a string"):
+            save_fleet_token(b"not-a-string")
 
     def test_resolve_token_explicit_takes_priority(self):
         assert resolve_token("explicit") == "explicit"
