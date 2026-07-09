@@ -76,6 +76,12 @@ class NodeTopology:
     default_ip: str
     links: tuple[NetworkLink, ...] = field(default_factory=tuple)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.node_id, str) or not self.node_id:
+            raise ValueError("node_id must be a non-empty string")
+        if not isinstance(self.default_ip, str) or not _is_dialable_address(self.default_ip):
+            raise ValueError("default_ip must be a dialable IP address")
+
     @property
     def link_types(self) -> frozenset[LinkType]:
         return frozenset(link.link_type for link in self.links)

@@ -1,5 +1,7 @@
 """Tests for pool topology helpers."""
 
+import pytest
+
 from macfleet.pool.network import LinkType, NetworkLink
 from macfleet.pool.topology import (
     NodeTopology,
@@ -28,6 +30,15 @@ def test_best_peer_address_prefers_shared_thunderbolt():
     )
 
     assert best_peer_address(local, peer) == "10.0.0.20"
+
+
+@pytest.mark.parametrize(
+    ("node_id", "default_ip", "message"),
+    [("", "192.168.1.10", "node_id"), ("node", "0.0.0.0", "default_ip"), ("node", "bad", "default_ip")],
+)
+def test_topology_requires_dialable_identity(node_id, default_ip, message):
+    with pytest.raises(ValueError, match=message):
+        NodeTopology(node_id=node_id, default_ip=default_ip)
 
 
 def test_best_peer_address_falls_back_to_peer_default_ip():
