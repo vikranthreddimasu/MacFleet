@@ -81,7 +81,7 @@ class TestWeightedDistributedSampler:
         with pytest.raises(ValueError):
             WeightedDistributedSampler(ds, num_replicas=2, rank=0, weights=[0.5])
 
-    @pytest.mark.parametrize("weights", [[-1.0, 2.0], [0.0, 0.0], [float("nan"), 1.0], [True, 1.0]])
+    @pytest.mark.parametrize("weights", [[-1.0, 2.0], [0.0, 1.0], [float("nan"), 1.0], [True, 1.0]])
     def test_invalid_weight_values_are_rejected(self, weights):
         with pytest.raises(ValueError, match="weights"):
             WeightedDistributedSampler(_make_dataset(10), num_replicas=2, rank=0, weights=weights)
@@ -143,6 +143,16 @@ class TestDistributedBatchSampler:
         )
         batches = list(bs)
         assert all(len(b) == 10 for b in batches[:-1])
+
+    @pytest.mark.parametrize(
+        ("batch_size", "num_replicas", "message"),
+        [(0, 1, "positive integer"), (1, 2, "at least num_replicas")],
+    )
+    def test_rejects_batch_sizes_that_starve_ranks(self, batch_size, num_replicas, message):
+        with pytest.raises(ValueError, match=message):
+            DistributedBatchSampler(
+                _make_dataset(10), batch_size=batch_size, num_replicas=num_replicas, rank=0
+            )
 
 
 class TestWeightComputations:

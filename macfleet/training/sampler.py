@@ -27,10 +27,10 @@ def _normalize_weights(weights: list[float], num_replicas: int) -> list[float]:
         isinstance(weight, bool)
         or not isinstance(weight, (int, float))
         or not math.isfinite(float(weight))
-        or weight < 0
+        or weight <= 0
         for weight in weights
     ):
-        raise ValueError("weights must be finite, non-negative numbers")
+        raise ValueError("weights must be finite, positive numbers")
     total = sum(weights)
     if total <= 0:
         raise ValueError("weights must contain at least one positive value")
@@ -149,6 +149,12 @@ class DistributedBatchSampler(Sampler[list[int]]):
         seed: int = 0,
         drop_last: bool = False,
     ):
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        if batch_size < num_replicas:
+            raise ValueError(
+                "batch_size must be at least num_replicas so every rank has a sample"
+            )
         self.sampler = WeightedDistributedSampler(
             dataset=dataset,
             num_replicas=num_replicas,
