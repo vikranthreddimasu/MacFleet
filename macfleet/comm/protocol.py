@@ -47,6 +47,14 @@ class MessageFlags(IntFlag):
     HANDSHAKE_V2 = 0x08
 
 
+_KNOWN_MESSAGE_FLAGS = int(
+    MessageFlags.COMPRESSED
+    | MessageFlags.CHUNKED
+    | MessageFlags.LAST_CHUNK
+    | MessageFlags.HANDSHAKE_V2
+)
+
+
 # 24-byte header: stream_id(I) msg_type(H) flags(H) payload_size(I) sequence(I) checksum(I) reserved(I)
 HEADER_FORMAT = "!IHHIIII"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  # 24 bytes
@@ -99,6 +107,8 @@ class WireMessage:
         )
         if reserved != 0:
             raise ValueError(f"Reserved wire header field must be zero, got {reserved}")
+        if flags & ~_KNOWN_MESSAGE_FLAGS:
+            raise ValueError(f"Unknown wire message flags: {flags:#x}")
         try:
             parsed_msg_type = MessageType(msg_type)
         except ValueError as exc:
@@ -140,6 +150,8 @@ class WireMessage:
         )
         if reserved != 0:
             raise ValueError(f"Reserved wire header field must be zero, got {reserved}")
+        if flags & ~_KNOWN_MESSAGE_FLAGS:
+            raise ValueError(f"Unknown wire message flags: {flags:#x}")
         try:
             parsed_msg_type = MessageType(msg_type)
         except ValueError as exc:

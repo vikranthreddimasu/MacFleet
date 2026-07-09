@@ -114,6 +114,22 @@ class TestWireMessage:
         with pytest.raises(ValueError, match="Reserved wire header field"):
             WireMessage.unpack(packed)
 
+    def test_unknown_header_flags_are_rejected(self):
+        payload = b"data"
+        packed = struct.pack(
+            HEADER_FORMAT,
+            0,
+            MessageType.TENSOR,
+            0x10,
+            len(payload),
+            0,
+            0,
+            0,
+        ) + payload
+
+        with pytest.raises(ValueError, match="Unknown wire message flags"):
+            WireMessage.unpack(packed)
+
     def test_pack_rejects_payload_larger_than_wire_limit(self, monkeypatch):
         monkeypatch.setattr(protocol, "MAX_PAYLOAD_SIZE", 4)
         msg = WireMessage(
