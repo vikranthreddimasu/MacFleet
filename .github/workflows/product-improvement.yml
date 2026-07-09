@@ -24,8 +24,19 @@ jobs:
         id: local-time
         if: github.event_name == 'schedule'
         run: |
-          if [ "$(TZ=America/New_York date +%H)" != "03" ]; then
-            echo "Skipping because it is not 3 AM in America/New_York."
+          case "${{ github.event.schedule }}" in
+            "0 7 * * *") expected_offset="-0400" ;;
+            "0 8 * * *") expected_offset="-0500" ;;
+            *)
+              echo "Skipping unsupported schedule: ${{ github.event.schedule }}"
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          actual_offset="$(TZ=America/New_York date +%z)"
+          if [ "$actual_offset" != "$expected_offset" ]; then
+            echo "Skipping duplicate schedule for America/New_York offset $actual_offset."
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
