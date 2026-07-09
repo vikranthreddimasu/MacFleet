@@ -11,11 +11,30 @@ Example:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sized
 from typing import Iterator, Optional
 
 import torch
 from torch.utils.data import Dataset, Sampler
+
+
+def _normalize_weights(weights: list[float], num_replicas: int) -> list[float]:
+    """Validate and normalize workload weights without allowing invalid shards."""
+    if len(weights) != num_replicas:
+        raise ValueError(f"weights length {len(weights)} != num_replicas {num_replicas}")
+    if any(
+        isinstance(weight, bool)
+        or not isinstance(weight, (int, float))
+        or not math.isfinite(float(weight))
+        or weight < 0
+        for weight in weights
+    ):
+        raise ValueError("weights must be finite, non-negative numbers")
+    total = sum(weights)
+    if total <= 0:
+        raise ValueError("weights must contain at least one positive value")
+    return [float(weight) / total for weight in weights]
 
 
 class WeightedDistributedSampler(Sampler[int]):
@@ -55,12 +74,7 @@ class WeightedDistributedSampler(Sampler[int]):
         if weights is None:
             self.weights = [1.0 / num_replicas] * num_replicas
         else:
-            if len(weights) != num_replicas:
-                raise ValueError(
-                    f"weights length {len(weights)} != num_replicas {num_replicas}"
-                )
-            total = sum(weights)
-            self.weights = [w / total for w in weights]
+            self.weights = _normalize_weights(weights, num_replicas)
 
         self._recompute_counts()
 
@@ -112,12 +126,7 @@ class WeightedDistributedSampler(Sampler[int]):
 
     def set_weights(self, weights: list[float]) -> None:
         """Dynamically update weights (e.g., after scheduler rebalance)."""
-        if len(weights) != self.num_replicas:
-            raise ValueError(
-                f"weights length {len(weights)} != num_replicas {self.num_replicas}"
-            )
-        total = sum(weights)
-        self.weights = [w / total for w in weights]
+        self.weights = _normalize_weights(weights, self.num_replicas)
         self._recompute_counts()
 
 
@@ -150,12 +159,9 @@ class DistributedBatchSampler(Sampler[list[int]]):
             drop_last=drop_last,
         )
 
-        # Compute this rank's batch size
-        if weights is None:
-            weights = [1.0 / num_replicas] * num_replicas
-        total = sum(weights)
-        normalized = [w / total for w in weights]
-        self.batch_size = max(1, int(batch_size * normalized[rank]))
+        # Reuse the sampler's validated, normalized weights so allocation
+        # decisions cannot diverge between samples and batches.
+        self.batch_size = max(1, int(batch_size * self.sampler.weights[rank]))
         self.drop_last = drop_last
 
     def __iter__(self) -> Iterator[list[int]]:

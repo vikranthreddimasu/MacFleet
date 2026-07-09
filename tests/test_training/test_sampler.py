@@ -81,6 +81,19 @@ class TestWeightedDistributedSampler:
         with pytest.raises(ValueError):
             WeightedDistributedSampler(ds, num_replicas=2, rank=0, weights=[0.5])
 
+    @pytest.mark.parametrize("weights", [[-1.0, 2.0], [0.0, 0.0], [float("nan"), 1.0], [True, 1.0]])
+    def test_invalid_weight_values_are_rejected(self, weights):
+        with pytest.raises(ValueError, match="weights"):
+            WeightedDistributedSampler(_make_dataset(10), num_replicas=2, rank=0, weights=weights)
+
+    def test_invalid_weight_update_leaves_previous_allocation_intact(self):
+        sampler = WeightedDistributedSampler(_make_dataset(10), num_replicas=2, rank=0)
+
+        with pytest.raises(ValueError):
+            sampler.set_weights([0.0, 0.0])
+
+        assert sampler.weights == [0.5, 0.5]
+
     @pytest.mark.parametrize(
         ("num_replicas", "rank", "message"),
         [
