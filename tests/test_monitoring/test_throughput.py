@@ -89,6 +89,22 @@ class TestThroughputTracker:
         assert tracker.total_samples == 32
         assert tracker.avg_throughput == pytest.approx(320.0, abs=1.0)
 
+    def test_phase_markers_require_ordered_single_calls(self):
+        context = ThroughputTracker().step(1)
+
+        with pytest.raises(RuntimeError, match="inside a step context"):
+            context.compute_done()
+
+        with context:
+            with pytest.raises(RuntimeError, match="requires compute_done"):
+                context.sync_done()
+            context.compute_done()
+            with pytest.raises(RuntimeError, match="only be called once"):
+                context.compute_done()
+            context.sync_done()
+            with pytest.raises(RuntimeError, match="only be called once"):
+                context.sync_done()
+
     def test_rolling_average(self):
         tracker = ThroughputTracker(window_size=3)
 

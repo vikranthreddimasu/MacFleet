@@ -230,10 +230,20 @@ class StepContext:
 
     def compute_done(self) -> None:
         """Mark end of compute phase (forward + backward)."""
+        if self._start == 0:
+            raise RuntimeError("compute_done() must be called inside a step context")
+        if self._compute_end > 0:
+            raise RuntimeError("compute_done() may only be called once per step")
         self._compute_end = time.monotonic()
 
     def sync_done(self) -> None:
         """Mark end of sync phase (gradient allreduce)."""
+        if self._start == 0:
+            raise RuntimeError("sync_done() must be called inside a step context")
+        if self._compute_end == 0:
+            raise RuntimeError("sync_done() requires compute_done() first")
+        if self._sync_end > 0:
+            raise RuntimeError("sync_done() may only be called once per step")
         self._sync_end = time.monotonic()
 
     def record_loss(self, loss: float) -> None:
