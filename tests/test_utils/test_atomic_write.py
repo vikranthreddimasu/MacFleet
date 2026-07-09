@@ -77,6 +77,17 @@ class TestAtomicWriteBytes:
         atomic_write_bytes(target, payload)
         assert target.read_bytes() == payload
 
+    def test_zero_byte_os_write_fails_without_leaving_temp(self, tmp_path: Path, monkeypatch):
+        """A storage failure must not spin forever in the short-write loop."""
+        target = tmp_path / "checkpoint.pt"
+        monkeypatch.setattr(os, "write", lambda _fd, _data: 0)
+
+        with pytest.raises(OSError, match="failed to make progress"):
+            atomic_write_bytes(target, b"payload")
+
+        assert not target.exists()
+        assert not (tmp_path / "checkpoint.pt.tmp").exists()
+
     def test_path_accepts_str(self, tmp_path: Path):
         target = tmp_path / "from_str.bin"
         atomic_write_bytes(str(target), b"ok")

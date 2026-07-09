@@ -58,7 +58,13 @@ def atomic_write_bytes(
         try:
             written = 0
             while written < len(data):
-                written += os.write(fd, data[written:])
+                bytes_written = os.write(fd, data[written:])
+                # POSIX permits a short write. A zero-byte write would leave
+                # this loop spinning forever, which is especially harmful on
+                # the checkpoint path during a storage failure.
+                if bytes_written <= 0:
+                    raise OSError("failed to make progress writing temporary file")
+                written += bytes_written
             os.fsync(fd)
         finally:
             os.close(fd)
