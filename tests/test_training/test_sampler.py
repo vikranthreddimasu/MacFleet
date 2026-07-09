@@ -118,6 +118,20 @@ class TestWeightedDistributedSampler:
         assert sizes[0] == 60  # 50% of 120
         assert sizes[1] == 36  # 30% of 120
 
+    def test_remainder_favors_largest_fractional_weight_not_last_rank(self):
+        samplers = [
+            WeightedDistributedSampler(
+                _make_dataset(10),
+                num_replicas=3,
+                rank=rank,
+                weights=[0.34, 0.33, 0.33],
+                shuffle=False,
+            )
+            for rank in range(3)
+        ]
+
+        assert [len(sampler) for sampler in samplers] == [4, 3, 3]
+
 
 class TestDistributedBatchSampler:
     def test_batch_sizes(self):

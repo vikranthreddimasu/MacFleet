@@ -90,19 +90,20 @@ class WeightedDistributedSampler(Sampler[int]):
 
         With drop_last=True, every rank gets floor(total * weight) so the
         per-rank count is deterministic across ranks; the remainder is
-        dropped. With drop_last=False (default), the last rank picks up
-        the remainder so no sample is skipped.
+        dropped. With drop_last=False (default), remaining samples go to the
+        largest fractional remainders so no sample is skipped and rank order
+        does not systematically favor the final node.
         """
-        counts: list[int] = []
-        remaining = total_size
-        for i, weight in enumerate(self.weights):
-            is_last = i == len(self.weights) - 1
-            if is_last and not self.drop_last:
-                counts.append(remaining)
-            else:
-                count = int(total_size * weight)
-                remaining -= count
-                counts.append(count)
+        ideal_counts = [total_size * weight for weight in self.weights]
+        counts = [int(count) for count in ideal_counts]
+        if not self.drop_last:
+            remainder = total_size - sum(counts)
+            ranked_remainders = sorted(
+                range(self.num_replicas),
+                key=lambda rank: (-(ideal_counts[rank] - counts[rank]), rank),
+            )
+            for rank in ranked_remainders[:remainder]:
+                counts[rank] += 1
         return counts
 
     def __iter__(self) -> Iterator[int]:
