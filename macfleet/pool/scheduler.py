@@ -107,6 +107,12 @@ class Scheduler:
         Returns:
             List of WorkloadAssignment, one per alive node.
         """
+        if (
+            not isinstance(global_batch_size, int)
+            or isinstance(global_batch_size, bool)
+            or global_batch_size < 1
+        ):
+            raise ValueError("global_batch_size must be a positive integer")
         weights = self.compute_weights()
         ranks = self.registry.get_ranks()
 

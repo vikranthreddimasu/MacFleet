@@ -96,6 +96,11 @@ class TestSchedulerWeights:
 
 
 class TestSchedulerAssignment:
+    @pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
+    def test_rejects_invalid_global_batch_size(self, batch_size):
+        with pytest.raises(ValueError, match="global_batch_size"):
+            Scheduler(ClusterRegistry("a")).assign(batch_size)
+
     def test_batch_split(self):
         reg = ClusterRegistry("a")
         reg.register(_make_node("a", gpu_cores=10))
