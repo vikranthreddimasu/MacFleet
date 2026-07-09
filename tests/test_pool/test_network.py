@@ -1,5 +1,6 @@
 """Tests for network detection and link scoring."""
 
+from macfleet.pool import network
 from macfleet.pool.network import (
     LinkType,
     NetworkLink,
@@ -69,6 +70,16 @@ class TestNetworkTopology:
 
 
 class TestDetectInterfaces:
+    def test_subprocess_probe_errors_fall_back_cleanly(self, monkeypatch):
+        def denied(*args, **kwargs):
+            raise PermissionError("restricted environment")
+
+        monkeypatch.setattr(network.subprocess, "run", denied)
+
+        assert not network._is_wifi_interface("en0")
+        assert network._ip_to_interface("192.168.1.10") is None
+        assert network._parse_ifconfig() == []
+
     def test_detect_returns_list(self):
         links = detect_interfaces()
         assert isinstance(links, list)

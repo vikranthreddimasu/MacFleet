@@ -127,7 +127,7 @@ def _is_wifi_interface(interface: str) -> bool:
                     if i > 0 and "wi-fi" in lines[i - 1].lower():
                         return True
                     return False
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
         pass
     return False
 
@@ -188,7 +188,7 @@ def _ip_to_interface(ip: str) -> Optional[str]:
                     current_iface = line.split(":")[0]
                 if f"inet {ip} " in line and current_iface:
                     return current_iface
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
         pass
     return None
 
@@ -233,7 +233,7 @@ def _parse_ifconfig() -> list[NetworkLink]:
                         link_type=link_type,
                         ip_address=ip,
                     ))
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
         pass
 
     return links
