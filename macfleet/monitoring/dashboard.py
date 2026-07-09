@@ -6,6 +6,7 @@ per-node health, and throughput metrics.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from rich.console import Console
@@ -189,6 +190,13 @@ class Dashboard:
     """
 
     def __init__(self, refresh_rate: float = 2.0):
+        if (
+            isinstance(refresh_rate, bool)
+            or not isinstance(refresh_rate, (int, float))
+            or not math.isfinite(float(refresh_rate))
+            or refresh_rate <= 0
+        ):
+            raise ValueError("refresh_rate must be a positive finite number")
         self._console = Console()
         self._live: Optional[Live] = None
         self._refresh_rate = refresh_rate

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from macfleet.engines.base import ThermalPressure
 from macfleet.monitoring.dashboard import (
     Dashboard,
@@ -88,6 +90,11 @@ class TestBuildNetworkPanel:
 
 
 class TestDashboard:
+    @pytest.mark.parametrize("refresh_rate", [0, -1, True, float("nan"), float("inf")])
+    def test_rejects_invalid_refresh_rate(self, refresh_rate):
+        with pytest.raises(ValueError, match="refresh_rate"):
+            Dashboard(refresh_rate=refresh_rate)
+
     def test_create(self):
         dash = Dashboard()
         assert dash._nodes == []
