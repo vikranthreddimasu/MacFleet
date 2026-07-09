@@ -150,3 +150,22 @@ class TestMaxPayloadSize:
 
         with pytest.raises(asyncio.IncompleteReadError):
             await WireMessage.read_from_stream(reader)
+
+    async def test_unknown_type_rejected_before_payload_read(self):
+        """Invalid headers should fail before a peer can stream a huge body."""
+        fake_header = struct.pack(
+            HEADER_FORMAT,
+            0,
+            999,
+            MessageFlags.NONE,
+            MAX_PAYLOAD_SIZE,
+            0,
+            0,
+            0,
+        )
+        reader = asyncio.StreamReader()
+        reader.feed_data(fake_header)
+        reader.feed_eof()
+
+        with pytest.raises(ValueError, match="Unknown wire message type"):
+            await WireMessage.read_from_stream(reader)

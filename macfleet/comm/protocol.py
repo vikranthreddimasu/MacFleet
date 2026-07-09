@@ -97,6 +97,10 @@ class WireMessage:
         stream_id, msg_type, flags, payload_size, sequence, checksum, _ = struct.unpack(
             HEADER_FORMAT, header
         )
+        try:
+            parsed_msg_type = MessageType(msg_type)
+        except ValueError as exc:
+            raise ValueError(f"Unknown wire message type: {msg_type}") from exc
         if payload_size > MAX_PAYLOAD_SIZE:
             raise ValueError(
                 f"Payload size {payload_size} exceeds maximum {MAX_PAYLOAD_SIZE} "
@@ -118,7 +122,7 @@ class WireMessage:
 
         return cls(
             stream_id=stream_id,
-            msg_type=MessageType(msg_type),
+            msg_type=parsed_msg_type,
             flags=MessageFlags(flags),
             sequence=sequence,
             payload=payload,
@@ -132,6 +136,10 @@ class WireMessage:
         stream_id, msg_type, flags, payload_size, sequence, checksum, _ = struct.unpack(
             HEADER_FORMAT, header_data
         )
+        try:
+            parsed_msg_type = MessageType(msg_type)
+        except ValueError as exc:
+            raise ValueError(f"Unknown wire message type: {msg_type}") from exc
         if payload_size > MAX_PAYLOAD_SIZE:
             raise ValueError(
                 f"Payload size {payload_size} exceeds maximum {MAX_PAYLOAD_SIZE} "
@@ -147,7 +155,7 @@ class WireMessage:
 
         return cls(
             stream_id=stream_id,
-            msg_type=MessageType(msg_type),
+            msg_type=parsed_msg_type,
             flags=MessageFlags(flags),
             sequence=sequence,
             payload=payload,
