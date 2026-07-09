@@ -91,7 +91,7 @@ def audit_event(event: str, **fields: Any) -> None:
     Audit writes are best-effort: security enforcement must never depend on the
     filesystem being writable. The file is mode 0600 and the directory is 0700.
     """
-    if not event:
+    if not isinstance(event, str) or not event:
         return
 
     record = {

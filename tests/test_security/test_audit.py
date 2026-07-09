@@ -95,3 +95,13 @@ def test_audit_event_with_non_json_field_does_not_interrupt_caller(tmp_path, mon
     audit.audit_event("auth.failure", diagnostic=object())
 
     assert not audit_path.exists() or audit_path.read_text() == ""
+
+
+def test_audit_ignores_non_string_event_names(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit, "AUDIT_DIR", str(tmp_path))
+    monkeypatch.setattr(audit, "AUDIT_FILE", str(audit_path))
+
+    audit.audit_event(["not", "an", "event"])
+
+    assert not audit_path.exists()
