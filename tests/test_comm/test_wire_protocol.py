@@ -5,6 +5,7 @@ import struct
 
 import pytest
 
+import macfleet.comm.protocol as protocol
 from macfleet.comm.protocol import (
     HEADER_FORMAT,
     HEADER_SIZE,
@@ -96,6 +97,19 @@ class TestWireMessage:
         assert MessageFlags.COMPRESSED in unpacked.flags
         assert MessageFlags.CHUNKED in unpacked.flags
         assert MessageFlags.LAST_CHUNK not in unpacked.flags
+
+    def test_pack_rejects_payload_larger_than_wire_limit(self, monkeypatch):
+        monkeypatch.setattr(protocol, "MAX_PAYLOAD_SIZE", 4)
+        msg = WireMessage(
+            stream_id=0,
+            msg_type=MessageType.TENSOR,
+            flags=MessageFlags.NONE,
+            sequence=0,
+            payload=b"oversized",
+        )
+
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            msg.pack()
 
 
 class TestMaxPayloadSize:

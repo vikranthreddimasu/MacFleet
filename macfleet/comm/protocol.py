@@ -69,6 +69,10 @@ class WireMessage:
 
     def pack(self) -> bytes:
         """Serialize to bytes (header + payload)."""
+        if len(self.payload) > MAX_PAYLOAD_SIZE:
+            raise ValueError(
+                f"Payload size {len(self.payload)} exceeds maximum {MAX_PAYLOAD_SIZE}"
+            )
         checksum = zlib.crc32(self.payload) & 0xFFFFFFFF
         header = struct.pack(
             HEADER_FORMAT,
@@ -149,4 +153,3 @@ class WireMessage:
             payload=payload,
             checksum=checksum,
         )
-
