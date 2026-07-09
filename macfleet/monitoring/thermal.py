@@ -230,6 +230,12 @@ class ThermalMonitor:
 
 def estimate_safe_batch_size(current_batch_size: int, thermal_state: ThermalState) -> int:
     """Estimate a safe batch size given thermal state."""
+    if (
+        not isinstance(current_batch_size, int)
+        or isinstance(current_batch_size, bool)
+        or current_batch_size < 1
+    ):
+        raise ValueError("current_batch_size must be a positive integer")
     multiplier = thermal_state.workload_multiplier
     return max(1, int(current_batch_size * multiplier))
 
