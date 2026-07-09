@@ -322,3 +322,27 @@ class TestDispatcherEdgeCases:
         # asyncio.run() leaves the main thread without a current loop,
         # making get_event_loop() raise on py3.10+ (CI-order dependent).
         asyncio.run(run())
+
+    def test_submit_requires_started_dispatcher(self):
+        transport = PeerTransport(local_id="solo", config=CONFIG)
+        dispatcher = TaskDispatcher(transport, ["worker-0"])
+
+        async def run():
+            with pytest.raises(RuntimeError, match="must be started"):
+                await dispatcher.submit(times_two, 42)
+
+        asyncio.run(run())
+
+    def test_dispatcher_cannot_start_twice_and_can_restart_after_stop(self):
+        transport = PeerTransport(local_id="solo", config=CONFIG)
+        dispatcher = TaskDispatcher(transport, ["worker-0"])
+
+        async def run():
+            await dispatcher.start()
+            with pytest.raises(RuntimeError, match="already running"):
+                await dispatcher.start()
+            await dispatcher.stop()
+            await dispatcher.start()
+            await dispatcher.stop()
+
+        asyncio.run(run())

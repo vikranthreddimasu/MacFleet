@@ -55,6 +55,8 @@ class TaskDispatcher:
 
     async def start(self) -> None:
         """Start per-worker result listeners."""
+        if self._running:
+            raise RuntimeError("TaskDispatcher is already running")
         if not self._workers:
             return
         self._running = True
@@ -93,6 +95,7 @@ class TaskDispatcher:
                 )
         self._pending.clear()
         self._task_to_worker.clear()
+        self._worker_listeners.clear()
 
     def _fail_pending_for_worker(self, worker_id: str, reason: str) -> None:
         """Fail just the tasks routed to a dead worker; leave others alone."""
@@ -118,6 +121,8 @@ class TaskDispatcher:
         """
         if not self._workers:
             raise RuntimeError("No workers available")
+        if not self._running:
+            raise RuntimeError("TaskDispatcher must be started before submitting tasks")
 
         spec = TaskSpec.from_call(fn, args, kwargs, timeout=timeout)
         future = TaskFuture(task_id=spec.task_id)
