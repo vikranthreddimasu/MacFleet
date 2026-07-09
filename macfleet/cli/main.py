@@ -14,9 +14,11 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import signal
 import sys
 import time
+import warnings
 
 import click
 from rich.console import Console
@@ -25,6 +27,13 @@ from rich.table import Table
 import macfleet
 
 console = Console()
+
+_SUPPORTED_COMPRESSION_LEVELS = ["none", "light", "moderate", "aggressive", "adaptive"]
+_LEGACY_COMPRESSION_ALIASES = {
+    "topk": "moderate",
+    "fp16": "light",
+    "topk_fp16": "moderate",
+}
 
 
 @click.group()
@@ -350,7 +359,15 @@ def diagnose():
 @click.option("--epochs", default=10, help="Number of training epochs")
 @click.option("--batch-size", default=128, help="Global batch size")
 @click.option("--lr", default=0.001, help="Learning rate")
-@click.option("--compression", default="none", help="Compression: none, topk, fp16, topk_fp16")
+@click.option(
+    "--compression",
+    type=click.Choice(_SUPPORTED_COMPRESSION_LEVELS + sorted(_LEGACY_COMPRESSION_ALIASES)),
+    default="none",
+    help=(
+        "Compression: none, light, moderate, aggressive, adaptive "
+        "(legacy aliases: topk, fp16, topk_fp16)"
+    ),
+)
 @click.option("--config", "config_path", default=None, help="YAML config file")
 def train(
     script: str | None,
@@ -367,6 +384,7 @@ def train(
     `model` and `dataset` variables. Otherwise, runs a built-in demo
     (small MLP on synthetic data) useful for testing the pipeline.
     """
+    compression = _normalize_compression(compression)
     if script:
         _train_from_script(script, engine, epochs, batch_size, lr, compression)
     else:
@@ -468,9 +486,16 @@ def _train_from_script(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    # Expect the script to define a `main()` function or `model`/`dataset`
+    # Expect the script to define a `main()` function.
     if hasattr(module, "main"):
-        module.main()
+        _invoke_train_main(
+            module.main,
+            engine=engine_type,
+            epochs=epochs,
+            batch_size=batch_size,
+            lr=lr,
+            compression=compression,
+        )
     else:
         console.print("[red]Error: Script must define a main() function.[/red]")
         console.print("[dim]Example:[/dim]")
@@ -478,6 +503,36 @@ def _train_from_script(
         console.print("[dim]      model = MyModel()[/dim]")
         console.print("[dim]      macfleet.train(model, dataset, epochs=10)[/dim]")
         sys.exit(1)
+
+
+def _normalize_compression(compression: str) -> str:
+    mapped = _LEGACY_COMPRESSION_ALIASES.get(compression)
+    if mapped is None:
+        return compression
+    warnings.warn(
+        f"--compression={compression!r} is deprecated; use {mapped!r}",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return mapped
+
+
+def _invoke_train_main(main_fn, **cli_kwargs):
+    """Invoke script main() with compatible CLI kwargs.
+
+    Backward-compatible with zero-argument scripts while letting scripts opt in
+    to specific parameters (engine, epochs, batch_size, lr, compression).
+    """
+    params = inspect.signature(main_fn).parameters
+    if not params:
+        return main_fn()
+    accepts_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if accepts_kwargs:
+        return main_fn(**cli_kwargs)
+    accepted = {k: v for k, v in cli_kwargs.items() if k in params}
+    return main_fn(**accepted)
 
 
 @cli.command(name="run")
