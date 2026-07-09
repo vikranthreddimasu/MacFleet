@@ -10,6 +10,7 @@ import asyncio
 import numpy as np
 import pytest
 
+import macfleet.comm.collectives as collectives
 from macfleet.comm.collectives import (
     CollectiveGroup,
     pack_array,
@@ -73,6 +74,16 @@ class TestArraySerialization:
         arr = np.zeros((1,) * 9, dtype=np.float32)
         with pytest.raises(ValueError, match="too many dimensions"):
             pack_array(arr)
+
+    def test_rejects_non_array_input(self):
+        with pytest.raises(TypeError, match="numpy.ndarray"):
+            pack_array([1, 2, 3])
+
+    def test_rejects_array_larger_than_decode_limit(self, monkeypatch):
+        monkeypatch.setattr(collectives, "MAX_ARRAY_NUMEL", 2)
+
+        with pytest.raises(ValueError, match="element count"):
+            pack_array(np.zeros(3, dtype=np.float32))
 
 
 # --------------------------------------------------------------------------- #

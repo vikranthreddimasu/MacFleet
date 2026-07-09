@@ -53,6 +53,10 @@ ALLOWED_ARRAY_DTYPES = frozenset({
 
 def pack_array(array: np.ndarray) -> bytes:
     """Serialize a numpy array to bytes with shape/dtype metadata."""
+    if not isinstance(array, np.ndarray):
+        raise TypeError("array serialization requires a numpy.ndarray")
+    if array.size > MAX_ARRAY_NUMEL:
+        raise ValueError(f"Array element count {array.size} exceeds limit {MAX_ARRAY_NUMEL}")
     dtype_str = str(array.dtype).encode("utf-8")
     ndims = len(array.shape)
     if len(dtype_str) > MAX_ARRAY_DTYPE_LEN:
