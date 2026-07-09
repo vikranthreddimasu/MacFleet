@@ -354,6 +354,37 @@ class TestScatter:
         np.testing.assert_array_equal(result, arr)
 
     @pytest.mark.asyncio
+    async def test_single_node_source_requires_array(self):
+        """Single-node scatter rejects None on source rank."""
+        t = PeerTransport(local_id="solo", config=CONFIG)
+        group = CollectiveGroup(rank=0, world_size=1, transport=t, rank_to_peer={})
+
+        with pytest.raises(
+            ValueError, match="scatter source rank requires a non-None array"
+        ):
+            await group.scatter(None)
+
+    @pytest.mark.asyncio
+    async def test_source_requires_array_before_split(self):
+        """Source rank rejects None before attempting array_split."""
+        t = PeerTransport(local_id="r0", config=CONFIG)
+        group = CollectiveGroup(rank=0, world_size=2, transport=t, rank_to_peer={1: "r1"})
+
+        with pytest.raises(
+            ValueError, match="scatter source rank requires a non-None array"
+        ):
+            await group.scatter(None, src=0)
+
+    @pytest.mark.asyncio
+    async def test_invalid_src_raises_value_error(self):
+        """Scatter validates src range before any split/send logic."""
+        t = PeerTransport(local_id="solo", config=CONFIG)
+        group = CollectiveGroup(rank=0, world_size=1, transport=t, rank_to_peer={})
+
+        with pytest.raises(ValueError, match=r"src must be in \[0, 0\], got 1"):
+            await group.scatter(np.arange(4, dtype=np.float32), src=1)
+
+    @pytest.mark.asyncio
     async def test_two_nodes(self):
         """Scatter splits array into 2 chunks."""
         transports, _ = await _setup_mesh(2)

@@ -272,10 +272,22 @@ class CollectiveGroup:
         Returns:
             This rank's chunk of the array.
         """
+        if not (0 <= src < self.world_size):
+            raise ValueError(
+                f"src must be in [0, {self.world_size - 1}], got {src}"
+            )
+
+        if self.rank == src and array is None:
+            raise ValueError("scatter source rank requires a non-None array")
+
         if self.world_size == 1:
+            # The only rank is the source when world_size == 1, so array is
+            # guaranteed to be present by the source-rank guard above.
+            assert array is not None
             return array
 
         if self.rank == src:
+            assert array is not None
             chunks = np.array_split(array, self.world_size)
             sends = [
                 self._send_array(r, chunks[r])
