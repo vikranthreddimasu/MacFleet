@@ -34,6 +34,29 @@ class TestStepMetrics:
         assert m.throughput == 0.0
         assert m.compute_pct == 0.0
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("step", -1),
+            ("samples", -1),
+            ("compute_time_sec", -0.1),
+            ("sync_time_sec", float("nan")),
+            ("step_time_sec", float("inf")),
+        ],
+    )
+    def test_rejects_invalid_metrics(self, field, value):
+        kwargs = {
+            "step": 0,
+            "samples": 32,
+            "compute_time_sec": 0.08,
+            "sync_time_sec": 0.02,
+            "step_time_sec": 0.1,
+        }
+        kwargs[field] = value
+
+        with pytest.raises(ValueError, match=field):
+            StepMetrics(**kwargs)
+
 
 # ------------------------------------------------------------------ #
 # ThroughputTracker manual recording                                 #

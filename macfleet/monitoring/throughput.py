@@ -7,6 +7,7 @@ dynamic weight adjustment.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -23,6 +24,24 @@ class StepMetrics:
     step_time_sec: float        # total step time
     loss: Optional[float] = None   # None = not recorded (distinct from a real 0.0 loss)
     timestamp: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 0:
+            raise ValueError("step must be a non-negative integer")
+        if not isinstance(self.samples, int) or isinstance(self.samples, bool) or self.samples < 0:
+            raise ValueError("samples must be a non-negative integer")
+        for name, value in (
+            ("compute_time_sec", self.compute_time_sec),
+            ("sync_time_sec", self.sync_time_sec),
+            ("step_time_sec", self.step_time_sec),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative finite number")
 
     @property
     def throughput(self) -> float:
