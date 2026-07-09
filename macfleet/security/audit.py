@@ -124,8 +124,10 @@ def audit_event(event: str, **fields: Any) -> None:
         current = stat.S_IMODE(path.stat().st_mode)
         if current & 0o077:
             os.chmod(path, 0o600)
-    except OSError:
-        # Deliberately swallow. The primary action should still proceed.
+    except (OSError, TypeError, ValueError):
+        # Deliberately swallow. Audit logging must never make the primary
+        # security or training action fail, including for an unexpected field
+        # that JSON cannot serialize.
         return
 
 

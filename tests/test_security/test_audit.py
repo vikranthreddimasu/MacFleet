@@ -85,3 +85,13 @@ def test_audit_file_symlink_is_not_followed(tmp_path, monkeypatch):
     audit.audit_event("auth.failure", peer_ip="127.0.0.1")
 
     assert target.read_text() == "keep-me\n"
+
+
+def test_audit_event_with_non_json_field_does_not_interrupt_caller(tmp_path, monkeypatch):
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit, "AUDIT_DIR", str(tmp_path))
+    monkeypatch.setattr(audit, "AUDIT_FILE", str(audit_path))
+
+    audit.audit_event("auth.failure", diagnostic=object())
+
+    assert not audit_path.exists() or audit_path.read_text() == ""
