@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import macfleet.monitoring.health as health_module
 from macfleet.engines.base import ThermalPressure
 from macfleet.monitoring.health import (
     HealthMonitor,
@@ -11,6 +12,8 @@ from macfleet.monitoring.health import (
     MemoryInfo,
     NodeHealth,
     _analyze_loss_trend,
+    get_battery_info,
+    get_memory_info,
 )
 from macfleet.monitoring.thermal import ThermalState
 
@@ -27,6 +30,16 @@ class TestMemoryInfo:
     def test_zero_total(self):
         mem = MemoryInfo(total_gb=0.0)
         assert mem.usage_pct == 0.0
+
+    def test_system_probe_os_error_returns_empty_snapshot(self, monkeypatch):
+        monkeypatch.setattr(
+            health_module.subprocess,
+            "run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+        )
+
+        assert get_memory_info() == MemoryInfo()
+        assert get_battery_info() == (None, None)
 
 
 # ------------------------------------------------------------------ #

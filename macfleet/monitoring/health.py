@@ -166,7 +166,7 @@ def get_memory_info() -> MemoryInfo:
                 used_gb=used_pages * to_gb,
                 available_gb=available_pages * to_gb,
             )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
         pass
 
     # Fallback: sysctl
@@ -178,7 +178,7 @@ def get_memory_info() -> MemoryInfo:
         if result.returncode == 0:
             total_bytes = int(result.stdout.strip())
             return MemoryInfo(total_gb=total_bytes / (1024**3))
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError, ValueError):
         pass
 
     return MemoryInfo()
@@ -206,7 +206,7 @@ def get_battery_info() -> tuple[Optional[float], Optional[bool]]:
                         return float(pct_str), is_plugged
                     except (ValueError, IndexError):
                         pass
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
         pass
 
     return None, None
