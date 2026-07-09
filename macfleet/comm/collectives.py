@@ -151,10 +151,25 @@ class CollectiveGroup:
         rank_to_peer: dict[int, str],
         config: Optional[CollectiveConfig] = None,
     ):
+        if not isinstance(world_size, int) or isinstance(world_size, bool) or world_size < 1:
+            raise ValueError("world_size must be a positive integer")
+        if not isinstance(rank, int) or isinstance(rank, bool) or not 0 <= rank < world_size:
+            raise ValueError(f"rank must be an integer in [0, {world_size}), got {rank!r}")
+        expected_ranks = set(range(world_size)) - {rank}
+        if set(rank_to_peer) != expected_ranks:
+            raise ValueError(
+                "rank_to_peer must map every non-local rank exactly once; "
+                f"expected {sorted(expected_ranks)}, got {sorted(rank_to_peer)}"
+            )
+        peer_ids = list(rank_to_peer.values())
+        if any(not isinstance(peer_id, str) or not peer_id for peer_id in peer_ids):
+            raise ValueError("rank_to_peer values must be non-empty peer IDs")
+        if len(set(peer_ids)) != len(peer_ids):
+            raise ValueError("rank_to_peer must not assign one peer ID to multiple ranks")
         self.rank = rank
         self.world_size = world_size
         self._transport = transport
-        self._rank_to_peer = rank_to_peer  # rank -> peer_id (excludes self)
+        self._rank_to_peer = dict(rank_to_peer)  # rank -> peer_id (excludes self)
         self._config = config or CollectiveConfig()
 
     def _peer_for_rank(self, rank: int) -> str:

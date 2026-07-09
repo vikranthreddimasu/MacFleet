@@ -110,6 +110,25 @@ class TestCollectiveConfiguration:
         with pytest.raises(asyncio.TimeoutError):
             await group._recv_array(1)
 
+    @pytest.mark.parametrize(
+        ("rank", "world_size", "peers", "message"),
+        [
+            (0, 0, {}, "world_size"),
+            (2, 2, {0: "node-0"}, "rank"),
+            (0, 3, {1: "node-1"}, "every non-local rank"),
+            (0, 3, {1: "node-1", 2: "node-1"}, "multiple ranks"),
+            (0, 2, {1: ""}, "non-empty peer IDs"),
+        ],
+    )
+    def test_rejects_invalid_group_topology(self, rank, world_size, peers, message):
+        with pytest.raises(ValueError, match=message):
+            CollectiveGroup(
+                rank=rank,
+                world_size=world_size,
+                transport=SimpleNamespace(),
+                rank_to_peer=peers,
+            )
+
 
 # --------------------------------------------------------------------------- #
 # Helpers for multi-node loopback tests                                       #
