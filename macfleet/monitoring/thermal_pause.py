@@ -28,6 +28,7 @@ self-check loops AND future coordinator code can build on.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -65,6 +66,25 @@ class ThermalPauseConfig:
     # How often the controller re-reads the OS thermal state (via
     # `get_thermal_state()`). A tight poll is fine — pmset is O(ms).
     poll_interval_sec: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pause_at, ThermalPressure) or not isinstance(
+            self.resume_at, ThermalPressure
+        ):
+            raise ValueError("pause_at and resume_at must be ThermalPressure values")
+        if _pressure_rank(self.pause_at) < _pressure_rank(self.resume_at):
+            raise ValueError("pause_at must be at least as severe as resume_at")
+        for name, value in (
+            ("min_pause_sec", self.min_pause_sec),
+            ("poll_interval_sec", self.poll_interval_sec),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative finite number")
 
 
 @dataclass

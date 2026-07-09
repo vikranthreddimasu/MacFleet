@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from macfleet.engines.base import ThermalPressure
 from macfleet.monitoring.thermal import ThermalState
 from macfleet.monitoring.thermal_pause import (
@@ -27,6 +29,18 @@ class FakeThermalReader:
 
 
 class TestThermalPauseFSM:
+    def test_rejects_invalid_hysteresis_configuration(self):
+        with pytest.raises(ValueError, match="pause_at"):
+            ThermalPauseConfig(
+                pause_at=ThermalPressure.FAIR,
+                resume_at=ThermalPressure.SERIOUS,
+            )
+
+    @pytest.mark.parametrize("field", ["min_pause_sec", "poll_interval_sec"])
+    def test_rejects_invalid_timing_configuration(self, field):
+        with pytest.raises(ValueError, match=field):
+            ThermalPauseConfig(**{field: float("nan")})
+
     def test_starts_running(self):
         ctrl = ThermalPauseController(read_thermal=FakeThermalReader())
         assert ctrl.state == PauseState.RUNNING
