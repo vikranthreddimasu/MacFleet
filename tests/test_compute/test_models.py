@@ -72,6 +72,11 @@ class TestTaskSpec:
         assert spec.timeout_sec == 60.0
         assert spec.args == [[1, 2, 3]]
 
+    @pytest.mark.parametrize("timeout", [0, -1, True, float("nan"), float("inf")])
+    def test_from_call_rejects_invalid_timeout(self, timeout):
+        with pytest.raises(ValueError, match="timeout"):
+            TaskSpec.from_call(add_one, args=(1,), timeout=timeout)
+
     def test_pack_unpack_roundtrip(self):
         spec = TaskSpec.from_call(square, args=(7,))
         data = spec.pack()

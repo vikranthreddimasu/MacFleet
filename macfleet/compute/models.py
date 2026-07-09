@@ -156,6 +156,13 @@ class TaskSpec:
                 f"Function {fn!r} is not registered. "
                 "Decorate it with @macfleet.task first."
             )
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or timeout <= 0
+        ):
+            raise ValueError("timeout must be a positive finite number")
 
         # If the registered callable has a Pydantic schema, validate the
         # args now (fail fast on the coordinator) and serialize the model
