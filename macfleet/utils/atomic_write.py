@@ -20,8 +20,20 @@ previous checkpoint or the fully-saved new one — never a corrupt mix.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Callable, Union
+
+
+def _new_temp_path(path: Path) -> Path:
+    """Create a private temp path beside ``path`` for an atomic rename."""
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    os.close(fd)
+    return Path(temp_name)
 
 
 def atomic_write_bytes(
@@ -47,15 +59,18 @@ def atomic_write_bytes(
             file is left behind for post-mortem (caller can inspect it).
     """
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
     # Same directory guarantees os.replace works without crossing
     # filesystems (rename(2) is atomic only within one fs).
     parent = path.parent
     parent.mkdir(parents=True, exist_ok=True)
+    # A unique sibling prevents simultaneous checkpoint saves from deleting or
+    # renaming each other's temporary file.
+    tmp = _new_temp_path(path)
     try:
         # Write + fsync the data file
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        fd = os.open(tmp, os.O_WRONLY | os.O_TRUNC)
         try:
+            os.fchmod(fd, mode)
             written = 0
             while written < len(data):
                 bytes_written = os.write(fd, data[written:])
@@ -114,8 +129,8 @@ def atomic_write_via(
     atomically rename it over `path`.
     """
     path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _new_temp_path(path)
     try:
         writer(tmp)
         # fsync the file itself for durability. Open O_RDWR (not O_RDONLY):

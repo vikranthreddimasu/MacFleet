@@ -8,11 +8,16 @@ data. Never a partial write.
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from macfleet.utils.atomic_write import atomic_write_bytes, atomic_write_via
+
+
+def _temporary_files(directory: Path, target_name: str) -> list[Path]:
+    return list(directory.glob(f".{target_name}.*.tmp"))
 
 
 class TestAtomicWriteBytes:
@@ -58,8 +63,7 @@ class TestAtomicWriteBytes:
         with pytest.raises(OSError):
             atomic_write_bytes(target, b"NEW")
 
-        # .tmp file should have been removed
-        assert not (tmp_path / "checkpoint.pt.tmp").exists()
+        assert not _temporary_files(tmp_path, "checkpoint.pt")
 
     def test_creates_parent_directories(self, tmp_path: Path):
         target = tmp_path / "runs" / "exp-42" / "checkpoint.pt"
@@ -86,7 +90,18 @@ class TestAtomicWriteBytes:
             atomic_write_bytes(target, b"payload")
 
         assert not target.exists()
-        assert not (tmp_path / "checkpoint.pt.tmp").exists()
+        assert not _temporary_files(tmp_path, "checkpoint.pt")
+
+    def test_concurrent_writes_do_not_share_temporary_file(self, tmp_path: Path):
+        """Parallel checkpoint saves may race on the destination, never temp cleanup."""
+        target = tmp_path / "checkpoint.pt"
+        payloads = [f"checkpoint-{index}".encode() for index in range(8)]
+
+        with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+            list(pool.map(lambda payload: atomic_write_bytes(target, payload), payloads))
+
+        assert target.read_bytes() in payloads
+        assert not _temporary_files(tmp_path, "checkpoint.pt")
 
     def test_path_accepts_str(self, tmp_path: Path):
         target = tmp_path / "from_str.bin"
@@ -119,7 +134,7 @@ class TestAtomicWriteVia:
             atomic_write_via(target, bad_writer)
 
         # temp shouldn't stick around
-        assert not (tmp_path / "model.pt.tmp").exists()
+        assert not _temporary_files(tmp_path, "model.pt")
         assert not target.exists()
 
     def test_writer_preserves_old_on_failure(self, tmp_path: Path):
@@ -136,4 +151,4 @@ class TestAtomicWriteVia:
         # old file intact
         assert target.read_bytes() == b"KEEP ME"
         # partial temp file must not be left behind
-        assert not (tmp_path / "model.pt.tmp").exists()
+        assert not _temporary_files(tmp_path, "model.pt")
