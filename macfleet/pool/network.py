@@ -65,7 +65,16 @@ class NetworkTopology:
         """The highest-scored available link."""
         scored = [l for l in self.links if l.score > 0]
         if not scored:
-            return self.links[0] if self.links else None
+            if not self.links:
+                return None
+            fallback_priority = {
+                LinkType.THUNDERBOLT: 5,
+                LinkType.ETHERNET: 4,
+                LinkType.WIFI: 3,
+                LinkType.UNKNOWN: 2,
+                LinkType.LOOPBACK: 1,
+            }
+            return max(self.links, key=lambda l: fallback_priority.get(l.link_type, 0))
         return max(scored, key=lambda l: l.score)
 
     @property

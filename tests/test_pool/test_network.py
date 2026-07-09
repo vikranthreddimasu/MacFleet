@@ -67,6 +67,31 @@ class TestNetworkTopology:
         assert topo.best_link is None
         assert not topo.has_wifi
 
+    def test_best_link_fallback_prefers_highest_priority_link_type(self):
+        topo = NetworkTopology(
+            links=[
+                NetworkLink("en0", LinkType.WIFI, "192.168.1.100"),
+                NetworkLink("bridge0", LinkType.THUNDERBOLT, "10.0.0.1"),
+                NetworkLink("en1", LinkType.ETHERNET, "192.168.1.101"),
+            ],
+            hostname="test-mac",
+        )
+        best = topo.best_link
+        assert best is not None
+        assert best.link_type == LinkType.THUNDERBOLT
+
+    def test_best_link_fallback_priority_without_thunderbolt_or_ethernet(self):
+        topo = NetworkTopology(
+            links=[
+                NetworkLink("lo0", LinkType.LOOPBACK, "127.0.0.1"),
+                NetworkLink("utun0", LinkType.UNKNOWN, "fe80::1"),
+                NetworkLink("en0", LinkType.WIFI, "192.168.1.100"),
+            ],
+        )
+        best = topo.best_link
+        assert best is not None
+        assert best.link_type == LinkType.WIFI
+
 
 class TestDetectInterfaces:
     def test_detect_returns_list(self):
