@@ -1,5 +1,7 @@
 """Tests for the heterogeneous workload scheduler."""
 
+import pytest
+
 from macfleet.engines.base import HardwareProfile, ThermalPressure
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
 from macfleet.pool.scheduler import Scheduler, SchedulerConfig
@@ -24,6 +26,18 @@ def _make_node(node_id: str, gpu_cores: int = 10, ram_gb: float = 16.0) -> NodeR
 
 
 class TestSchedulerWeights:
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"min_batch_per_node": 0}, "min_batch_per_node"),
+            ({"use_throughput": 1}, "use_throughput"),
+            ({"rebalance_every_n_steps": 0}, "rebalance_every_n_steps"),
+        ],
+    )
+    def test_rejects_invalid_scheduler_config(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            SchedulerConfig(**kwargs)
+
     def test_equal_nodes_equal_weights(self):
         reg = ClusterRegistry("a")
         reg.register(_make_node("a", gpu_cores=10))

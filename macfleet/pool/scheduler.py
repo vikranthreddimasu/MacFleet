@@ -33,6 +33,22 @@ class SchedulerConfig:
     use_throughput: bool = True       # Use measured throughput if available
     rebalance_every_n_steps: int = 50 # Re-profile interval
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.min_batch_per_node, int)
+            or isinstance(self.min_batch_per_node, bool)
+            or self.min_batch_per_node < 1
+        ):
+            raise ValueError("min_batch_per_node must be a positive integer")
+        if not isinstance(self.use_throughput, bool):
+            raise ValueError("use_throughput must be a boolean")
+        if (
+            not isinstance(self.rebalance_every_n_steps, int)
+            or isinstance(self.rebalance_every_n_steps, bool)
+            or self.rebalance_every_n_steps < 1
+        ):
+            raise ValueError("rebalance_every_n_steps must be a positive integer")
+
 
 class Scheduler:
     """Assigns workload across heterogeneous pool members.
