@@ -273,9 +273,13 @@ class CollectiveGroup:
             This rank's chunk of the array.
         """
         if self.world_size == 1:
+            if array is None:
+                raise ValueError("scatter() requires a source array on src rank")
             return array
 
         if self.rank == src:
+            if array is None:
+                raise ValueError("scatter() requires a source array on src rank")
             chunks = np.array_split(array, self.world_size)
             sends = [
                 self._send_array(r, chunks[r])

@@ -354,6 +354,13 @@ class TestScatter:
         np.testing.assert_array_equal(result, arr)
 
     @pytest.mark.asyncio
+    async def test_single_node_requires_source_array(self):
+        t = PeerTransport(local_id="solo", config=CONFIG)
+        group = CollectiveGroup(rank=0, world_size=1, transport=t, rank_to_peer={})
+        with pytest.raises(ValueError, match="requires a source array"):
+            await group.scatter(None)
+
+    @pytest.mark.asyncio
     async def test_two_nodes(self):
         """Scatter splits array into 2 chunks."""
         transports, _ = await _setup_mesh(2)
