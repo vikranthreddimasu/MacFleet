@@ -312,6 +312,10 @@ class TestTaskResult:
 
 
 class TestTaskFuture:
+    def test_task_id_must_be_non_empty(self):
+        with pytest.raises(ValueError, match="task_id"):
+            TaskFuture(task_id="")
+
     @pytest.mark.asyncio
     async def test_done_flag(self):
         future = TaskFuture(task_id="f-1")
@@ -344,6 +348,16 @@ class TestTaskFuture:
         future.set_result(TaskResult(task_id="f-4", ok=False, error="oops"))
         with pytest.raises(RemoteTaskError):
             await future.result(timeout=1.0)
+
+    def test_result_must_belong_to_future_and_is_set_once(self):
+        future = TaskFuture(task_id="f-5")
+
+        with pytest.raises(ValueError, match="does not match"):
+            future.set_result(TaskResult.success("other", "value"))
+
+        future.set_result(TaskResult.success("f-5", "value"))
+        with pytest.raises(RuntimeError, match="already set"):
+            future.set_result(TaskResult.success("f-5", "other value"))
 
 
 # --------------------------------------------------------------------------- #

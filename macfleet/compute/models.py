@@ -336,6 +336,8 @@ class TaskFuture:
     """
 
     def __init__(self, task_id: str):
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task_id must be a non-empty string")
         self.task_id = task_id
         self._event = asyncio.Event()
         self._result: Optional[TaskResult] = None
@@ -347,6 +349,12 @@ class TaskFuture:
 
     def set_result(self, result: TaskResult) -> None:
         """Called by the dispatcher when the result arrives."""
+        if result.task_id != self.task_id:
+            raise ValueError(
+                f"result task_id {result.task_id!r} does not match future {self.task_id!r}"
+            )
+        if self.done:
+            raise RuntimeError(f"result for task {self.task_id!r} was already set")
         self._result = result
         self._event.set()
 
