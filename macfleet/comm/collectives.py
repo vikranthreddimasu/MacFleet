@@ -18,6 +18,7 @@ Supported operations:
 from __future__ import annotations
 
 import asyncio
+import math
 import struct
 from dataclasses import dataclass
 from typing import Optional, cast
@@ -117,6 +118,15 @@ class CollectiveConfig:
 
     recv_timeout_sec: float = 120.0
 
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.recv_timeout_sec, bool)
+            or not isinstance(self.recv_timeout_sec, (int, float))
+            or not math.isfinite(float(self.recv_timeout_sec))
+            or self.recv_timeout_sec <= 0
+        ):
+            raise ValueError("recv_timeout_sec must be a positive finite number")
+
 
 class CollectiveGroup:
     """A group of nodes participating in collective operations.
@@ -163,7 +173,10 @@ class CollectiveGroup:
     async def _recv_array(self, rank: int) -> np.ndarray:
         """Receive a numpy array from the peer at the given rank."""
         peer_id = self._peer_for_rank(rank)
-        payload = await self._transport.recv(peer_id)
+        payload = await asyncio.wait_for(
+            self._transport.recv(peer_id),
+            timeout=self._config.recv_timeout_sec,
+        )
         return unpack_array(payload)
 
     # ------------------------------------------------------------------ #

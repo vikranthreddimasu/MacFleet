@@ -6,12 +6,14 @@ and runs the collective operation concurrently on all ranks.
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 import macfleet.comm.collectives as collectives
 from macfleet.comm.collectives import (
+    CollectiveConfig,
     CollectiveGroup,
     pack_array,
     unpack_array,
@@ -84,6 +86,29 @@ class TestArraySerialization:
 
         with pytest.raises(ValueError, match="element count"):
             pack_array(np.zeros(3, dtype=np.float32))
+
+
+class TestCollectiveConfiguration:
+    @pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), True])
+    def test_rejects_invalid_receive_timeout(self, timeout):
+        with pytest.raises(ValueError, match="positive finite"):
+            CollectiveConfig(recv_timeout_sec=timeout)
+
+    @pytest.mark.asyncio
+    async def test_receive_timeout_is_honored(self):
+        async def never_returns(_peer_id):
+            await asyncio.Event().wait()
+
+        group = CollectiveGroup(
+            rank=0,
+            world_size=2,
+            transport=SimpleNamespace(recv=never_returns),
+            rank_to_peer={1: "peer-1"},
+            config=CollectiveConfig(recv_timeout_sec=0.01),
+        )
+
+        with pytest.raises(asyncio.TimeoutError):
+            await group._recv_array(1)
 
 
 # --------------------------------------------------------------------------- #
