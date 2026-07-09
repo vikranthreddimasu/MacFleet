@@ -374,6 +374,28 @@ class ServiceRegistry:
         if not self._zeroconf:
             self.start()
 
+        track_add, track_remove, track_update = self._tracking_callbacks(
+            on_add=on_add, on_remove=on_remove, on_update=on_update,
+        )
+        self._listener = PoolServiceListener(
+            on_add=track_add, on_remove=track_remove, on_update=track_update,
+        )
+        assert self._zeroconf is not None
+        self._browser = ServiceBrowser(
+            self._zeroconf, self._service_type, self._listener,
+        )
+
+    def _tracking_callbacks(
+        self,
+        on_add: Optional[Callable[[DiscoveredNode], None]] = None,
+        on_remove: Optional[Callable[[str], None]] = None,
+        on_update: Optional[Callable[[DiscoveredNode], None]] = None,
+    ) -> tuple[
+        Callable[[DiscoveredNode], None],
+        Callable[[str], None],
+        Callable[[DiscoveredNode], None],
+    ]:
+        """Wrap callbacks so every discovery path maintains the node cache."""
         def track_add(node: DiscoveredNode) -> None:
             with self._nodes_lock:
                 self._discovered_nodes[node.node_id] = node
@@ -392,13 +414,7 @@ class ServiceRegistry:
             if on_update:
                 on_update(node)
 
-        self._listener = PoolServiceListener(
-            on_add=track_add, on_remove=track_remove, on_update=track_update,
-        )
-        assert self._zeroconf is not None
-        self._browser = ServiceBrowser(
-            self._zeroconf, self._service_type, self._listener,
-        )
+        return track_add, track_remove, track_update
 
     def stop_discovery(self) -> None:
         if self._browser:
@@ -420,35 +436,41 @@ class ServiceRegistry:
         if not self._zeroconf:
             self.start()
 
-        found: list[DiscoveredNode] = []
+        found: dict[str, DiscoveredNode] = {}
         lock = threading.Lock()
 
-        def on_add(node: DiscoveredNode) -> None:
+        def remember(node: DiscoveredNode) -> None:
             with lock:
-                found.append(node)
+                found[node.node_id] = node
 
-        listener = PoolServiceListener(on_add=on_add)
+        track_add, _, track_update = self._tracking_callbacks(
+            on_add=remember, on_update=remember,
+        )
+        listener = PoolServiceListener(on_add=track_add, on_update=track_update)
         assert self._zeroconf is not None
         browser = ServiceBrowser(self._zeroconf, self._service_type, listener)
 
         time.sleep(timeout)
         browser.cancel()
-        return found
+        with lock:
+            return list(found.values())
 
     async def async_find_peers(self, timeout: float = 5.0) -> list[DiscoveredNode]:
         """Async variant of find_peers — yields the loop while waiting."""
-        import asyncio
         if not self._zeroconf:
-            self.start()
+            await self.async_start()
 
-        found: list[DiscoveredNode] = []
+        found: dict[str, DiscoveredNode] = {}
         lock = threading.Lock()
 
-        def on_add(node: DiscoveredNode) -> None:
+        def remember(node: DiscoveredNode) -> None:
             with lock:
-                found.append(node)
+                found[node.node_id] = node
 
-        listener = PoolServiceListener(on_add=on_add)
+        track_add, _, track_update = self._tracking_callbacks(
+            on_add=remember, on_update=remember,
+        )
+        listener = PoolServiceListener(on_add=track_add, on_update=track_update)
         assert self._zeroconf is not None
         browser = ServiceBrowser(self._zeroconf, self._service_type, listener)
 
@@ -456,7 +478,8 @@ class ServiceRegistry:
             await asyncio.sleep(timeout)
         finally:
             browser.cancel()
-        return found
+        with lock:
+            return list(found.values())
 
     @property
     def is_registered(self) -> bool:
