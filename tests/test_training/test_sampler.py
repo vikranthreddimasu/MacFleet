@@ -81,6 +81,19 @@ class TestWeightedDistributedSampler:
         with pytest.raises(ValueError):
             WeightedDistributedSampler(ds, num_replicas=2, rank=0, weights=[0.5])
 
+    @pytest.mark.parametrize(
+        ("num_replicas", "rank", "message"),
+        [
+            (0, 0, "num_replicas"),
+            (2, -1, "rank"),
+            (2, 2, "rank"),
+            (True, 0, "num_replicas"),
+        ],
+    )
+    def test_invalid_topology_is_rejected(self, num_replicas, rank, message):
+        with pytest.raises(ValueError, match=message):
+            WeightedDistributedSampler(_make_dataset(10), num_replicas=num_replicas, rank=rank)
+
     def test_three_nodes(self):
         ds = _make_dataset(120)
         weights = [0.5, 0.3, 0.2]

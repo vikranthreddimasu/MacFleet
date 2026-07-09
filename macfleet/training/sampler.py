@@ -36,6 +36,10 @@ class WeightedDistributedSampler(Sampler[int]):
         seed: int = 0,
         drop_last: bool = False,
     ):
+        if not isinstance(num_replicas, int) or isinstance(num_replicas, bool) or num_replicas < 1:
+            raise ValueError("num_replicas must be a positive integer")
+        if not isinstance(rank, int) or isinstance(rank, bool) or not 0 <= rank < num_replicas:
+            raise ValueError(f"rank must be an integer in [0, {num_replicas}), got {rank!r}")
         self.dataset = dataset
         self.num_replicas = num_replicas
         self.rank = rank
