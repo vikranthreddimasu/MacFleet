@@ -6,7 +6,7 @@ Deferred work from reviews. Grouped by release target.
 
 ### Correctness
 
-- **Issue 3 — sparse allreduce (DGC-style).** Restores the README's 200x WiFi compression claim. Non-trivial: top-k indices don't align across peers, so ring-reduce needs to merge sparse representations at each hop. Reference: Lin et al. (2018) "Deep Gradient Compression." Also add MPS-vs-CPU correctness verification: 100-step divergence < 1e-3 relative error, else pin compression to CPU-only gradients.
+- **Issue 3 — sparse allreduce (DGC-style).** ~~First half SHIPPED (v2.3): N=2 direct exchange is sparse-on-wire — packed TopK+FP16 payloads cross the network, `pack_compressed`/`unpack_compressed` in `compression/adaptive.py`, wired in `DataParallel._sparse_exchange_n2`.~~ Remaining: N>=3 ring — top-k indices don't align across peers, so ring-reduce needs to merge sparse representations at each hop. Reference: Lin et al. (2018) "Deep Gradient Compression." Also add MPS-vs-CPU correctness verification: 100-step divergence < 1e-3 relative error, else pin compression to CPU-only gradients.
 
 ### Pruning (~700 LOC removal)
 

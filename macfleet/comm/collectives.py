@@ -194,6 +194,26 @@ class CollectiveGroup:
         )
         return unpack_array(payload)
 
+    async def exchange_bytes(self, peer_rank: int, payload: bytes) -> bytes:
+        """Simultaneous send/recv of opaque bytes with one peer.
+
+        Both ranks call this concurrently with their own payload and get
+        the peer's payload back — the byte-level twin of the N=2 direct
+        allreduce exchange. Used by DataParallel's sparse-on-wire path,
+        where the payload is a packed CompressedArray instead of a dense
+        array.
+        """
+        peer_id = self._peer_for_rank(peer_rank)
+
+        async def _send() -> None:
+            await self._transport.send(peer_id, payload, msg_type=MessageType.GRADIENT)
+
+        async def _recv() -> bytes:
+            return await self._transport.recv(peer_id)
+
+        _, remote = await asyncio.gather(_send(), _recv())
+        return remote
+
     # ------------------------------------------------------------------ #
     # AllReduce                                                          #
     # ------------------------------------------------------------------ #

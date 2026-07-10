@@ -11,10 +11,17 @@ Compression levels by link type:
 
 The compressor tracks error feedback (residuals) for TopK to maintain
 convergence despite lossy compression.
+
+Wire format (v2.3): `pack_compressed` / `unpack_compressed` serialize a
+CompressedArray for the 2-node sparse-on-wire exchange in DataParallel —
+the payload that actually crosses the network shrinks by the compression
+ratio instead of being decompressed back to dense first. Unpacking is
+fail-closed: every length and count is validated before any allocation.
 """
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -22,6 +29,7 @@ from typing import Optional
 import numpy as np
 
 from macfleet.pool.network import LinkType
+from macfleet.security.auth import GradientValidationError, validate_gradient_metadata
 
 
 class CompressionLevel(Enum):
@@ -54,6 +62,187 @@ class CompressedArray:
         if self.original_size == 0:
             return 1.0
         return self.compressed_size / self.original_size
+
+
+# ------------------------------------------------------------------ #
+# Wire format for CompressedArray (v2.3 sparse-on-wire)               #
+# ------------------------------------------------------------------ #
+
+# Header: magic(4s) kind(B) ndims(B) scale(d) numel(I) k(I)
+# then shape (ndims * I), then indices (int32 * k, sparse kinds only),
+# then values (fp16 or fp32). `scale` travels as float64 so both ranks
+# dequantize with the bitwise-same factor — required for the parameter
+# identity guarantee (each rank averages decompress(own)+decompress(remote)).
+_WIRE_MAGIC = b"MFC1"
+_WIRE_HEADER = "!4sBBdII"
+_WIRE_HEADER_SIZE = struct.calcsize(_WIRE_HEADER)
+
+_KIND_TOPK_FP32 = 1
+_KIND_TOPK_FP16 = 2
+_KIND_DENSE_FP16 = 3
+
+_MAX_WIRE_NDIMS = 8
+
+
+def pack_compressed(ca: CompressedArray) -> bytes:
+    """Serialize a CompressedArray for the wire.
+
+    Raises ValueError for shapes compress() never produces (dense fp32
+    passthroughs are plain ndarrays and use the dense allreduce path).
+    """
+    if ca.topk_indices is not None:
+        if ca.topk_values is None:
+            raise ValueError("sparse CompressedArray missing values")
+        kind = _KIND_TOPK_FP16 if ca.is_fp16 else _KIND_TOPK_FP32
+        indices = np.ascontiguousarray(ca.topk_indices, dtype=np.int32)
+        values = np.ascontiguousarray(
+            ca.topk_values, dtype=np.float16 if ca.is_fp16 else np.float32,
+        )
+        k = indices.size
+        body = indices.tobytes() + values.tobytes()
+    elif ca.is_fp16 and ca.topk_values is not None:
+        kind = _KIND_DENSE_FP16
+        values = np.ascontiguousarray(ca.topk_values, dtype=np.float16)
+        k = 0
+        body = values.tobytes()
+    else:
+        raise ValueError(f"CompressedArray shape not packable: {ca!r}")
+
+    shape = ca.original_shape
+    if len(shape) > _MAX_WIRE_NDIMS:
+        raise ValueError(f"too many dims for wire: {len(shape)}")
+    numel = 1
+    for s in shape:
+        numel *= int(s)
+
+    header = struct.pack(
+        _WIRE_HEADER, _WIRE_MAGIC, kind, len(shape), float(ca.scale), numel, k,
+    )
+    shape_bytes = struct.pack(f"!{len(shape)}I", *shape)
+    return header + shape_bytes + body
+
+
+def unpack_compressed(data: bytes) -> CompressedArray:
+    """Deserialize wire bytes back to a CompressedArray.
+
+    SECURITY: fail-closed. Every count is validated against
+    GRADIENT_MAX_NUMEL-style bounds BEFORE any allocation, and the body
+    length must match the header exactly — a malicious peer can't
+    trigger an allocation bomb or feed trailing garbage.
+
+    Raises GradientValidationError on any structural problem.
+    """
+    if len(data) < _WIRE_HEADER_SIZE:
+        raise GradientValidationError(
+            f"compressed payload too short: {len(data)}B"
+        )
+    magic, kind, ndims, scale, numel, k = struct.unpack(
+        _WIRE_HEADER, data[:_WIRE_HEADER_SIZE],
+    )
+    if magic != _WIRE_MAGIC:
+        raise GradientValidationError(
+            f"compressed payload bad magic: {magic!r} (peer compression "
+            f"settings must match this node's)"
+        )
+    if kind not in (_KIND_TOPK_FP32, _KIND_TOPK_FP16, _KIND_DENSE_FP16):
+        raise GradientValidationError(f"compressed payload unknown kind: {kind}")
+    if not (0 < ndims <= _MAX_WIRE_NDIMS):
+        raise GradientValidationError(f"compressed payload bad ndims: {ndims}")
+    # Bounds-check numel and k before allocating anything.
+    validate_gradient_metadata(numel, k)
+    if not np.isfinite(scale) or scale <= 0:
+        raise GradientValidationError(f"compressed payload bad scale: {scale}")
+
+    offset = _WIRE_HEADER_SIZE
+    shape_size = ndims * 4
+    if len(data) < offset + shape_size:
+        raise GradientValidationError("compressed payload truncated at shape")
+    shape = struct.unpack(f"!{ndims}I", data[offset : offset + shape_size])
+    offset += shape_size
+    prod = 1
+    for s in shape:
+        prod *= s
+    if prod != numel:
+        raise GradientValidationError(
+            f"compressed payload shape {shape} != numel {numel}"
+        )
+
+    if kind in (_KIND_TOPK_FP32, _KIND_TOPK_FP16):
+        if k <= 0:
+            raise GradientValidationError("sparse payload with k=0")
+        value_itemsize = 2 if kind == _KIND_TOPK_FP16 else 4
+        expected = k * 4 + k * value_itemsize
+        body = data[offset:]
+        if len(body) != expected:
+            raise GradientValidationError(
+                f"sparse payload body {len(body)}B != expected {expected}B"
+            )
+        indices = np.frombuffer(body[: k * 4], dtype=np.int32).copy()
+        if indices.size and (
+            int(indices.min()) < 0 or int(indices.max()) >= numel
+        ):
+            raise GradientValidationError("sparse payload indices out of range")
+        values = np.frombuffer(
+            body[k * 4 :],
+            dtype=np.float16 if kind == _KIND_TOPK_FP16 else np.float32,
+        ).copy()
+        return CompressedArray(
+            data=b"",
+            original_shape=tuple(shape),
+            original_size=numel * 4,
+            compressed_size=len(data),
+            level=CompressionLevel.MODERATE,
+            topk_k=k,
+            topk_indices=indices,
+            topk_values=values,
+            is_fp16=(kind == _KIND_TOPK_FP16),
+            scale=scale,
+        )
+
+    # Dense FP16
+    expected = numel * 2
+    body = data[offset:]
+    if len(body) != expected:
+        raise GradientValidationError(
+            f"dense-fp16 payload body {len(body)}B != expected {expected}B"
+        )
+    values = np.frombuffer(body, dtype=np.float16).copy()
+    return CompressedArray(
+        data=b"",
+        original_shape=tuple(shape),
+        original_size=numel * 4,
+        compressed_size=len(data),
+        level=CompressionLevel.LIGHT,
+        topk_values=values,
+        is_fp16=True,
+        scale=scale,
+    )
+
+
+def decompress_to_dense(ca: CompressedArray) -> np.ndarray:
+    """Reconstruct the dense float32 array from a CompressedArray.
+
+    Stateless module-level twin of AdaptiveCompressor.decompress — used
+    for payloads received from a peer, where no compressor instance (or
+    its error-feedback state) is involved.
+    """
+    if ca.topk_values is None:
+        return np.zeros(ca.original_shape, dtype=np.float32)
+
+    if ca.is_fp16:
+        values = ca.topk_values.astype(np.float32) * ca.scale
+    else:
+        values = ca.topk_values.astype(np.float32)
+
+    if ca.topk_indices is not None:
+        numel = 1
+        for s in ca.original_shape:
+            numel *= s
+        result = np.zeros(numel, dtype=np.float32)
+        result[ca.topk_indices] = values
+        return result.reshape(ca.original_shape)
+
+    return values.reshape(ca.original_shape)
 
 
 # ------------------------------------------------------------------ #

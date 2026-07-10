@@ -97,8 +97,9 @@ Macs when the fleet stayed in sync; `degraded`, `unsynced_steps`, and
 - **Safe task dispatch** — `@macfleet.task` registry + msgpack args
   (no cloudpickle on the wire; local pickle fallback is explicit opt-in)
 - **Adaptive compression** — auto-selects TopK + FP16 based on link
-  speed (locally; sparse-on-wire arrives in v2.3, see TODOS.md
-  Issue 3)
+  speed. On 2-Mac fleets the sparse payload itself crosses the wire:
+  ~60x less gradient traffic on WiFi (TopK 1% + FP16). N≥3 rings still
+  transmit dense (sparse ring merge: TODOS.md Issue 3)
 - **Heterogeneous scheduling** — faster Macs get bigger batches,
   adjusts for thermal throttling
 - **Secure by default** — auto-generated fleet tokens (scrypt-derived

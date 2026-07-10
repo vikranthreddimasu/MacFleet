@@ -201,6 +201,178 @@ class TestDataParallelTwoNodes:
             await _teardown_mesh(transports)
 
 
+class _BiggerModel(nn.Module):
+    """2048 params — above AdaptiveCompressionConfig.min_compress_size
+    (1024), so the compressor actually engages."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(64, 32, bias=False)
+
+    def forward(self, x):
+        return self.fc(x).sum()
+
+
+def _make_big_engine(seed: int = 42) -> TorchEngine:
+    torch.manual_seed(seed)
+    model = _BiggerModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    engine = TorchEngine(device="cpu")
+    engine.load_model(model, optimizer)
+    return engine
+
+
+class TestSparseOnWire:
+    """v2.3: with N=2 and compression active, the packed sparse payload
+    crosses the wire instead of the dense array."""
+
+    async def _one_synced_step(self, compression: str) -> tuple[DataParallel, DataParallel, TorchEngine, TorchEngine]:
+        transports = await _setup_mesh(2)
+        groups = _make_groups(transports)
+        engine0 = _make_big_engine(seed=42)
+        engine1 = _make_big_engine(seed=42)
+        from macfleet.training.data_parallel import DataParallelConfig
+        cfg = DataParallelConfig(compression=compression)
+        dp0 = DataParallel(engine0, groups[0], config=cfg)
+        dp1 = DataParallel(engine1, groups[1], config=cfg)
+
+        torch.manual_seed(0)
+        x0 = torch.randn(8, 64)
+        torch.manual_seed(1)
+        x1 = torch.randn(8, 64)
+        engine0.backward(engine0.forward(x0))
+        engine1.backward(engine1.forward(x1))
+        await asyncio.gather(dp0.sync_gradients(), dp1.sync_gradients())
+        self._transports = transports
+        return dp0, dp1, engine0, engine1
+
+    @pytest.mark.asyncio
+    async def test_aggressive_sends_sparse_payload(self):
+        try:
+            dp0, dp1, engine0, engine1 = await self._one_synced_step("aggressive")
+            dense_bytes = 2048 * 4
+            # The wire carried the packed payload, not the dense array.
+            assert 0 < dp0._bytes_sent < dense_bytes * 0.1
+            assert dp0._bytes_saved > dense_bytes * 0.9
+            assert dp0.compression_ratio < 0.1
+            # Both ranks hold byte-identical averaged gradients.
+            np.testing.assert_array_equal(
+                engine0.get_flat_gradients(), engine1.get_flat_gradients(),
+            )
+        finally:
+            await _teardown_mesh(self._transports)
+
+    @pytest.mark.asyncio
+    async def test_light_fp16_on_wire(self):
+        """LIGHT (dense fp16) also ships compressed: ~2x reduction."""
+        try:
+            dp0, dp1, engine0, engine1 = await self._one_synced_step("light")
+            dense_bytes = 2048 * 4
+            assert 0 < dp0._bytes_sent < dense_bytes * 0.6
+            np.testing.assert_array_equal(
+                engine0.get_flat_gradients(), engine1.get_flat_gradients(),
+            )
+        finally:
+            await _teardown_mesh(self._transports)
+
+    @pytest.mark.asyncio
+    async def test_sparse_steps_keep_params_identical(self):
+        """Several compressed steps with error feedback: params stay
+        byte-identical on both ranks (the residuals differ per rank, but
+        they're local state — the APPLIED gradient is the same)."""
+        transports = await _setup_mesh(2)
+        try:
+            groups = _make_groups(transports)
+            engine0 = _make_big_engine(seed=42)
+            engine1 = _make_big_engine(seed=42)
+            from macfleet.training.data_parallel import DataParallelConfig
+            cfg = DataParallelConfig(compression="aggressive")
+            dp0 = DataParallel(engine0, groups[0], config=cfg)
+            dp1 = DataParallel(engine1, groups[1], config=cfg)
+
+            for step in range(5):
+                torch.manual_seed(100 + step)
+                x0 = torch.randn(8, 64)
+                torch.manual_seed(200 + step)
+                x1 = torch.randn(8, 64)
+                engine0.zero_grad()
+                engine1.zero_grad()
+                engine0.backward(engine0.forward(x0))
+                engine1.backward(engine1.forward(x1))
+                await asyncio.gather(dp0.sync_gradients(), dp1.sync_gradients())
+                engine0.step()
+                engine1.step()
+
+            np.testing.assert_array_equal(
+                engine0.get_flat_parameters(), engine1.get_flat_parameters(),
+            )
+        finally:
+            await _teardown_mesh(transports)
+
+    @pytest.mark.asyncio
+    async def test_three_nodes_fall_back_to_dense_wire(self):
+        """N>=3 keeps the dense ring (sparse ring merge is future work):
+        gradients still sync, bytes_saved stays 0."""
+        transports = await _setup_mesh(3)
+        try:
+            groups = _make_groups(transports)
+            engines = [_make_big_engine(seed=42) for _ in range(3)]
+            from macfleet.training.data_parallel import DataParallelConfig
+            cfg = DataParallelConfig(compression="aggressive")
+            dps = [
+                DataParallel(engines[i], groups[i], config=cfg)
+                for i in range(3)
+            ]
+
+            for i, engine in enumerate(engines):
+                torch.manual_seed(i)
+                engine.backward(engine.forward(torch.randn(8, 64)))
+
+            await asyncio.gather(*(dp.sync_gradients() for dp in dps))
+
+            g0 = engines[0].get_flat_gradients()
+            for engine in engines[1:]:
+                np.testing.assert_allclose(
+                    engine.get_flat_gradients(), g0, rtol=1e-5, atol=1e-7,
+                )
+            assert dps[0]._bytes_saved == 0
+            assert dps[0].compression_ratio == 1.0
+        finally:
+            await _teardown_mesh(transports)
+
+    @pytest.mark.asyncio
+    async def test_warmup_steps_use_dense_path(self):
+        """During warmup the compressor returns plain arrays — both ranks
+        take the dense allreduce in lockstep (no protocol mismatch)."""
+        transports = await _setup_mesh(2)
+        try:
+            groups = _make_groups(transports)
+            engine0 = _make_big_engine(seed=42)
+            engine1 = _make_big_engine(seed=42)
+            from macfleet.training.data_parallel import DataParallelConfig
+            cfg = DataParallelConfig(
+                compression="aggressive", compression_warmup_steps=2,
+            )
+            dp0 = DataParallel(engine0, groups[0], config=cfg)
+            dp1 = DataParallel(engine1, groups[1], config=cfg)
+
+            for step in range(4):
+                torch.manual_seed(step)
+                engine0.zero_grad()
+                engine1.zero_grad()
+                engine0.backward(engine0.forward(torch.randn(8, 64)))
+                engine1.backward(engine1.forward(torch.randn(8, 64) * 2))
+                await asyncio.gather(dp0.sync_gradients(), dp1.sync_gradients())
+
+            # Warmup steps were dense (full bytes), later steps sparse.
+            assert dp0._bytes_saved > 0
+            np.testing.assert_array_equal(
+                engine0.get_flat_gradients(), engine1.get_flat_gradients(),
+            )
+        finally:
+            await _teardown_mesh(transports)
+
+
 class TestDataParallelThreeNodes:
     """Three-node ring allreduce gradient sync."""
 

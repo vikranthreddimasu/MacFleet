@@ -6,6 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (sparse-on-wire gradient compression, N=2)
+
+- **Compression now actually saves bandwidth.** Previously gradients
+  were compressed and immediately decompressed locally — the wire
+  always carried dense float32. On 2-node fleets (the dominant case)
+  the packed TopK+FP16 payload itself now crosses the network:
+  `pack_compressed`/`unpack_compressed` in `compression/adaptive.py`
+  (fail-closed validation before any allocation: magic, kind, numel/k
+  bounds, exact body length, index range, finite positive scale),
+  `CollectiveGroup.exchange_bytes`, and
+  `DataParallel._sparse_exchange_n2`. WiFi aggressive (TopK 1% + FP16)
+  cuts gradient traffic ~60x.
+- **Parameter identity preserved**: both ranks average
+  `decompress(own) + decompress(remote)` — the same two arrays on each
+  side — and the FP16 scale travels as float64, so dequantization is
+  bitwise-equal and fleet parameters stay byte-identical (asserted with
+  `assert_array_equal` across multi-step error-feedback tests).
+- `DataParallel.compression_ratio` and `_bytes_saved` now report real
+  wire savings. N≥3 rings still transmit dense chunks (sparse ring
+  merge remains TODOS Issue 3 second half); warmup steps stay dense in
+  lockstep on both ranks.
+
 ### Security (v3 handshake — all nodes in a secure fleet must upgrade together)
 
 - **Closed the unauthenticated HMAC oracle.** A secure server used to
