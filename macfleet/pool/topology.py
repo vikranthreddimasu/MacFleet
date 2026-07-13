@@ -8,6 +8,7 @@ address choices for the training mesh.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Iterable, Sequence
@@ -217,17 +218,28 @@ def deserialize_network_links(payload: str) -> tuple[NetworkLink, ...]:
                 or link_type == LinkType.LOOPBACK
             ):
                 continue
+            bandwidth_mbps = float(item.get("b") or item.get("bandwidth_mbps") or 0.0)
+            latency_ms = float(item.get("l") or item.get("latency_ms") or 0.0)
+            loss_rate = float(item.get("r") or item.get("loss_rate") or 0.0)
+            mtu = int(item.get("m") or item.get("mtu") or 1500)
+            if (
+                not all(math.isfinite(value) and value >= 0 for value in (
+                    bandwidth_mbps,
+                    latency_ms,
+                    loss_rate,
+                ))
+                or mtu < 1
+            ):
+                continue
             links.append(
                 NetworkLink(
                     interface=interface,
                     link_type=link_type,
                     ip_address=ip_address,
-                    bandwidth_mbps=float(
-                        item.get("b") or item.get("bandwidth_mbps") or 0.0
-                    ),
-                    latency_ms=float(item.get("l") or item.get("latency_ms") or 0.0),
-                    loss_rate=float(item.get("r") or item.get("loss_rate") or 0.0),
-                    mtu=int(item.get("m") or item.get("mtu") or 1500),
+                    bandwidth_mbps=bandwidth_mbps,
+                    latency_ms=latency_ms,
+                    loss_rate=loss_rate,
+                    mtu=mtu,
                 )
             )
         except (KeyError, TypeError, ValueError):

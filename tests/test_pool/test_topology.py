@@ -147,3 +147,9 @@ def test_deserialize_network_links_rejects_unusable_advertisements():
     ])
 
     assert deserialize_network_links(payload) == ()
+
+
+def test_deserialize_network_links_rejects_non_finite_telemetry():
+    payload = '[{"i":"en0","t":"ethernet","ip":"192.168.1.2","b":NaN}]'
+
+    assert deserialize_network_links(payload) == ()
