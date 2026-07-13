@@ -6,6 +6,7 @@ training performance into a single health score per node.
 
 from __future__ import annotations
 
+import math
 import subprocess
 import time
 from dataclasses import dataclass
@@ -50,9 +51,13 @@ class MemoryInfo:
 
     @property
     def usage_pct(self) -> float:
-        if self.total_gb == 0:
+        if (
+            not math.isfinite(self.total_gb)
+            or not math.isfinite(self.used_gb)
+            or self.total_gb <= 0
+        ):
             return 0.0
-        return (self.used_gb / self.total_gb) * 100.0
+        return max(0.0, min(100.0, (self.used_gb / self.total_gb) * 100.0))
 
 
 @dataclass

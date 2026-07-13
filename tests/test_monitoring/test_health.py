@@ -31,6 +31,17 @@ class TestMemoryInfo:
         mem = MemoryInfo(total_gb=0.0)
         assert mem.usage_pct == 0.0
 
+    @pytest.mark.parametrize(
+        ("total_gb", "used_gb", "expected"),
+        [
+            (float("nan"), 8.0, 0.0),
+            (16.0, -1.0, 0.0),
+            (16.0, 24.0, 100.0),
+        ],
+    )
+    def test_usage_pct_is_bounded_for_invalid_probe_values(self, total_gb, used_gb, expected):
+        assert MemoryInfo(total_gb=total_gb, used_gb=used_gb).usage_pct == expected
+
     def test_system_probe_os_error_returns_empty_snapshot(self, monkeypatch):
         monkeypatch.setattr(
             health_module.subprocess,
