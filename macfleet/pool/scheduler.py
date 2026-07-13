@@ -6,6 +6,7 @@ and thermal state. Continuously adapts during training.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -82,7 +83,11 @@ class Scheduler:
 
         raw_weights: dict[str, float] = {}
         for node in nodes:
-            if self.config.use_throughput and node.throughput_samples_sec > 0:
+            if (
+                self.config.use_throughput
+                and math.isfinite(node.throughput_samples_sec)
+                and node.throughput_samples_sec > 0
+            ):
                 base = node.throughput_samples_sec
             else:
                 base = float(node.hardware.gpu_cores)

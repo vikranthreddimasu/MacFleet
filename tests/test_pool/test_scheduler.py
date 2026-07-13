@@ -94,6 +94,18 @@ class TestSchedulerWeights:
         # a: 100/150=0.667, b: 50/150=0.333
         assert abs(weights["a"] - 2 / 3) < 0.01
 
+    def test_non_finite_throughput_falls_back_to_gpu_cores(self):
+        reg = ClusterRegistry("air")
+        air = _make_node("air", gpu_cores=10)
+        pro = _make_node("pro", gpu_cores=20)
+        air.throughput_samples_sec = float("inf")
+        reg.register(air)
+        reg.register(pro)
+
+        weights = Scheduler(reg).compute_weights()
+
+        assert weights == pytest.approx({"air": 1 / 3, "pro": 2 / 3})
+
 
 class TestSchedulerAssignment:
     @pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
