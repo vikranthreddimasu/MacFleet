@@ -197,6 +197,8 @@ class DistributedBatchSampler(Sampler[list[int]]):
 
 def compute_weights_from_gpu_cores(gpu_cores: list[int]) -> list[float]:
     """Compute workload weights proportional to GPU core counts."""
+    if not gpu_cores:
+        return []
     total = sum(gpu_cores)
     if total == 0:
         return [1.0 / len(gpu_cores)] * len(gpu_cores)
@@ -205,6 +207,8 @@ def compute_weights_from_gpu_cores(gpu_cores: list[int]) -> list[float]:
 
 def compute_weights_from_throughput(throughputs: list[float]) -> list[float]:
     """Compute workload weights proportional to measured throughput."""
+    if not throughputs:
+        return []
     total = sum(throughputs)
     if total == 0:
         return [1.0 / len(throughputs)] * len(throughputs)

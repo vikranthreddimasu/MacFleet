@@ -170,6 +170,10 @@ class TestDistributedBatchSampler:
 
 
 class TestWeightComputations:
+    def test_empty_capacity_inventories_have_no_weights(self):
+        assert compute_weights_from_gpu_cores([]) == []
+        assert compute_weights_from_throughput([]) == []
+
     def test_from_gpu_cores(self):
         weights = compute_weights_from_gpu_cores([10, 20])
         assert abs(weights[0] - 1 / 3) < 0.01
