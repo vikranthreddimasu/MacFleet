@@ -52,6 +52,12 @@ class TestNetworkTopology:
         assert best is not None
         assert best.link_type == LinkType.THUNDERBOLT
 
+    def test_best_link_prefers_fastest_theoretical_link_without_measurements(self):
+        wifi = NetworkLink("en0", LinkType.WIFI, "192.168.1.10")
+        ethernet = NetworkLink("en1", LinkType.ETHERNET, "192.168.1.11")
+
+        assert NetworkTopology(links=[wifi, ethernet]).best_link == ethernet
+
     def test_has_link_types(self):
         topo = NetworkTopology(
             links=[

@@ -65,7 +65,15 @@ class NetworkTopology:
         """The highest-scored available link."""
         scored = [l for l in self.links if l.score > 0]
         if not scored:
-            return self.links[0] if self.links else None
+            return max(
+                self.links,
+                key=lambda link: (
+                    link.theoretical_bandwidth_mbps,
+                    link.interface,
+                    link.ip_address,
+                ),
+                default=None,
+            )
         return max(scored, key=lambda l: l.score)
 
     @property
