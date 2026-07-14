@@ -30,3 +30,13 @@ clean:
 	find . -type d -name .pytest_cache -exec rm -rf {} +
 	find . -name "*.pyc" -delete
 	rm -rf build/ dist/ *.egg-info
+
+help:
+	@echo "MacFleet dev targets:"
+	@echo "  make test      Run pytest suite"
+	@echo "  make lint      ruff + mypy"
+	@echo "  make format    ruff format + fix"
+	@echo "  make install   pip install -e ."
+	@echo "  make dev       pip install -e .[dev]"
+	@echo "  make bench     run compute/network/allreduce benches"
+	@echo "  make clean     remove caches and build artifacts"
