@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "cfe0084ba0b4",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "CHANGELOG.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/cf/e0084ba0b4/0/metadata.json",
+      "transcript": "/cf/e0084ba0b4/0/full.jsonl",
+      "compact_transcript": "/cf/e0084ba0b4/0/transcript.jsonl",
+      "content_hash": "/cf/e0084ba0b4/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
