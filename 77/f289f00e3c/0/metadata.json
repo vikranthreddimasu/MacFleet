@@ -1,0 +1,50 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "77f289f00e3c",
+  "session_id": "ac179e55-f97a-4c97-9ec4-4a7dcd8bbb3b",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-14T05:44:25.854695Z",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".superpowers/brainstorm/.last-port",
+    ".superpowers/brainstorm/.last-token",
+    ".superpowers/brainstorm/99307-1783722063/content/landing-globe.html",
+    ".superpowers/brainstorm/99307-1783722063/state/server-stopped",
+    "tools/goal_batch_commits.sh"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5-fast",
+  "turn_id": "883596468a5f",
+  "compact_transcript_start": 0,
+  "initial_attribution": {
+    "calculated_at": "2026-07-14T05:44:25.849107Z",
+    "agent_lines": 205,
+    "agent_removed": 0,
+    "human_added": 113,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 318,
+    "total_lines_changed": 318,
+    "agent_percentage": 64.46540880503144,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 602,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 52,
+        ".cursor/hooks.json": 40,
+        ".superpowers/brainstorm/.last-port": 1,
+        ".superpowers/brainstorm/.last-token": 1,
+        ".superpowers/brainstorm/99307-1783722063/content/landing-globe.html": 504,
+        ".superpowers/brainstorm/99307-1783722063/state/server-stopped": 1
+      }
+    }
+  ]
+}
