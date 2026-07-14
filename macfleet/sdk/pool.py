@@ -383,7 +383,7 @@ class Pool:
         # real PoolAgent that participates in mDNS discovery + heartbeat.
         enable_pool_distributed: bool = False,
         quorum_size: int = 1,
-        quorum_timeout_sec: float = 10.0,
+        quorum_timeout_sec: float = 30.0,
         peers: Optional[list[str]] = None,
         # Budget for all peers to reach pool.train() and connect their
         # data-plane transports (SPMD scripts are started by hand on each

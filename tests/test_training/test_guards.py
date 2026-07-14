@@ -66,6 +66,16 @@ class TestCheckTrainingOptions:
                 compression="typo",
             )
 
+    def test_topk_compression_rejected_until_sparse_on_wire(self):
+        for mode in ("moderate", "aggressive"):
+            with pytest.raises(TrainingConfigError, match="TopK before allreduce"):
+                check_training_options(
+                    epochs=1,
+                    batch_size=32,
+                    lr=0.001,
+                    compression=mode,
+                )
+
 
 class TestCheckDatasetSufficient:
     def test_happy_path(self):

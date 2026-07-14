@@ -17,7 +17,7 @@ from macfleet.comm.collectives import CollectiveGroup
 from macfleet.comm.transport import PeerTransport, TransportConfig
 from macfleet.engines.torch_engine import TorchEngine
 from macfleet.security import audit
-from macfleet.training.data_parallel import DataParallel
+from macfleet.training.data_parallel import DataParallel, DataParallelConfig, SyncDegradedError
 
 # --------------------------------------------------------------------------- #
 # Test models                                                                 #
@@ -469,7 +469,11 @@ class TestDataParallelDegradedState:
     @pytest.mark.asyncio
     async def test_allreduce_failure_marks_unsynced_degraded(self, isolated_audit_log):
         engine = _ArrayEngine([1.0, 2.0, 3.0])
-        dp = DataParallel(engine, _TimeoutGroup())
+        dp = DataParallel(
+            engine,
+            _TimeoutGroup(),
+            config=DataParallelConfig(allow_degraded=True),
+        )
 
         await dp.sync_gradients()
 
@@ -484,11 +488,28 @@ class TestDataParallelDegradedState:
         assert "training.sync_degraded" in isolated_audit_log.read_text()
 
     @pytest.mark.asyncio
+    async def test_allreduce_failure_aborts_by_default(self, isolated_audit_log):
+        engine = _ArrayEngine([1.0, 2.0, 3.0])
+        dp = DataParallel(engine, _TimeoutGroup())
+
+        with pytest.raises(SyncDegradedError, match="allreduce_failed"):
+            await dp.sync_gradients()
+
+        assert dp.degraded is True
+        assert dp.unsynced_steps == 1
+        assert engine.applied is None
+        assert "training.sync_degraded" in isolated_audit_log.read_text()
+
+    @pytest.mark.asyncio
     async def test_remote_invalid_gradient_marks_validation_fallback(
         self, isolated_audit_log
     ):
         engine = _ArrayEngine([1.0, 2.0, 3.0])
-        dp = DataParallel(engine, _PoisonedGroup())
+        dp = DataParallel(
+            engine,
+            _PoisonedGroup(),
+            config=DataParallelConfig(allow_degraded=True),
+        )
 
         await dp.sync_gradients()
 
@@ -515,3 +536,34 @@ class TestDataParallelDegradedState:
         assert dp.last_sync_error == "local_gradients_nan_or_inf"
         np.testing.assert_array_equal(engine.applied, np.zeros(3, dtype=np.float32))
         assert "local_gradients_nan_or_inf" in isolated_audit_log.read_text()
+
+
+class TestDataParallelCompressionSafety:
+    def test_moderate_compression_rejected(self):
+        with pytest.raises(ValueError, match="TopK before allreduce"):
+            DataParallel(
+                _ArrayEngine([1.0, 2.0]),
+                _EchoGroup(),
+                config=DataParallelConfig(compression="moderate"),
+            )
+
+    def test_aggressive_compression_rejected(self):
+        with pytest.raises(ValueError, match="TopK before allreduce"):
+            DataParallel(
+                _ArrayEngine([1.0, 2.0]),
+                _EchoGroup(),
+                config=DataParallelConfig(compression="aggressive"),
+            )
+
+    def test_adaptive_uses_dense_safe_fp16_on_wifi(self):
+        from macfleet.pool.network import LinkType
+
+        dp = DataParallel(
+            _ArrayEngine([1.0, 2.0]),
+            _EchoGroup(),
+            config=DataParallelConfig(compression="adaptive"),
+            link_type=LinkType.WIFI,
+        )
+        assert dp._compressor is not None
+        assert dp._compressor.level.value == "light"
+        assert dp._compressor._topk is None

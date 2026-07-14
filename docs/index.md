@@ -23,9 +23,9 @@ desk. What's missing: a way to team them up.
 
 MacFleet fills that gap. Any two Macs on the same WiFi can pool their
 GPUs and run a training loop together. Security is baked in (HMAC +
-TLS). Adaptive compression keeps WiFi viable for gradient sync. The
-framework-agnostic core lets you pick your engine (`torch` or `mlx`)
-per call.
+TLS). Dense-safe FP16 compression is available today; sparse-on-wire
+TopK is the next bandwidth win. The framework-agnostic core lets you
+pick your engine (`torch` or `mlx`) per call.
 
 ## The five-minute path
 

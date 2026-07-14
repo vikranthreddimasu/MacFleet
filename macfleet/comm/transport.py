@@ -32,6 +32,7 @@ from macfleet.security.auth import (
     HS_LABEL_SERVER_RESP,
     HW_HANDSHAKE_MAX_JSON_BYTES,
     HW_HANDSHAKE_WIRE_VERSION,
+    MAX_NODE_ID_BYTES,
     AuthRateLimiter,
     HandshakeHwValidationError,
     SecurityConfig,
@@ -493,7 +494,25 @@ class PeerTransport:
                         return
                     hello_proof = payload[-CHALLENGE_SIZE:]
                     challenge_a = payload[-2 * CHALLENGE_SIZE:-CHALLENGE_SIZE]
-                    peer_id = payload[:-2 * CHALLENGE_SIZE].decode("utf-8")
+                    peer_id_bytes = payload[:-2 * CHALLENGE_SIZE]
+                    if len(peer_id_bytes) > MAX_NODE_ID_BYTES:
+                        logger.warning(
+                            "Auth handshake: peer_id too long from %s "
+                            "(%d bytes, max %d)",
+                            peer_ip, len(peer_id_bytes), MAX_NODE_ID_BYTES,
+                        )
+                        self._rate_limiter.record_failure(peer_ip)
+                        _audit_transport_auth(
+                            "transport.auth_failed",
+                            role="server",
+                            local_id=self.local_id,
+                            peer_ip=peer_ip,
+                            reason="peer_id_too_long",
+                        )
+                        writer.close()
+                        await writer.wait_closed()
+                        return
+                    peer_id = peer_id_bytes.decode("utf-8")
 
                     # Verify the client knows the token BEFORE revealing
                     # anything. The proof is bound to this server's TLS cert,
@@ -624,7 +643,7 @@ class PeerTransport:
                 else:
                     # SECURITY: Downgrade protection — open server rejects
                     # authenticated handshakes (prevents mixed-mode confusion)
-                    if len(payload) > 256:
+                    if len(payload) > MAX_NODE_ID_BYTES:
                         logger.warning(
                             "Open handshake: payload suspiciously large from %s "
                             "(possible auth handshake sent to open server)",

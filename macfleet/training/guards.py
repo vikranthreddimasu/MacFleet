@@ -26,9 +26,11 @@ class TrainingConfigError(ValueError):
     """Raised when training hyperparameters cannot produce a valid run."""
 
 
-VALID_TRAINING_COMPRESSION = frozenset(
-    {"none", "light", "moderate", "aggressive", "adaptive"}
-)
+VALID_TRAINING_COMPRESSION = frozenset({"none", "light", "adaptive"})
+
+# Rejected until sparse-on-wire: per-rank TopK before dense allreduce
+# biases averaged gradients when ranks see different batches.
+_UNSAFE_TOPK_COMPRESSION = frozenset({"moderate", "aggressive"})
 
 
 def check_training_options(
@@ -62,6 +64,12 @@ def check_training_options(
         )
 
     normalized = "none" if compression is None else compression
+    if isinstance(normalized, str) and normalized in _UNSAFE_TOPK_COMPRESSION:
+        raise TrainingConfigError(
+            f"compression={normalized!r} uses per-rank TopK before allreduce, "
+            "which biases averaged gradients until sparse-on-wire ships. "
+            "Use 'none', 'light' (FP16), or 'adaptive' (dense-safe FP16/none)."
+        )
     if not isinstance(normalized, str) or normalized not in VALID_TRAINING_COMPRESSION:
         valid = ", ".join(sorted(VALID_TRAINING_COMPRESSION))
         raise TrainingConfigError(

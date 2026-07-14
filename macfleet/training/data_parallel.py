@@ -36,6 +36,24 @@ from macfleet.security.auth import GradientValidationError, validate_gradients
 
 logger = logging.getLogger(__name__)
 
+# Per-rank TopK before dense allreduce is not mathematically equivalent to
+# allreduce-then-compress: ranks keep different index sets, so the averaged
+# gradient is biased. Reject these until sparse-on-wire lands (TODOS Issue 3).
+_TOPK_BEFORE_ALLREDUCE_UNSAFE = frozenset({"moderate", "aggressive"})
+
+# Until sparse-on-wire, adaptive mode may only pick dense-safe levels.
+_DENSE_SAFE_LINK_LEVELS: dict[LinkType, CompressionLevel] = {
+    LinkType.THUNDERBOLT: CompressionLevel.NONE,
+    LinkType.LOOPBACK: CompressionLevel.NONE,
+    LinkType.ETHERNET: CompressionLevel.LIGHT,
+    LinkType.WIFI: CompressionLevel.LIGHT,
+    LinkType.UNKNOWN: CompressionLevel.LIGHT,
+}
+
+
+class SyncDegradedError(RuntimeError):
+    """Raised when gradient sync fails and degraded fallback is disabled."""
+
 
 @dataclass
 class DataParallelConfig:
@@ -47,9 +65,12 @@ class DataParallelConfig:
     max_staleness: int = 0
     # Broadcast parameters from coordinator on start
     broadcast_params_on_start: bool = True
-    # Compression
-    compression: str = "none"  # "none", "light", "moderate", "aggressive", "adaptive"
+    # Compression (dense-wire-safe: "none", "light", "adaptive")
+    compression: str = "none"
     compression_warmup_steps: int = 0
+    # When False (default), sync failures abort instead of applying local-only
+    # gradients (which silently diverge models across the fleet).
+    allow_degraded: bool = False
 
 
 class DataParallel:
@@ -150,37 +171,75 @@ class DataParallel:
         return self._bytes_sent / total
 
     def _make_compressor(self, link_type: LinkType) -> Optional[AdaptiveCompressor]:
-        """Create compressor based on config."""
+        """Create compressor based on config.
+
+        Only dense-safe modes are accepted until sparse-on-wire: TopK
+        sparsification before allreduce corrupts the averaged gradient when
+        ranks see different data.
+        """
         comp = self.config.compression
         if comp == "none":
             return None
 
+        if comp in _TOPK_BEFORE_ALLREDUCE_UNSAFE:
+            raise ValueError(
+                f"compression={comp!r} applies per-rank TopK before allreduce, "
+                "which biases averaged gradients when ranks train on different "
+                "batches. Until sparse-on-wire ships, use compression='none', "
+                "'light' (FP16), or 'adaptive' (dense-safe FP16/none only)."
+            )
+
         if comp == "adaptive":
+            # Force dense-safe levels: WiFi/Ethernet would otherwise pick TopK.
+            level = _DENSE_SAFE_LINK_LEVELS.get(link_type, CompressionLevel.LIGHT)
+            if level is CompressionLevel.LIGHT:
+                logger.warning(
+                    "compression='adaptive' uses dense-safe FP16 only until "
+                    "sparse-on-wire lands; TopK levels are disabled to protect "
+                    "gradient correctness (link=%s).",
+                    link_type.value,
+                )
             return AdaptiveCompressor(
-                link_type=link_type,
                 config=AdaptiveCompressionConfig(
+                    fixed_level=level,
                     warmup_steps=self.config.compression_warmup_steps,
                 ),
             )
 
-        level_map = {
-            "light": CompressionLevel.LIGHT,
-            "moderate": CompressionLevel.MODERATE,
-            "aggressive": CompressionLevel.AGGRESSIVE,
-        }
-        level = level_map.get(comp)
-        if level is None:
-            valid = ["none", "adaptive"] + sorted(level_map)
-            raise ValueError(
-                f"Unknown compression={comp!r}. Valid: {valid}"
+        if comp == "light":
+            return AdaptiveCompressor(
+                config=AdaptiveCompressionConfig(
+                    fixed_level=CompressionLevel.LIGHT,
+                    warmup_steps=self.config.compression_warmup_steps,
+                ),
             )
 
-        return AdaptiveCompressor(
-            config=AdaptiveCompressionConfig(
-                fixed_level=level,
-                warmup_steps=self.config.compression_warmup_steps,
-            ),
+        raise ValueError(
+            f"Unknown compression={comp!r}. Valid: none, light, adaptive"
         )
+
+    def _handle_sync_degradation(
+        self,
+        *,
+        reason: str,
+        audit_name: str,
+        unsynced: bool = False,
+        validation: bool = False,
+        **audit_fields: object,
+    ) -> None:
+        """Record degradation and optionally abort the training step."""
+        if unsynced:
+            self._unsynced_steps += 1
+        if validation:
+            self._validation_fallback_steps += 1
+        self._last_sync_error = reason
+        audit_event(audit_name, rank=self.rank, reason=reason, **audit_fields)
+        if not self.config.allow_degraded:
+            raise SyncDegradedError(
+                f"Gradient sync degraded ({reason}). Training aborted to avoid "
+                "silent model divergence. Pass allow_degraded=True on "
+                "DataParallelConfig to continue with local-only gradients."
+            )
 
     async def setup(self) -> None:
         """Initialize data parallel training.
@@ -247,9 +306,13 @@ class DataParallel:
     async def sync_gradients(self) -> float:
         """AllReduce gradients across all nodes.
 
-        If compression is enabled, gradients are compressed before
-        allreduce and decompressed after. TopK + FP16 can reduce
-        communication volume by 20-200x depending on settings.
+        Dense-safe compression (``light`` / dense-safe ``adaptive``) may
+        quantize locally before allreduce; the wire payload remains dense
+        until sparse-on-wire. TopK levels are rejected because per-rank
+        sparsification before allreduce biases the averaged gradient.
+
+        On sync failure, raises :class:`SyncDegradedError` unless
+        ``config.allow_degraded`` is True (local-only fallback).
 
         Call after backward() and before step().
 
@@ -295,15 +358,14 @@ class DataParallel:
         # Compress if active. NOTE: until sparse-on-wire (TODOS Issue 3),
         # compressed gradients are decompressed locally before allreduce,
         # so the wire payload is dense regardless. _bytes_sent therefore
-        # reflects ACTUAL wire bytes, not the compressed size of the
-        # local sparsification. _bytes_saved stays 0 in v2.2.
+        # reflects ACTUAL wire bytes. _bytes_saved stays 0 in v2.2.
         try:
             if self._compressor is not None:
                 compressed = self._compressor.compress(flat_grads)
 
                 if isinstance(compressed, CompressedArray):
-                    sparse_grads = self._compressor.decompress(compressed)
-                    averaged = await self.group.allreduce(sparse_grads, op="mean")
+                    dense_grads = self._compressor.decompress(compressed)
+                    averaged = await self.group.allreduce(dense_grads, op="mean")
                 else:
                     averaged = await self.group.allreduce(compressed, op="mean")
                 self._bytes_sent += original_bytes
@@ -314,14 +376,12 @@ class DataParallel:
         except GradientValidationError as e:
             # SECURITY: Metadata bomb or corrupt compressed gradient from peer.
             logger.error("Gradient deserialization failed: %s", e)
-            logger.warning("Falling back to local gradients (discarding allreduce result)")
-            self._unsynced_steps += 1
-            self._last_sync_error = f"gradient_deserialization_failed:{e}"
-            audit_event(
-                "training.sync_degraded",
-                rank=self.rank,
-                reason="gradient_deserialization_failed",
+            self._handle_sync_degradation(
+                reason=f"gradient_deserialization_failed:{e}",
+                audit_name="training.sync_degraded",
+                unsynced=True,
             )
+            logger.warning("Falling back to local gradients (discarding allreduce result)")
             averaged = flat_grads
         except (
             asyncio.TimeoutError,
@@ -331,22 +391,17 @@ class DataParallel:
             EOFError,
         ) as e:
             # Node dropout: a peer disconnected mid-allreduce (lid closed,
-            # thermal shutdown, network failure). asyncio.IncompleteReadError
-            # surfaces when readexactly hits EOF mid-frame; EOFError covers
-            # any future stdlib variants. Use local gradients for this
-            # step rather than crashing the entire training run.
+            # thermal shutdown, network failure).
             logger.error("Allreduce failed (node dropout?): %s", e)
+            self._handle_sync_degradation(
+                reason=f"allreduce_failed:{type(e).__name__}",
+                audit_name="training.sync_degraded",
+                unsynced=True,
+                error_type=type(e).__name__,
+            )
             logger.warning(
                 "Falling back to local gradients. Training continues but "
                 "this step is not synchronized across the fleet."
-            )
-            self._unsynced_steps += 1
-            self._last_sync_error = f"allreduce_failed:{type(e).__name__}"
-            audit_event(
-                "training.sync_degraded",
-                rank=self.rank,
-                reason="allreduce_failed",
-                error_type=type(e).__name__,
             )
             averaged = flat_grads
 
@@ -356,14 +411,12 @@ class DataParallel:
             validate_gradients(averaged)
         except GradientValidationError as e:
             logger.error("Gradient validation failed: %s", e)
-            logger.warning("Falling back to local gradients (discarding allreduce result)")
-            self._validation_fallback_steps += 1
-            self._last_sync_error = f"gradient_validation_failed:{e}"
-            audit_event(
-                "training.gradient_validation_failed",
-                rank=self.rank,
-                reason="synced_gradient_invalid",
+            self._handle_sync_degradation(
+                reason=f"gradient_validation_failed:{e}",
+                audit_name="training.gradient_validation_failed",
+                validation=True,
             )
+            logger.warning("Falling back to local gradients (discarding allreduce result)")
             averaged = flat_grads  # use own gradients only
 
         # Guard: verify allreduce didn't corrupt the shape
@@ -374,12 +427,10 @@ class DataParallel:
                 self._expected_grad_size,
                 averaged.size,
             )
-            self._validation_fallback_steps += 1
-            self._last_sync_error = "gradient_shape_mismatch"
-            audit_event(
-                "training.gradient_validation_failed",
-                rank=self.rank,
-                reason="shape_mismatch",
+            self._handle_sync_degradation(
+                reason="gradient_shape_mismatch",
+                audit_name="training.gradient_validation_failed",
+                validation=True,
             )
             averaged = flat_grads
 

@@ -240,7 +240,7 @@ class TestSetupRebroadcast:
 class TestCompressionAcrossLevels:
     """Training converges at every compression level — direction matters."""
 
-    @pytest.mark.parametrize("compression", ["none", "light", "moderate", "aggressive"])
+    @pytest.mark.parametrize("compression", ["none", "light", "adaptive"])
     @pytest.mark.asyncio
     async def test_each_compression_level_converges(self, compression):
         from macfleet.training.data_parallel import DataParallelConfig
@@ -278,8 +278,10 @@ class TestCompressionAcrossLevels:
             final_loss = float(engines[0].forward(
                 (dataset.tensors[0], dataset.tensors[1]),
             ).item())
-            # Loss should at least not blow up. Aggressive compression
-            # may converge slower so we use a loose bound.
+            assert final_loss < initial_loss
+            params = [eng.get_flat_parameters() for eng in engines]
+            np.testing.assert_allclose(params[0], params[1], rtol=1e-6)
+            # Loss should at least not blow up.
             assert final_loss < initial_loss * 1.5, (
                 f"compression={compression}: loss {initial_loss:.3f} → "
                 f"{final_loss:.3f} suggests divergence"

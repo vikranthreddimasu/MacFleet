@@ -6,10 +6,10 @@ This file helps AI coding assistants (Claude, Copilot, Cursor, Cody, etc.) under
 
 MacFleet pools multiple Apple Silicon Macs into a single distributed ML training cluster. Users run `macfleet join` on each Mac, and the framework handles discovery, gradient synchronization, and workload scheduling automatically.
 
-- **Version**: 2.0.0
+- **Version**: 2.2.1
 - **Language**: Python 3.11+
 - **Platform**: macOS only (Apple Silicon)
-- **Tests**: 447, run with `make test` or `python -m pytest tests/ -v`
+- **Tests**: 962, run with `make test` or `python -m pytest tests/ -v`
 - **Package**: `pip install macfleet`
 
 ## Critical Architecture Rule
@@ -36,7 +36,8 @@ MacFleet pools multiple Apple Silicon Macs into a single distributed ML training
 macfleet/
   __init__.py              # Version, lazy imports for Pool/train/distributed
   cli/
-    main.py                # Click CLI: join, leave, status, info, train, bench, diagnose
+    main.py                # Click CLI: join, status, info, train, bench, doctor,
+                           #            pair, rotate-token, run, quickstart
   comm/
     protocol.py            # 24-byte binary wire protocol with CRC32
     transport.py           # TCP peer connections with handshake, per-direction locks

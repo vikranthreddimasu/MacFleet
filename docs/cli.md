@@ -134,8 +134,10 @@ Use `--json` for CI and local monitors. It prints `status`, `ready`,
 summary counts, and a `checks` array with stable ids, sections, names,
 statuses, and redacted details.
 
-## `macfleet leave`
+## Leaving the pool
 
-Graceful departure — unregister mDNS, close heartbeat server, leave
-the registry cleanly. The next `status` from other Macs will show
-this node as failed within 10s (default failure timeout).
+There is no standalone `macfleet leave` command. Stop a running
+`macfleet join` with Ctrl+C (the agent unregisters mDNS and closes
+heartbeat listeners on exit). From Python, call `Pool.leave()` or exit
+the `Pool` context manager. Peers mark the node failed within the
+default heartbeat failure timeout (~10s).
