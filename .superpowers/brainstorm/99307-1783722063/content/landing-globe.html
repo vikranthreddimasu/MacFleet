@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MacFleet — Interactive Globe Concept</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f6f4ef;
+      --muted: rgba(246, 244, 239, 0.62);
+      --line: rgba(246, 244, 239, 0.14);
+      --orange: #ff6a1a;
+      --amber: #ffb238;
+      --blue: #4b8dff;
+      --green: #4ce1a1;
+      --ease: cubic-bezier(.16, 1, .3, 1);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #050505;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+    }
+
+    body {
+      background:
+        radial-gradient(circle at 81% 48%, rgba(55, 94, 180, 0.11), transparent 31%),
+        radial-gradient(circle at 60% 15%, rgba(255, 106, 26, 0.05), transparent 25%),
+        #050505;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .16;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.86' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.19'/%3E%3C/svg%3E");
+      mix-blend-mode: soft-light;
+      z-index: 20;
+    }
+
+    .page {
+      min-height: 100dvh;
+      position: relative;
+      isolation: isolate;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      overflow: hidden;
+    }
+
+    .ambient {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .bit {
+      position: absolute;
+      color: rgba(255, 128, 37, .17);
+      font: 500 11px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+      animation: drift var(--duration) linear infinite;
+      animation-delay: var(--delay);
+    }
+
+    @keyframes drift {
+      0% { transform: translate3d(0, 22px, 0); opacity: 0; }
+      20% { opacity: .9; }
+      80% { opacity: .3; }
+      100% { transform: translate3d(var(--sway), -72px, 0); opacity: 0; }
+    }
+
+    nav {
+      height: 88px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 clamp(28px, 4.5vw, 76px);
+      border-bottom: 1px solid transparent;
+      position: relative;
+      z-index: 8;
+      animation: reveal .8s var(--ease) both;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      font-size: 20px;
+      font-weight: 620;
+      letter-spacing: -.03em;
+    }
+
+    .brand-mark {
+      width: 24px;
+      height: 24px;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 3px;
+      transform: rotate(45deg);
+    }
+
+    .brand-mark span {
+      border-radius: 2px;
+      background: var(--ink);
+      opacity: .92;
+    }
+
+    .nav-links { display: flex; gap: 34px; margin-left: 6vw; }
+    .nav-links a, .nav-action {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      transition: color .25s ease;
+    }
+    .nav-links a:hover { color: var(--ink); }
+
+    .nav-right { display: flex; align-items: center; gap: 22px; }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 13px rgba(76,225,161,.75); }
+    .nav-action {
+      color: #090909;
+      background: var(--ink);
+      padding: 11px 17px;
+      border-radius: 999px;
+      font-weight: 620;
+      transition: transform .2s ease, background .2s ease;
+    }
+    .nav-action:hover { transform: translateY(-1px); background: #fff; }
+
+    main {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: minmax(0, .9fr) minmax(520px, 1.1fr);
+      align-items: center;
+      padding: 1vh clamp(28px, 4.5vw, 76px) 1vh;
+    }
+
+    .hero-copy {
+      max-width: 710px;
+      position: relative;
+      z-index: 5;
+      padding-bottom: 3vh;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: clamp(23px, 3.5vh, 40px);
+      color: rgba(246,244,239,.65);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      animation: reveal .9s .1s var(--ease) both;
+    }
+    .eyebrow-line { width: 36px; height: 1px; background: var(--orange); box-shadow: 0 0 10px rgba(255,106,26,.7); }
+
+    h1 {
+      margin: 0;
+      max-width: 740px;
+      font-size: clamp(62px, 7.1vw, 126px);
+      line-height: .87;
+      letter-spacing: -.067em;
+      font-weight: 520;
+      text-wrap: balance;
+      animation: reveal 1s .15s var(--ease) both;
+    }
+
+    h1 .signal {
+      display: inline-block;
+      background: linear-gradient(105deg, #fff3e6 5%, #ff9a3e 55%, #ff5315 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .lede {
+      margin: clamp(28px, 4vh, 46px) 0 0;
+      max-width: 590px;
+      color: var(--muted);
+      font-size: clamp(17px, 1.42vw, 22px);
+      line-height: 1.5;
+      letter-spacing: -.016em;
+      animation: reveal 1s .24s var(--ease) both;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      margin-top: clamp(28px, 4.5vh, 48px);
+      animation: reveal 1s .32s var(--ease) both;
+    }
+
+    .primary {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      background: var(--ink);
+      color: #080808;
+      font: inherit;
+      font-size: 15px;
+      font-weight: 650;
+      padding: 15px 22px;
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: transform .2s ease, box-shadow .25s ease;
+    }
+    .primary:hover { transform: translateY(-2px); box-shadow: 0 12px 35px rgba(255,255,255,.12); }
+    .primary:active { transform: scale(.97); }
+    .primary-arrow { font-size: 18px; transition: transform .25s var(--ease); }
+    .primary:hover .primary-arrow { transform: translateX(3px); }
+
+    .terminal-link {
+      color: rgba(246,244,239,.76);
+      font: 500 13px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+      text-decoration: none;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+      transition: color .25s ease, border-color .25s ease;
+    }
+    .terminal-link:hover { color: white; border-color: var(--orange); }
+
+    .globe-stage {
+      position: absolute;
+      right: max(-16vw, -270px);
+      top: 50%;
+      width: min(76vw, 1120px);
+      aspect-ratio: 1;
+      transform: translateY(-50%);
+      cursor: grab;
+      touch-action: none;
+      z-index: 1;
+      animation: globe-in 1.6s .1s var(--ease) both;
+    }
+    .globe-stage:active { cursor: grabbing; }
+    .globe-stage::before {
+      content: "";
+      position: absolute;
+      inset: 12%;
+      border-radius: 50%;
+      background: radial-gradient(circle at 40% 40%, transparent 25%, rgba(255,105,20,.035) 55%, rgba(14,30,66,.25) 72%, transparent 74%);
+      filter: blur(12px);
+      pointer-events: none;
+    }
+    canvas { width: 100%; height: 100%; display: block; }
+
+    .orbit-label {
+      position: absolute;
+      left: 17%;
+      bottom: 13%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: rgba(246,244,239,.45);
+      font: 500 10px/1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      pointer-events: none;
+    }
+    .mouse-icon { width: 20px; height: 26px; border: 1px solid rgba(246,244,239,.25); border-radius: 10px; position: relative; }
+    .mouse-icon::after { content: ""; width: 2px; height: 5px; border-radius: 2px; background: var(--orange); position: absolute; left: 8px; top: 5px; animation: scroll-cue 1.7s ease-in-out infinite; }
+
+    footer {
+      min-height: 72px;
+      margin: 0 clamp(28px, 4.5vw, 76px);
+      border-top: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-items: center;
+      position: relative;
+      z-index: 6;
+      animation: reveal 1s .4s var(--ease) both;
+    }
+    .stat { display: flex; gap: 12px; align-items: baseline; }
+    .stat-value { font: 600 15px/1 ui-monospace, "SFMono-Regular", Consolas, monospace; color: rgba(246,244,239,.9); }
+    .stat-label { font-size: 11px; color: rgba(246,244,239,.38); text-transform: uppercase; letter-spacing: .1em; }
+    .stat:nth-child(2) { justify-self: center; }
+    .stat:nth-child(3) { justify-self: end; }
+
+    @keyframes reveal { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes globe-in { from { opacity: 0; transform: translateY(-50%) scale(.88) rotate(-5deg); } to { opacity: 1; transform: translateY(-50%) scale(1) rotate(0); } }
+    @keyframes scroll-cue { 0%,100% { transform: translateY(0); opacity: .3; } 50% { transform: translateY(6px); opacity: 1; } }
+
+    @media (max-width: 980px) {
+      .nav-links, .status { display: none; }
+      main { grid-template-columns: 1fr; align-items: end; padding-bottom: 4vh; }
+      .hero-copy { max-width: 680px; }
+      h1 { font-size: clamp(58px, 13vw, 104px); }
+      .lede { max-width: 490px; }
+      .globe-stage { width: min(105vw, 900px); right: -43vw; top: 43%; opacity: .72; }
+      footer { grid-template-columns: 1fr 1fr; }
+      .stat:nth-child(2) { justify-self: end; }
+      .stat:nth-child(3) { display: none; }
+    }
+
+    @media (max-width: 640px) {
+      nav { height: 72px; }
+      .nav-action { padding: 9px 13px; }
+      main { padding-top: 1vh; }
+      h1 { font-size: clamp(52px, 17vw, 82px); }
+      .lede { font-size: 16px; max-width: 88%; }
+      .terminal-link { display: none; }
+      .globe-stage { width: 142vw; right: -79vw; top: 38%; }
+      .orbit-label { display: none; }
+      footer { min-height: 60px; }
+      .stat-label { display: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="ambient" id="ambient" aria-hidden="true"></div>
+
+    <nav aria-label="Main navigation">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>MacFleet</div>
+      <div class="nav-links">
+        <a href="#">Product</a><a href="#">Developers</a><a href="#">Security</a><a href="#">Docs</a>
+      </div>
+      <div class="nav-right">
+        <span class="status"><span class="status-dot"></span> Network online</span>
+        <a class="nav-action" href="#">View on GitHub ↗</a>
+      </div>
+    </nav>
+
+    <main>
+      <section class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-line"></span>Distributed ML for Apple Silicon</div>
+        <h1>Every Mac.<br><span class="signal">One machine.</span></h1>
+        <p class="lede">Turn the Apple Silicon already around you into one private training cluster. No cloud, no CUDA, no infrastructure ceremony.</p>
+        <div class="actions">
+          <button class="primary" type="button">Build your fleet <span class="primary-arrow">→</span></button>
+          <a class="terminal-link" href="#">$ pip install macfleet</a>
+        </div>
+      </section>
+
+      <div class="globe-stage" id="globe-stage" aria-label="Interactive globe made from binary digits. Drag to rotate.">
+        <canvas id="globe"></canvas>
+        <div class="orbit-label"><span class="mouse-icon"></span>Drag to route the fleet</div>
+      </div>
+    </main>
+
+    <footer>
+      <div class="stat"><span class="stat-value">05 sec</span><span class="stat-label">to join a node</span></div>
+      <div class="stat"><span class="stat-value">0 cloud</span><span class="stat-label">required</span></div>
+      <div class="stat"><span class="stat-value">PyTorch + MLX</span><span class="stat-label">native engines</span></div>
+    </footer>
+  </div>
+
+  <script>
+    const ambient = document.getElementById('ambient');
+    for (let i = 0; i < 38; i++) {
+      const bit = document.createElement('span');
+      bit.className = 'bit';
+      bit.textContent = Math.random() > .5 ? '1' : '0';
+      bit.style.left = `${Math.random() * 100}%`;
+      bit.style.top = `${Math.random() * 110}%`;
+      bit.style.setProperty('--duration', `${8 + Math.random() * 15}s`);
+      bit.style.setProperty('--delay', `${-Math.random() * 18}s`);
+      bit.style.setProperty('--sway', `${-30 + Math.random() * 60}px`);
+      ambient.appendChild(bit);
+    }
+
+    const canvas = document.getElementById('globe');
+    const stage = document.getElementById('globe-stage');
+    const ctx = canvas.getContext('2d', { alpha: true });
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let dpr = Math.min(devicePixelRatio || 1, 2);
+    let width = 0, height = 0, radius = 0;
+    let yaw = -0.55, pitch = -0.14, targetYaw = yaw, targetPitch = pitch;
+    let dragging = false, lastX = 0, lastY = 0, velocity = 0;
+    let pointerX = 0, pointerY = 0;
+
+    const points = [];
+    const count = innerWidth < 700 ? 950 : 1750;
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    for (let i = 0; i < count; i++) {
+      const y = 1 - (i / (count - 1)) * 2;
+      const r = Math.sqrt(1 - y * y);
+      const theta = golden * i;
+      const x = Math.cos(theta) * r;
+      const z = Math.sin(theta) * r;
+      const lat = Math.asin(y);
+      const lon = Math.atan2(z, x);
+      const field = Math.sin(lon * 2.7 + Math.sin(lat * 3.4) * 1.8) + Math.cos(lat * 5.1 - lon * 1.25) * .58 + Math.sin((lon + lat) * 6.2) * .22;
+      const land = field > .18 || (field > -.1 && Math.sin(lon * 7 - lat * 4) > .45);
+      points.push({ x, y, z, bit: Math.random() > .5 ? '1' : '0', land, phase: Math.random() * Math.PI * 2 });
+    }
+
+    function resize() {
+      const rect = canvas.getBoundingClientRect();
+      dpr = Math.min(devicePixelRatio || 1, 2);
+      width = rect.width;
+      height = rect.height;
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      radius = Math.min(width, height) * .365;
+    }
+
+    const rotate = (p) => {
+      const cy = Math.cos(yaw), sy = Math.sin(yaw);
+      let x = p.x * cy - p.z * sy;
+      let z = p.x * sy + p.z * cy;
+      const cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const y = p.y * cp - z * sp;
+      z = p.y * sp + z * cp;
+      return { x, y, z };
+    };
+
+    function draw(time = 0) {
+      ctx.clearRect(0, 0, width, height);
+      if (!dragging && !reducedMotion) targetYaw += .0012;
+      yaw += (targetYaw - yaw) * .075;
+      pitch += (targetPitch - pitch) * .075;
+
+      const cx = width * .5;
+      const cy = height * .5;
+      const glow = ctx.createRadialGradient(cx - radius * .22, cy - radius * .22, 0, cx, cy, radius * 1.12);
+      glow.addColorStop(0, 'rgba(255,120,36,.05)');
+      glow.addColorStop(.7, 'rgba(37,85,185,.06)');
+      glow.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath(); ctx.arc(cx, cy, radius * 1.14, 0, Math.PI * 2); ctx.fill();
+
+      const visible = [];
+      for (const p of points) {
+        const q = rotate(p);
+        if (q.z > -.22) visible.push({ ...q, p });
+      }
+      visible.sort((a, b) => a.z - b.z);
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (const q of visible) {
+        const perspective = 1 + q.z * .055;
+        const sx = cx + q.x * radius * perspective;
+        const sy = cy - q.y * radius * perspective;
+        const edge = Math.max(0, Math.min(1, (q.z + .17) / 1.08));
+        const shimmer = .84 + Math.sin(time * .0012 + q.p.phase) * .12;
+        const size = Math.max(5.8, radius / 58) * (.82 + edge * .28);
+        ctx.font = `${q.p.land ? 650 : 430} ${size}px ui-monospace, SFMono-Regular, Consolas, monospace`;
+        if (q.p.land) {
+          const hot = Math.max(0, q.x * -.55 + q.y * .22 + .5);
+          const r = Math.round(72 + hot * 183);
+          const g = Math.round(126 + hot * 34);
+          const b = Math.round(245 - hot * 218);
+          ctx.fillStyle = `rgba(${r},${g},${b},${(.18 + edge * .76) * shimmer})`;
+        } else {
+          ctx.fillStyle = `rgba(184,205,255,${(.035 + edge * .2) * shimmer})`;
+        }
+        ctx.fillText(q.p.bit, sx, sy);
+      }
+
+      ctx.strokeStyle = 'rgba(255,120,34,.14)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius * 1.015, -.65, 2.45);
+      ctx.stroke();
+
+      requestAnimationFrame(draw);
+    }
+
+    stage.addEventListener('pointerdown', (e) => {
+      dragging = true; lastX = e.clientX; lastY = e.clientY; velocity = 0;
+      stage.setPointerCapture(e.pointerId);
+    });
+    stage.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      targetYaw += dx * .005;
+      targetPitch = Math.max(-.7, Math.min(.7, targetPitch - dy * .004));
+      velocity = dx * .00035;
+      lastX = e.clientX; lastY = e.clientY;
+    });
+    const release = () => { dragging = false; targetYaw += velocity * 18; };
+    stage.addEventListener('pointerup', release);
+    stage.addEventListener('pointercancel', release);
+    stage.addEventListener('dblclick', () => { targetYaw = -.55; targetPitch = -.14; });
+    addEventListener('resize', resize);
+    resize();
+    requestAnimationFrame(draw);
+  </script>
+</body>
+</html>
