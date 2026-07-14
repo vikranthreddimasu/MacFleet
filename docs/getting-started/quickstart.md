@@ -1,5 +1,7 @@
 # Quickstart
 
+> Second Mac? See [Pairing](pairing.md) after the single-Mac check.
+
 Your first distributed training run, start to finish.
 
 ## Single-Mac sanity check
