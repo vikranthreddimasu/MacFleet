@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "b5dc3d6ec6cb",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/frontend-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b5/dc3d6ec6cb/0/metadata.json",
+      "transcript": "/b5/dc3d6ec6cb/0/full.jsonl",
+      "compact_transcript": "/b5/dc3d6ec6cb/0/transcript.jsonl",
+      "content_hash": "/b5/dc3d6ec6cb/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
