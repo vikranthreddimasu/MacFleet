@@ -189,6 +189,7 @@ cd MacFleet
 pip install -e ".[dev,all]"
 make test       # 962 tests
 make lint       # ruff + mypy
+make help       # list dev targets
 ```
 
 ## License
