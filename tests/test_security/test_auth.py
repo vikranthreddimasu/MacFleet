@@ -626,6 +626,7 @@ class TestTokenFileManagement:
         """resolve_token_with_file reads from token file."""
         token_file = tmp_path / "fleet-token"
         token_file.write_text("saved-token-value")
+        os.chmod(token_file, 0o600)
         monkeypatch.delenv(TOKEN_ENV_VAR, raising=False)
         monkeypatch.setattr("macfleet.security.auth.TOKEN_FILE", str(token_file))
         assert resolve_token_with_file() == "saved-token-value"
