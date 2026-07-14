@@ -1,5 +1,7 @@
 # UI System
 
+> Catering-ops prototype UI — not part of the macfleet pip package.
+
 ## Visual Direction
 
 The current prototype uses a restrained monochrome palette with subtle status
