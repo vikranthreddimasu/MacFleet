@@ -1,3 +1,5 @@
+# Shared pytest fixtures for MacFleet integration and CLI tests.
+
 """Shared test fixtures for MacFleet v2.
 
 Torch fixtures are only registered when torch is installed. Framework-agnostic
