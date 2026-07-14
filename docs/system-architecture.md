@@ -1,5 +1,8 @@
 # System Architecture: Catering Ops Prototype
 
+Gradients cross the comm layer as numpy arrays only (no torch/mlx imports in `macfleet/comm/`).
+
+
 ## Prototype Shape
 
 The prototype is intentionally simple:
