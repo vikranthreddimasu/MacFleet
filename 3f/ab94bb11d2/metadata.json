@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "3fab94bb11d2",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "tools/goal_batch_commits.sh"
+  ],
+  "sessions": [
+    {
+      "metadata": "/3f/ab94bb11d2/0/metadata.json",
+      "transcript": "/3f/ab94bb11d2/0/full.jsonl",
+      "compact_transcript": "/3f/ab94bb11d2/0/transcript.jsonl",
+      "content_hash": "/3f/ab94bb11d2/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
