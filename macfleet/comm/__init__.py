@@ -1,1 +1,1 @@
-"""Communication layer: transport, protocol, and collectives."""
+"""Communication layer: TCP transport, wire protocol, collectives (numpy only)."""
