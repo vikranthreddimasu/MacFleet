@@ -1,5 +1,8 @@
 # Wire protocol reference
 
+Wire messages use a fixed 24-byte header (see `macfleet/comm/protocol.py`).
+
+
 MacFleet uses two protocols on distinct ports:
 
 - **Heartbeat** (line-based ASCII, port 50051 by default): discovery
