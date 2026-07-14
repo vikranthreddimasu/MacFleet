@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "b479903957a1",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitignore",
+    ".superpowers/brainstorm/.last-port",
+    ".superpowers/brainstorm/.last-token",
+    ".superpowers/brainstorm/99307-1783722063/content/landing-globe.html",
+    ".superpowers/brainstorm/99307-1783722063/state/server-stopped"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b4/79903957a1/0/metadata.json",
+      "transcript": "/b4/79903957a1/0/full.jsonl",
+      "compact_transcript": "/b4/79903957a1/0/transcript.jsonl",
+      "content_hash": "/b4/79903957a1/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
