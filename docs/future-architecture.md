@@ -1,3 +1,5 @@
+> Design exploration — not committed roadmap.
+
 # Future Architecture
 
 ## Near Term
