@@ -1,5 +1,7 @@
 # Security reference
 
+> Events append to `~/.macfleet/audit.jsonl` with secrets redacted.
+
 How MacFleet keeps your fleet safe on hostile networks.
 
 ## Threat model
