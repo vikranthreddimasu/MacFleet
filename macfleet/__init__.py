@@ -1,6 +1,6 @@
 """MacFleet v2: Pool Apple Silicon Macs into a distributed ML training cluster.
 
-Zero-config discovery. Framework-agnostic engines. Adaptive networking.
+Zero-config discovery. Framework-agnostic engines. Adaptive networking. Lazy-imports torch and mlx.
 
     pip install macfleet && macfleet join
 """
