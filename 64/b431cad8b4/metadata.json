@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "64b431cad8b4",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "macfleet/training/__init__.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/64/b431cad8b4/0/metadata.json",
+      "transcript": "/64/b431cad8b4/0/full.jsonl",
+      "compact_transcript": "/64/b431cad8b4/0/transcript.jsonl",
+      "content_hash": "/64/b431cad8b4/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
