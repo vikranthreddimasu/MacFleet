@@ -1,5 +1,8 @@
 # Data Model
 
+Fleet tokens persist at `~/.macfleet/fleet-token` (mode 0600).
+
+
 ## Event
 
 Minimum prototype fields:
