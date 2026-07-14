@@ -1,0 +1,22 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "30d7474efbe8",
+  "strategy": "manual-commit",
+  "branch": "improvement/high-impact-hardening",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "macfleet/pool/agent.py",
+    "macfleet/pool/discovery.py",
+    "tests/test_pool/test_peer_removed.py",
+    "tests/test_security/test_fleet_discovery.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/30/d7474efbe8/0/metadata.json",
+      "transcript": "/30/d7474efbe8/0/full.jsonl",
+      "compact_transcript": "/30/d7474efbe8/0/transcript.jsonl",
+      "content_hash": "/30/d7474efbe8/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
