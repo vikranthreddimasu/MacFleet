@@ -1,5 +1,8 @@
 # Registered tasks (`@macfleet.task`)
 
+Callables must be registered with `@macfleet.task` before dispatch — names are sent on the wire, not pickles.
+
+
 For general-purpose compute across the fleet, register callables with
 `@macfleet.task`. This is the secure alternative to cloudpickle-over-
 the-wire: the wire carries only the task NAME, and workers look that
