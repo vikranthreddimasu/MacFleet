@@ -1,5 +1,8 @@
 # TODOS
 
+
+Living document — items move to releases as they ship.
+
 Deferred work from reviews. Grouped by release target.
 
 ## v2.3 (next release after v2.2 ships + is stable)
