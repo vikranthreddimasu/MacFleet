@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "fe6c94b9c19b",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/agent-behavior.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fe/6c94b9c19b/0/metadata.json",
+      "transcript": "/fe/6c94b9c19b/0/full.jsonl",
+      "compact_transcript": "/fe/6c94b9c19b/0/transcript.jsonl",
+      "content_hash": "/fe/6c94b9c19b/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
