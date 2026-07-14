@@ -1,14 +1,16 @@
 """MacFleet CLI: zero-config compute pool for Apple Silicon Macs.
 
 Commands:
-    macfleet join        Join the compute pool
-    macfleet leave       Leave the pool gracefully
-    macfleet status      Show pool members and network info
-    macfleet info        Show local hardware info
-    macfleet train       Submit a training job
-    macfleet bench       Benchmark network + compute
-    macfleet doctor      System health check (alias: diagnose)
-    macfleet quickstart  Write a starter training script
+    macfleet join         Join the compute pool (Ctrl+C to leave)
+    macfleet status       Show pool members and network info
+    macfleet info         Show local hardware info
+    macfleet train        Submit a training job
+    macfleet bench        Benchmark network + compute
+    macfleet doctor       System health check (alias: diagnose)
+    macfleet pair         Enroll into a fleet via one-time code
+    macfleet rotate-token Rotate the persisted fleet token
+    macfleet run          Dispatch a one-shot compute task
+    macfleet quickstart   Write a starter training script
 """
 
 from __future__ import annotations

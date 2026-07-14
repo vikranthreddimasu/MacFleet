@@ -3,8 +3,8 @@
 Handles: hardware profiling, mDNS registration, peer discovery,
 heartbeat gossip, coordinator election, and work assignment.
 
-    macfleet join  →  starts the agent
-    macfleet leave →  stops the agent gracefully
+    macfleet join  →  starts the agent (Ctrl+C stops it gracefully)
+    Pool.leave()   →  stops an in-process agent from Python
 """
 
 from __future__ import annotations
