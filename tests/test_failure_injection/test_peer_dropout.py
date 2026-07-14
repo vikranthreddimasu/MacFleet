@@ -21,7 +21,7 @@ nn = pytest.importorskip("torch.nn")
 from macfleet.comm.collectives import CollectiveGroup  # noqa: E402
 from macfleet.comm.transport import PeerTransport, TransportConfig  # noqa: E402
 from macfleet.engines.torch_engine import TorchEngine  # noqa: E402
-from macfleet.training.data_parallel import DataParallel  # noqa: E402
+from macfleet.training.data_parallel import DataParallel, DataParallelConfig  # noqa: E402
 
 CONFIG = TransportConfig(connect_timeout_sec=2.0, recv_timeout_sec=3.0)
 
@@ -104,7 +104,12 @@ class TestPeerDropoutDuringAllreduce:
         try:
             groups = _make_groups(n, transports)
             engines = [_make_engine(seed=42)[1] for _ in range(n)]
-            dp0 = DataParallel(engines[0], groups[0])
+            # Explicit opt-in: continue with local gradients after dropout.
+            dp0 = DataParallel(
+                engines[0],
+                groups[0],
+                config=DataParallelConfig(allow_degraded=True),
+            )
 
             engines[0].zero_grad()
             x = torch.randn(2, 4)

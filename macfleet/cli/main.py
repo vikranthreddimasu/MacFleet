@@ -27,7 +27,8 @@ from rich.table import Table
 import macfleet
 
 console = Console()
-TRAINING_COMPRESSION_CHOICES = ("none", "light", "moderate", "aggressive", "adaptive")
+# moderate/aggressive TopK is rejected until sparse-on-wire (see DataParallel).
+TRAINING_COMPRESSION_CHOICES = ("none", "light", "adaptive")
 
 
 @click.group()
