@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "904b6706b641",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/guides/dashboard.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/90/4b6706b641/0/metadata.json",
+      "transcript": "/90/4b6706b641/0/full.jsonl",
+      "compact_transcript": "/90/4b6706b641/0/transcript.jsonl",
+      "content_hash": "/90/4b6706b641/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
