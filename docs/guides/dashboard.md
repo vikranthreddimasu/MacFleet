@@ -1,5 +1,7 @@
 # Dashboard
 
+> Live Rich TUI — reads agent state via pool.dashboard_snapshot().
+
 MacFleet ships a Rich TUI dashboard that renders cluster health, per-
 node thermal state, training progress, and network stats.
 
