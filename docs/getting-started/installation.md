@@ -1,7 +1,7 @@
 # Installation
 
 MacFleet ships as a Python package. Minimum: Python 3.11, macOS 14+,
-Apple Silicon (M1+).
+Apple Silicon (M1, M2, M3, M4).
 
 ## Core install
 
