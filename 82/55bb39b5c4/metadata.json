@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "8255bb39b5c4",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/getting-started/quickstart.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/82/55bb39b5c4/0/metadata.json",
+      "transcript": "/82/55bb39b5c4/0/full.jsonl",
+      "compact_transcript": "/82/55bb39b5c4/0/transcript.jsonl",
+      "content_hash": "/82/55bb39b5c4/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
