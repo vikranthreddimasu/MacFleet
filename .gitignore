@@ -20,6 +20,12 @@ checkpoints/
 # Claude Code local settings
 .claude/
 
+# Local agent/tool configs (never commit tokens or hooks)
+.codex/
+.entire/
+.superpowers/
+.cursor/hooks.json
+
 # Environment
 .env
 *.pem
