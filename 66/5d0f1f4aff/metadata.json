@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "665d0f1f4aff",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/reference/security.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/66/5d0f1f4aff/0/metadata.json",
+      "transcript": "/66/5d0f1f4aff/0/full.jsonl",
+      "compact_transcript": "/66/5d0f1f4aff/0/transcript.jsonl",
+      "content_hash": "/66/5d0f1f4aff/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
