@@ -1,5 +1,8 @@
 # API Design
 
+Prefer `with macfleet.Pool() as pool:` so agents stop cleanly on exit.
+
+
 ## Direction
 
 The API should expose catering operations resources first. AI endpoints should
