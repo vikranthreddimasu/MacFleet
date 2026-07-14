@@ -665,7 +665,7 @@ class TestTokenFileManagement:
 
 
 class TestTokenFilePermissions:
-    """v2.2 PR 3 / A6 — token file must be 0600 on write, warn on broader mode."""
+    """v2.2 PR 3 / A6 — token file must be 0600 on write; refuse broader mode on read."""
 
     def test_write_creates_file_with_mode_0600(self, tmp_path, monkeypatch):
         """_write_token_file produces a file with exactly mode 0o600."""
@@ -737,10 +737,8 @@ class TestTokenFilePermissions:
 
         assert target.read_text() == "do-not-overwrite"
 
-    def test_read_warns_on_permissive_mode(self, tmp_path, monkeypatch, caplog):
-        """_read_token_file emits a warning when mode has group/other bits set."""
-        import logging as _logging
-
+    def test_read_refuses_permissive_mode(self, tmp_path, monkeypatch):
+        """_read_token_file fails closed when mode has group/other bits set."""
         from macfleet.security import auth as auth_mod
 
         token_file = tmp_path / "fleet-token"
@@ -748,13 +746,8 @@ class TestTokenFilePermissions:
         os.chmod(token_file, 0o644)
         monkeypatch.setattr(auth_mod, "TOKEN_FILE", str(token_file))
 
-        with caplog.at_level(_logging.WARNING, logger="macfleet.security.auth"):
-            token = auth_mod._read_token_file()
-
-        assert token == "some-fleet-token-value"  # still returns the token
-        assert any("permissive mode" in rec.message for rec in caplog.records), (
-            "expected permissive-mode warning in log"
-        )
+        with pytest.raises(PermissionError, match="permissive mode"):
+            auth_mod._read_token_file()
 
     def test_read_no_warning_when_mode_is_0600(self, tmp_path, monkeypatch, caplog):
         """Proper mode 0600 produces no warning."""

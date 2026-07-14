@@ -157,9 +157,10 @@ slow attackers get dropped quickly.
 ## Token file permissions
 
 `~/.macfleet/fleet-token` is chmod 0o600 after `O_CREAT`. On every read,
-`_check_token_file_mode` warns (not fails) if the mode leaks any bits
-to group or other — a soft tripwire that catches users who copied the
-file around with `cp` on a poorly-configured system.
+`_check_token_file_mode` **refuses to load** the token if the mode leaks
+any bits to group or other — fail closed so a world-readable credential
+cannot silently enroll this machine into a fleet. Fix with
+`chmod 600 ~/.macfleet/fleet-token`.
 
 The containing `~/.macfleet` directory is repaired to mode 0o700 before
 MacFleet writes a token. The token path must be a regular file: MacFleet

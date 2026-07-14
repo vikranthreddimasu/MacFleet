@@ -258,3 +258,41 @@ class TestDoctorSecuritySection:
 
 
 _ = pytest  # asyncio_mode=auto handles async tests; keep import referenced
+
+
+class TestPeerIdLengthCap:
+    async def test_oversized_peer_id_is_rejected_silently(self):
+        """Secure servers must reject oversized node_id without oracle leak."""
+        from macfleet.security.auth import MAX_NODE_ID_BYTES
+
+        sec = SecurityConfig(token="fleet-token-long-enough")
+        server = PeerTransport(local_id="server", config=CONFIG, security=sec)
+        await server.start_server("127.0.0.1", 0)
+        port = server._server.sockets[0].getsockname()[1]
+
+        try:
+            ssl_ctx = create_client_ssl_context()
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", port, ssl=ssl_ctx,
+            )
+            huge_id = b"x" * (MAX_NODE_ID_BYTES + 1)
+            payload = huge_id + generate_challenge() + secrets.token_bytes(32)
+            msg = WireMessage(
+                stream_id=0, msg_type=MessageType.CONTROL,
+                flags=MessageFlags.HANDSHAKE_V2, sequence=0, payload=payload,
+            )
+            writer.write(msg.pack())
+            await writer.drain()
+
+            data = await asyncio.wait_for(reader.read(4096), timeout=3.0)
+            assert data == b""
+            assert server.peer_ids == []
+            assert server._rate_limiter.get_delay("127.0.0.1") > 0
+
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+        finally:
+            await server.disconnect_all()

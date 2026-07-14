@@ -45,6 +45,10 @@ DEFAULT_SERVICE_TYPE = "_macfleet._tcp.local."
 # Challenge size in bytes
 CHALLENGE_SIZE = 32
 
+# Cap peer/node ids in handshake payloads (DoS / memory bound).
+# Open-mode already rejected payloads > 256; secure mode had no upper bound.
+MAX_NODE_ID_BYTES = 128
+
 # Gradient validation limits
 GRADIENT_MAX_MAGNITUDE = 1e6
 GRADIENT_MAX_NUMEL = 2_000_000_000  # ~8GB at float32
@@ -115,10 +119,8 @@ def _ensure_private_token_dir() -> None:
 def _read_token_file() -> Optional[str]:
     """Read saved fleet token from ~/.macfleet/fleet-token.
 
-    Warns if the file is readable by group or other (v2.2 PR 3 / A6).
-    The warning is non-blocking — we still return the token so the user's
-    workflow isn't broken, but the log tells them another local user can
-    read their fleet credential.
+    Fails closed if the file is readable by group or other (v2.2 PR 3 / A6):
+    raises PermissionError so a world-readable credential cannot be loaded.
     """
     try:
         st = os.lstat(TOKEN_FILE)
@@ -161,14 +163,17 @@ def _read_token_file() -> Optional[str]:
 
 
 def _check_token_file_mode(st_mode: int) -> None:
-    """Log a warning if the token file has group or other permission bits set."""
+    """Refuse to use a token file with group/other permission bits set.
+
+    Raises PermissionError so callers fail closed instead of loading a
+    credential any local user can read.
+    """
     perms = stat.S_IMODE(st_mode)
     if perms & 0o077:
-        logger.warning(
-            "Fleet token at %s has permissive mode %o (group/other bits set). "
-            "Another local user can read your fleet credential. Fix with: "
-            "`chmod 600 %s`",
-            TOKEN_FILE, perms, TOKEN_FILE,
+        raise PermissionError(
+            f"Fleet token at {TOKEN_FILE} has permissive mode {oct(perms)} "
+            f"(group/other bits set). Refusing to load it. Fix with: "
+            f"`chmod 600 {TOKEN_FILE}`"
         )
 
 
