@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "e6c8c7916ccd",
+  "strategy": "manual-commit",
+  "branch": "improvement/high-impact-hardening",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/reference/security.md",
+    "macfleet/comm/transport.py",
+    "macfleet/security/auth.py",
+    "tests/test_security/test_auth.py",
+    "tests/test_security/test_handshake_v3.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e6/c8c7916ccd/0/metadata.json",
+      "transcript": "/e6/c8c7916ccd/0/full.jsonl",
+      "compact_transcript": "/e6/c8c7916ccd/0/transcript.jsonl",
+      "content_hash": "/e6/c8c7916ccd/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
