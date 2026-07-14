@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "b525d18501ba",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/ui-system.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b5/25d18501ba/0/metadata.json",
+      "transcript": "/b5/25d18501ba/0/full.jsonl",
+      "compact_transcript": "/b5/25d18501ba/0/transcript.jsonl",
+      "content_hash": "/b5/25d18501ba/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
