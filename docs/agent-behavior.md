@@ -1,5 +1,8 @@
 # Agent Behavior
 
+Coordinator election uses a bully-style algorithm in the registry.
+
+
 ## Philosophy
 
 The agent behaves like a careful catering operations aide, not a commander.
