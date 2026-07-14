@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "a3bbf0980825",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/api-design.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a3/bbf0980825/0/metadata.json",
+      "transcript": "/a3/bbf0980825/0/full.jsonl",
+      "compact_transcript": "/a3/bbf0980825/0/transcript.jsonl",
+      "content_hash": "/a3/bbf0980825/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
