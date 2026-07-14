@@ -101,8 +101,10 @@ class PoolServiceListener(ServiceListener):
 
     def remove_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
         if self._on_remove:
-            hostname = name.replace(f".{service_type}", "")
-            self._on_remove(hostname)
+            # Service instance name is "{node_id}.{service_type}".
+            suffix = f".{service_type}"
+            node_id = name[: -len(suffix)] if name.endswith(suffix) else name
+            self._on_remove(node_id)
 
     def update_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
         loop = getattr(zc, "loop", None)
@@ -402,11 +404,21 @@ class ServiceRegistry:
             if on_add:
                 on_add(node)
 
-        def track_remove(hostname: str) -> None:
+        def track_remove(node_id: str) -> None:
             with self._nodes_lock:
-                self._discovered_nodes.pop(hostname, None)
+                removed = self._discovered_nodes.pop(node_id, None)
+                if removed is None:
+                    # Fallback when TXT node_id differed from the mDNS
+                    # instance name used at registration time.
+                    stale = [
+                        nid
+                        for nid, node in self._discovered_nodes.items()
+                        if node.hostname == node_id or nid == node_id
+                    ]
+                    for nid in stale:
+                        self._discovered_nodes.pop(nid, None)
             if on_remove:
-                on_remove(hostname)
+                on_remove(node_id)
 
         def track_update(node: DiscoveredNode) -> None:
             with self._nodes_lock:

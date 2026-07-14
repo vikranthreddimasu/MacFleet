@@ -835,9 +835,15 @@ class PoolAgent:
                 f"(world_size={registry.world_size})"
             )
 
-    def _on_peer_removed(self, hostname: str) -> None:
+    def _on_peer_removed(self, node_id: str) -> None:
         """Called when a peer's mDNS registration expires."""
-        console.print(f"[yellow]Peer removed:[/yellow] {hostname}")
+        registry = self._registry
+        if registry is not None:
+            registry.deregister(node_id)
+        heartbeat = self._heartbeat
+        if heartbeat is not None:
+            heartbeat.remove_peer(node_id)
+        console.print(f"[yellow]Peer removed:[/yellow] {node_id}")
 
     def _on_peer_suspected(self, node_id: str) -> None:
         """Called when heartbeat suspects a peer is down."""

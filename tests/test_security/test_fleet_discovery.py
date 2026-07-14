@@ -160,3 +160,44 @@ class TestMdnsInfoMinimization:
         assert b"compute_score" in props
         assert b"data_port" in props
         assert props[b"data_port"] == b"50052"
+
+
+class TestDiscoveryCacheRemoval:
+    def test_track_remove_evicts_by_node_id(self):
+        from macfleet.pool.discovery import DiscoveredNode
+
+        registry = ServiceRegistry()
+        removed: list[str] = []
+        track_add, track_remove, _ = registry._tracking_callbacks(
+            on_remove=removed.append,
+        )
+        node = DiscoveredNode(
+            hostname="mac.local",
+            node_id="node-abc",
+            ip_address="127.0.0.1",
+            port=50051,
+            gpu_cores=10,
+            ram_gb=16,
+            chip_name="M2",
+            link_types="ethernet",
+            pool_version="2.2.1",
+            compute_score=1.0,
+            data_port=50052,
+        )
+        track_add(node)
+        assert len(registry.get_discovered_nodes()) == 1
+
+        track_remove("node-abc")
+        assert registry.get_discovered_nodes() == []
+        assert removed == ["node-abc"]
+
+    def test_remove_service_strips_service_type_suffix(self):
+        from macfleet.pool.discovery import PoolServiceListener
+
+        seen: list[str] = []
+        listener = PoolServiceListener(on_remove=seen.append)
+        service_type = "_macfleet._tcp.local."
+        listener.remove_service(
+            None, service_type, f"node-xyz.{service_type}",
+        )
+        assert seen == ["node-xyz"]
