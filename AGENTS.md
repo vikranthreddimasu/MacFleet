@@ -7,7 +7,7 @@ This file helps AI coding assistants (Claude, Copilot, Cursor, Cody, etc.) under
 MacFleet pools multiple Apple Silicon Macs into a single distributed ML training cluster. Users run `macfleet join` on each Mac, and the framework handles discovery, gradient synchronization, and workload scheduling automatically.
 
 - **Version**: 2.2.1
-- **Language**: Python 3.11+
+- **Language**: Python 3.11+ (3.13 supported)
 - **Platform**: macOS only (Apple Silicon)
 - **Tests**: 962, run with `make test` or `python -m pytest tests/ -v`
 - **Package**: `pip install macfleet`
