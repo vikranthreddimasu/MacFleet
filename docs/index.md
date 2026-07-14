@@ -42,5 +42,5 @@ pick your engine (`torch` or `mlx`) per call.
 - Token pairing via short-lived enrollment codes
 - Dashboard wired to agent state
 
-See the [changelog](https://github.com/vikranthreddimasu/MacFleet/releases)
+See the [release changelog](https://github.com/vikranthreddimasu/MacFleet/releases)
 for details.
