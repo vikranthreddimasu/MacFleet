@@ -1,5 +1,8 @@
 # Product Brief: Catering Ops
 
+MacFleet ML fleet pooling — separate from catering prototype docs in this folder.
+
+
 ## North Star
 
 Catering Ops is a familiar catering event book that quietly carries the
