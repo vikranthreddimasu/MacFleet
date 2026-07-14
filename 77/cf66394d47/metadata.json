@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "77cf66394d47",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/reference/protocol.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/77/cf66394d47/0/metadata.json",
+      "transcript": "/77/cf66394d47/0/full.jsonl",
+      "compact_transcript": "/77/cf66394d47/0/transcript.jsonl",
+      "content_hash": "/77/cf66394d47/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
