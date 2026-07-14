@@ -16,7 +16,7 @@ are met.
 audit. It can be started with **Run workflow** in GitHub Actions and is scheduled
 at the UTC offsets that correspond to 3:00 AM America/New_York. A local-time gate
 keeps the daily scheduled run aligned with daylight saving time. The workflow
-checks out the repository, runs low-risk validation, scans for TODOs and
+checks out the repository, runs low-risk validation (`make test`, `make lint`), scans for TODOs and
 security-sensitive areas, and uploads a `product-improvement-report` artifact.
 
 The scheduled workflow intentionally has `contents: read` only. It does not push
