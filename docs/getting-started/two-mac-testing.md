@@ -1,5 +1,7 @@
 # Two-Mac Testing Walkthrough
 
+> Scripted checks: `tools/two_mac_verify.py` in the repo root.
+
 This guide assumes you have one stronger Mac and one M1 MacBook Air, and that
 you are new to MacFleet.
 

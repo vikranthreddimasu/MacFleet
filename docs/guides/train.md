@@ -1,5 +1,7 @@
 # Training with Pool.train
 
+Set `enable_pool_distributed=True` on `Pool()` to allreduce gradients across peers.
+
 The core API:
 
 ```python

@@ -1,5 +1,7 @@
 # Pairing Macs
 
+Enrollment codes expire after five minutes by default (`--enroll-ttl` on bootstrap).
+
 MacFleet uses a shared fleet token for mutual authentication and TLS.
 The token is auto-generated on first `macfleet join` and saved at
 `~/.macfleet/fleet-token` with mode 0600.
