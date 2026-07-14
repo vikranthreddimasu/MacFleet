@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "a54a9ab0714b",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "docs/system-architecture.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/a5/4a9ab0714b/0/metadata.json",
+      "transcript": "/a5/4a9ab0714b/0/full.jsonl",
+      "compact_transcript": "/a5/4a9ab0714b/0/transcript.jsonl",
+      "content_hash": "/a5/4a9ab0714b/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
