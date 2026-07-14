@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "e4e5c5769249",
+  "session_id": "ac179e55-f97a-4c97-9ec4-4a7dcd8bbb3b",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-14T05:44:29.565417Z",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md"
+  ],
+  "agent": "Cursor",
+  "model": "composer-2.5-fast",
+  "turn_id": "883596468a5f",
+  "checkpoint_transcript_start": 2,
+  "transcript_lines_at_start": 2,
+  "compact_transcript_start": 2,
+  "initial_attribution": {
+    "calculated_at": "2026-07-14T05:44:29.560558Z",
+    "agent_lines": 1,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "total_lines_changed": 1,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "e4e5c5769249",
+  "strategy": "manual-commit",
+  "branch": "master",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "README.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e4/e5c5769249/0/metadata.json",
+      "transcript": "/e4/e5c5769249/0/full.jsonl",
+      "compact_transcript": "/e4/e5c5769249/0/transcript.jsonl",
+      "content_hash": "/e4/e5c5769249/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}
