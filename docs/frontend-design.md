@@ -1,3 +1,5 @@
+> Catering ops prototype UI — not shipped with macfleet pip package.
+
 # Frontend Design
 
 ## Product Feel
