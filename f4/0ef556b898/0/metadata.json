@@ -1,0 +1,52 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "f40ef556b898",
+  "session_id": "721fb609-9cf9-44f1-b0d6-f3e73fcfb453",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-14T02:23:46.849064Z",
+  "branch": "improvement/high-impact-hardening",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "macfleet/cli/main.py",
+    "macfleet/training/data_parallel.py",
+    "macfleet/training/guards.py",
+    "tests/test_failure_injection/test_peer_dropout.py",
+    "tests/test_production/test_multi_node_convergence.py",
+    "tests/test_training/test_data_parallel.py",
+    "tests/test_training/test_guards.py"
+  ],
+  "agent": "Cursor",
+  "model": "cursor-grok-4.5-high-fast",
+  "turn_id": "c7f7d90306e5",
+  "compact_transcript_start": 0,
+  "initial_attribution": {
+    "calculated_at": "2026-07-14T02:23:46.846355Z",
+    "agent_lines": 199,
+    "agent_removed": 70,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 199,
+    "total_lines_changed": 269,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 602,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".codex/config.toml": 3,
+        ".codex/hooks.json": 52,
+        ".cursor/hooks.json": 40,
+        ".superpowers/brainstorm/.last-port": 1,
+        ".superpowers/brainstorm/.last-token": 1,
+        ".superpowers/brainstorm/99307-1783722063/content/landing-globe.html": 504,
+        ".superpowers/brainstorm/99307-1783722063/state/server-stopped": 1
+      }
+    }
+  ]
+}

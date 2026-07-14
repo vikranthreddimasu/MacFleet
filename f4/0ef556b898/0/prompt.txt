@@ -1,0 +1,17 @@
+Review this repo for high-impact improvements (bugs, missing tests, docs drift, DX, security, performance). Prioritize by severity and user impact.
+
+Work in a feature branch. For each improvement: make a focused change, add/adjust tests if needed, commit with a clear message, and push. Prefer a small number of meaningful commits over a large volume of trivial ones.
+
+When the review backlog for this pass is done (or after a fixed scope you define up front, e.g. “top 5 issues”), open a PR targeting master with a summary and test plan. Do not merge until CI is green and I’ve approved (or explicitly told you to merge).
+
+Use /loop only to poll CI or PR status at a sensible interval (e.g. every 5m), not to manufacture commits.
+
+---
+
+Review this repo for high-impact improvements (bugs, missing tests, docs drift, DX, security, performance). Prioritize by severity and user impact.
+
+Work in a feature branch. For each improvement: make a focused change, add/adjust tests if needed, commit with a clear message, and push. Prefer a small number of meaningful commits over a large volume of trivial ones.
+
+When the review backlog for this pass is done (or after a fixed scope you define up front, e.g. “top 5 issues”), open a PR targeting master with a summary and test plan. Do not merge until CI is green and I’ve approved (or explicitly told you to merge).
+
+Use /loop only to poll CI or PR status at a sensible interval (e.g. every 5m), not to manufacture commits.

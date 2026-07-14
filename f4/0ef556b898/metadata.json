@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "f40ef556b898",
+  "strategy": "manual-commit",
+  "branch": "improvement/high-impact-hardening",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "macfleet/cli/main.py",
+    "macfleet/training/data_parallel.py",
+    "macfleet/training/guards.py",
+    "tests/test_failure_injection/test_peer_dropout.py",
+    "tests/test_production/test_multi_node_convergence.py",
+    "tests/test_training/test_data_parallel.py",
+    "tests/test_training/test_guards.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f4/0ef556b898/0/metadata.json",
+      "transcript": "/f4/0ef556b898/0/full.jsonl",
+      "compact_transcript": "/f4/0ef556b898/0/transcript.jsonl",
+      "content_hash": "/f4/0ef556b898/0/content_hash.txt",
+      "prompt": "/f4/0ef556b898/0/prompt.txt"
+    }
+  ]
+}
