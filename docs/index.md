@@ -13,7 +13,7 @@ with macfleet.Pool(enable_pool_distributed=True) as pool:
 ## Why MacFleet
 
 Apple Silicon is everywhere. Every researcher, student, and founder with
-a MacBook Pro, Mac mini, or Mac Studio has a serious ML machine on their
+a MacBook Pro, Mac mini, Mac Studio, or Mac Pro (M1–M4) has a serious ML machine on their
 desk. What's missing: a way to team them up.
 
 - **PyTorch on MPS** has no distributed story. NCCL is CUDA-only. Gloo
