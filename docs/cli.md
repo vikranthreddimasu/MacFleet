@@ -1,5 +1,8 @@
 # CLI reference
 
+Run `macfleet --help` or `macfleet COMMAND --help` for the full option list.
+
+
 ## `macfleet join`
 
 Start the agent on this Mac.
