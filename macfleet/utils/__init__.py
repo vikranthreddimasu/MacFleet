@@ -1,1 +1,1 @@
-"""Shared utilities."""
+"""Shared utilities (atomic I/O, helpers)."""
