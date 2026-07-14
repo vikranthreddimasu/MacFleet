@@ -1,0 +1,19 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "7d8ee9b1e705",
+  "strategy": "manual-commit",
+  "branch": "improvement/high-impact-hardening",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "tests/test_security/test_auth.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/7d/8ee9b1e705/0/metadata.json",
+      "transcript": "/7d/8ee9b1e705/0/full.jsonl",
+      "compact_transcript": "/7d/8ee9b1e705/0/transcript.jsonl",
+      "content_hash": "/7d/8ee9b1e705/0/content_hash.txt",
+      "prompt": ""
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.8.42",
+  "checkpoint_id": "7d8ee9b1e705",
+  "session_id": "721fb609-9cf9-44f1-b0d6-f3e73fcfb453",
+  "strategy": "manual-commit",
+  "created_at": "2026-07-14T04:39:27.232716Z",
+  "branch": "improvement/high-impact-hardening",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "tests/test_security/test_auth.py"
+  ],
+  "agent": "Cursor",
+  "model": "cursor-grok-4.5-high-fast",
+  "turn_id": "c7f7d90306e5",
+  "checkpoint_transcript_start": 1,
+  "transcript_lines_at_start": 1,
+  "compact_transcript_start": 1,
+  "initial_attribution": {
+    "calculated_at": "2026-07-14T04:39:27.228947Z",
+    "agent_lines": 1,
+    "agent_removed": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1,
+    "total_lines_changed": 1,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
