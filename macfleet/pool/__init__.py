@@ -1,1 +1,1 @@
-"""Compute pool: framework-agnostic Mac pooling layer."""
+"""Pool agent: mDNS discovery, registry, scheduling, heartbeat."""
