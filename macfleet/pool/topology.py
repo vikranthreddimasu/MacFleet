@@ -194,14 +194,24 @@ def serialize_network_links(links: Sequence[NetworkLink]) -> str:
 
 
 def _optional_float(item: dict, short_key: str, long_key: str) -> float:
-    value = item.get(short_key) or item.get(long_key) or 0.0
+    if short_key in item:
+        value = item[short_key]
+    elif long_key in item:
+        value = item[long_key]
+    else:
+        value = 0.0
     if isinstance(value, bool):
         raise ValueError(f"{short_key} must be numeric")
     return float(value)
 
 
 def _optional_int(item: dict, short_key: str, long_key: str, default: int) -> int:
-    value = item.get(short_key) or item.get(long_key) or default
+    if short_key in item:
+        value = item[short_key]
+    elif long_key in item:
+        value = item[long_key]
+    else:
+        value = default
     if isinstance(value, bool):
         raise ValueError(f"{short_key} must be an integer")
     return int(value)

@@ -167,6 +167,19 @@ def test_deserialize_network_links_rejects_invalid_loss_rate():
     assert deserialize_network_links(payload) == ()
 
 
+def test_deserialize_network_links_preserves_explicit_zero_metrics():
+    payload = (
+        '[{"i":"en0","t":"ethernet","ip":"192.168.1.2",'
+        '"b":0,"bandwidth_mbps":true,"l":0,"latency_ms":true}]'
+    )
+
+    restored = deserialize_network_links(payload)
+
+    assert len(restored) == 1
+    assert restored[0].bandwidth_mbps == 0.0
+    assert restored[0].latency_ms == 0.0
+
+
 def test_deserialize_network_links_caps_link_count():
     payload = json.dumps([
         {"i": f"en{i}", "t": "wifi", "ip": f"192.168.1.{i + 2}"}
