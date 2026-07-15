@@ -6,6 +6,7 @@ Ported from v1 comm/discovery.py with extended properties for pool metadata:
 """
 
 import asyncio
+import math
 import socket
 import threading
 import time
@@ -48,10 +49,25 @@ class DiscoveredNode:
     network_links: tuple[NetworkLink, ...] = ()
 
     def __post_init__(self) -> None:
+        if isinstance(self.port, bool) or not isinstance(self.port, int) or not (0 < self.port < 65536):
+            raise ValueError("port must be between 1 and 65535")
+        if (
+            isinstance(self.compute_score, bool)
+            or not isinstance(self.compute_score, (int, float))
+            or not math.isfinite(float(self.compute_score))
+            or self.compute_score < 0
+        ):
+            raise ValueError("compute_score must be finite and non-negative")
         # Backward compat: 2.1.x peers don't advertise data_port. Fall back to
         # heartbeat_port + 1 — matches the 50051/50052 convention.
         if self.data_port == 0:
             self.data_port = self.port + 1
+        if (
+            isinstance(self.data_port, bool)
+            or not isinstance(self.data_port, int)
+            or not (0 < self.data_port < 65536)
+        ):
+            raise ValueError("data_port must be between 1 and 65535")
 
     @property
     def link_type_list(self) -> list[str]:
