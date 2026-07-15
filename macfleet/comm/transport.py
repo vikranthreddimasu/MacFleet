@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import socket
 import struct
 import time
@@ -115,6 +116,57 @@ class HardwareExchange:
         """Stable JSON encoding (sort_keys so HMAC is deterministic)."""
         return json.dumps(asdict(self), sort_keys=True).encode("utf-8")
 
+    @staticmethod
+    def _require_int(payload: dict[str, Any], field_name: str, *, min_value: int, max_value: int) -> None:
+        value = payload.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise HandshakeHwValidationError(f"HW field {field_name!r} must be an integer")
+        if value < min_value or value > max_value:
+            raise HandshakeHwValidationError(
+                f"HW field {field_name!r} must be between {min_value} and {max_value}"
+            )
+
+    @staticmethod
+    def _require_non_negative_float(payload: dict[str, Any], field_name: str) -> None:
+        value = payload.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HandshakeHwValidationError(f"HW field {field_name!r} must be a number")
+        numeric = float(value)
+        if not math.isfinite(numeric) or numeric < 0.0:
+            raise HandshakeHwValidationError(f"HW field {field_name!r} must be finite and non-negative")
+        payload[field_name] = numeric
+
+    @staticmethod
+    def _require_bool(payload: dict[str, Any], field_name: str) -> None:
+        if not isinstance(payload.get(field_name), bool):
+            raise HandshakeHwValidationError(f"HW field {field_name!r} must be a boolean")
+
+    @classmethod
+    def _validate_wire_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        known = {f for f in cls.__dataclass_fields__}
+        filtered = {k: v for k, v in payload.items() if k in known}
+
+        for field_name, min_value, max_value in (
+            ("wire_version", 0, 255),
+            ("gpu_cores", 0, 1024),
+            ("data_port", 0, 65535),
+        ):
+            if field_name in filtered:
+                cls._require_int(filtered, field_name, min_value=min_value, max_value=max_value)
+
+        for field_name in ("ram_gb", "memory_bandwidth_gbps"):
+            if field_name in filtered:
+                cls._require_non_negative_float(filtered, field_name)
+
+        if "chip_name" in filtered and not isinstance(filtered["chip_name"], str):
+            raise HandshakeHwValidationError("HW field 'chip_name' must be a string")
+
+        for field_name in ("has_ane", "mps_available", "mlx_available"):
+            if field_name in filtered:
+                cls._require_bool(filtered, field_name)
+
+        return filtered
+
     @classmethod
     def from_json_bytes(cls, data: bytes) -> "HardwareExchange":
         """Parse JSON bytes back into a HardwareExchange.
@@ -127,8 +179,7 @@ class HardwareExchange:
             if not isinstance(payload, dict):
                 raise HandshakeHwValidationError("HW payload not a JSON object")
             # Only accept known fields; ignore extras for forward compat
-            known = {f for f in cls.__dataclass_fields__}
-            filtered = {k: v for k, v in payload.items() if k in known}
+            filtered = cls._validate_wire_payload(payload)
             return cls(**filtered)
         except (ValueError, TypeError, UnicodeDecodeError) as e:
             raise HandshakeHwValidationError(f"HW payload deserialization failed: {e}") from e

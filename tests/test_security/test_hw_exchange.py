@@ -66,6 +66,41 @@ class TestHardwareExchangeDataclass:
         with pytest.raises(HandshakeHwValidationError):
             HardwareExchange.from_json_bytes(b'\xff\xfe\xfd')
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b'{"wire_version": "1"}',
+            b'{"gpu_cores": "8"}',
+            b'{"gpu_cores": true}',
+            b'{"ram_gb": "16"}',
+            b'{"memory_bandwidth_gbps": []}',
+            b'{"chip_name": 123}',
+            b'{"has_ane": "yes"}',
+            b'{"mps_available": 1}',
+            b'{"mlx_available": null}',
+            b'{"data_port": "50052"}',
+        ],
+    )
+    def test_from_json_bytes_rejects_wrong_field_types(self, payload):
+        with pytest.raises(HandshakeHwValidationError):
+            HardwareExchange.from_json_bytes(payload)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b'{"wire_version": -1}',
+            b'{"wire_version": 256}',
+            b'{"gpu_cores": -1}',
+            b'{"ram_gb": -0.01}',
+            b'{"memory_bandwidth_gbps": -0.01}',
+            b'{"data_port": -1}',
+            b'{"data_port": 65536}',
+        ],
+    )
+    def test_from_json_bytes_rejects_out_of_range_fields(self, payload):
+        with pytest.raises(HandshakeHwValidationError):
+            HardwareExchange.from_json_bytes(payload)
+
 
 class TestSignVerifyHwProfile:
     def _key(self) -> bytes:
