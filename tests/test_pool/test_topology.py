@@ -153,3 +153,24 @@ def test_deserialize_network_links_rejects_non_finite_telemetry():
     payload = '[{"i":"en0","t":"ethernet","ip":"192.168.1.2","b":NaN}]'
 
     assert deserialize_network_links(payload) == ()
+
+
+def test_deserialize_network_links_rejects_boolean_telemetry():
+    payload = '[{"i":"en0","t":"ethernet","ip":"192.168.1.2","b":true}]'
+
+    assert deserialize_network_links(payload) == ()
+
+
+def test_deserialize_network_links_rejects_invalid_loss_rate():
+    payload = '[{"i":"en0","t":"wifi","ip":"192.168.1.2","r":1.5}]'
+
+    assert deserialize_network_links(payload) == ()
+
+
+def test_deserialize_network_links_caps_link_count():
+    payload = json.dumps([
+        {"i": f"en{i}", "t": "wifi", "ip": f"192.168.1.{i + 2}"}
+        for i in range(12)
+    ])
+
+    assert len(deserialize_network_links(payload)) == 8

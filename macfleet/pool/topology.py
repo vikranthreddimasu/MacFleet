@@ -193,6 +193,20 @@ def serialize_network_links(links: Sequence[NetworkLink]) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
+def _optional_float(item: dict, short_key: str, long_key: str) -> float:
+    value = item.get(short_key) or item.get(long_key) or 0.0
+    if isinstance(value, bool):
+        raise ValueError(f"{short_key} must be numeric")
+    return float(value)
+
+
+def _optional_int(item: dict, short_key: str, long_key: str, default: int) -> int:
+    value = item.get(short_key) or item.get(long_key) or default
+    if isinstance(value, bool):
+        raise ValueError(f"{short_key} must be an integer")
+    return int(value)
+
+
 def deserialize_network_links(payload: str) -> tuple[NetworkLink, ...]:
     """Parse serialized links, ignoring malformed entries."""
     try:
@@ -218,16 +232,17 @@ def deserialize_network_links(payload: str) -> tuple[NetworkLink, ...]:
                 or link_type == LinkType.LOOPBACK
             ):
                 continue
-            bandwidth_mbps = float(item.get("b") or item.get("bandwidth_mbps") or 0.0)
-            latency_ms = float(item.get("l") or item.get("latency_ms") or 0.0)
-            loss_rate = float(item.get("r") or item.get("loss_rate") or 0.0)
-            mtu = int(item.get("m") or item.get("mtu") or 1500)
+            bandwidth_mbps = _optional_float(item, "b", "bandwidth_mbps")
+            latency_ms = _optional_float(item, "l", "latency_ms")
+            loss_rate = _optional_float(item, "r", "loss_rate")
+            mtu = _optional_int(item, "m", "mtu", 1500)
             if (
                 not all(math.isfinite(value) and value >= 0 for value in (
                     bandwidth_mbps,
                     latency_ms,
                     loss_rate,
                 ))
+                or loss_rate > 1
                 or mtu < 1
             ):
                 continue
@@ -242,6 +257,8 @@ def deserialize_network_links(payload: str) -> tuple[NetworkLink, ...]:
                     mtu=mtu,
                 )
             )
+            if len(links) >= _MAX_SERIALIZED_LINKS:
+                break
         except (KeyError, TypeError, ValueError):
             continue
     return tuple(links)
