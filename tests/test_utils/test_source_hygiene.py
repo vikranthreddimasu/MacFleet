@@ -6,6 +6,7 @@ import py_compile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+PRODUCT_IMPROVEMENT_WORKFLOW = ROOT / ".github" / "workflows" / "product-improvement.yml"
 
 
 def _package_initializers() -> list[Path]:
@@ -31,3 +32,14 @@ def test_package_initializers_do_not_contain_shell_transcripts():
             offenders.append(str(path.relative_to(ROOT)))
 
     assert offenders == []
+
+
+def test_product_improvement_duplicate_schedule_uploads_report():
+    workflow = PRODUCT_IMPROVEMENT_WORKFLOW.read_text()
+
+    assert "Build duplicate schedule report" in workflow
+    assert "Duplicate schedule skipped" in workflow
+    assert "path: product-improvement-report.md" in workflow
+
+    upload_section = workflow.split("- name: Upload improvement report", 1)[1]
+    assert "steps.local-time.outputs.should_run == 'false'" in upload_section

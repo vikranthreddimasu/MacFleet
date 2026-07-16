@@ -14,6 +14,7 @@ with other work. Supports:
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -22,6 +23,7 @@ import numpy as np
 
 from macfleet.engines.base import Engine
 from macfleet.training.data_parallel import DataParallel
+from macfleet.training.guards import TrainingConfigError
 
 
 @dataclass
@@ -35,6 +37,30 @@ class TrainingConfig:
     # Callbacks
     on_step: Optional[Callable] = None  # (step, metrics) -> None
     on_epoch: Optional[Callable] = None  # (epoch, metrics) -> None
+
+    def __post_init__(self) -> None:
+        _require_positive_int("epochs", self.epochs)
+        _require_non_negative_int("log_every_n_steps", self.log_every_n_steps)
+        _require_non_negative_int("checkpoint_every_n_steps", self.checkpoint_every_n_steps)
+        if (
+            not isinstance(self.max_grad_norm, (int, float))
+            or isinstance(self.max_grad_norm, bool)
+            or not math.isfinite(float(self.max_grad_norm))
+            or float(self.max_grad_norm) < 0
+        ):
+            raise TrainingConfigError(
+                f"max_grad_norm must be a non-negative finite number, got {self.max_grad_norm!r}."
+            )
+
+
+def _require_positive_int(name: str, value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise TrainingConfigError(f"{name} must be a positive integer, got {value!r}.")
+
+
+def _require_non_negative_int(name: str, value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise TrainingConfigError(f"{name} must be a non-negative integer, got {value!r}.")
 
 
 @dataclass

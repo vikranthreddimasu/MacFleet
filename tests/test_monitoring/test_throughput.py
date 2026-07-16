@@ -187,3 +187,14 @@ class TestStepContext:
         # compute_time should equal step_time
         assert tracker.avg_compute_time == pytest.approx(tracker.avg_step_time, abs=0.001)
         assert tracker.avg_sync_time == 0.0
+
+    def test_failed_step_is_not_recorded(self):
+        tracker = ThroughputTracker()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            with tracker.step(32):
+                raise RuntimeError("boom")
+
+        assert tracker.total_steps == 0
+        assert tracker.total_samples == 0
+        assert tracker.throughput_history == []

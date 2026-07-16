@@ -11,6 +11,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass
+from types import TracebackType
 from typing import Optional
 
 
@@ -211,7 +212,14 @@ class StepContext:
         self._start = time.monotonic()
         return self
 
-    def __exit__(self, *args: object) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        _exc: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        if exc_type is not None:
+            return
         end = time.monotonic()
         step_time = end - self._start
         compute_time = (self._compute_end - self._start) if self._compute_end > 0 else step_time
