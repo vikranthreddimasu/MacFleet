@@ -60,6 +60,20 @@ jobs:
         run: |
           ruff check macfleet/ tests/
           python -m pytest tests/test_security tests/test_utils tests/test_cli -q
+      - name: Build duplicate schedule report
+        if: github.event_name == 'schedule' && steps.local-time.outputs.should_run == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "# MacFleet product-improvement audit"
+            echo
+            echo "Generated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "Status: Duplicate schedule skipped"
+            echo
+            echo "This scheduled run was the duplicate daylight-saving fallback and did not run validation."
+            echo "Use the paired 3:00 AM America/New_York schedule run for the full audit."
+          } > product-improvement-report.md
       - name: Build product-improvement report
         if: github.event_name != 'schedule' || steps.local-time.outputs.should_run == 'true'
         shell: bash
@@ -84,7 +98,7 @@ jobs:
             echo "Use docs/automation/product-improvement-workflow.md to select one high-impact, reviewable improvement from this audit, create a human-named branch from master, test it, and open a focused PR."
           } > product-improvement-report.md
       - name: Upload improvement report
-        if: github.event_name != 'schedule' || steps.local-time.outputs.should_run == 'true'
+        if: github.event_name != 'schedule' || steps.local-time.outputs.should_run == 'true' || steps.local-time.outputs.should_run == 'false'
         uses: actions/upload-artifact@v4
         with:
           name: product-improvement-report
