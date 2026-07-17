@@ -72,6 +72,11 @@ class TestTaskSpec:
         assert spec.timeout_sec == 60.0
         assert spec.args == [[1, 2, 3]]
 
+    @pytest.mark.parametrize("kwargs", [{1: "bad"}, {"": "bad"}])
+    def test_from_call_rejects_bad_kwarg_keys(self, kwargs):
+        with pytest.raises(ValueError, match="kwargs"):
+            TaskSpec.from_call(square, kwargs=kwargs)
+
     @pytest.mark.parametrize("timeout", [0, -1, True, float("nan"), float("inf")])
     def test_from_call_rejects_invalid_timeout(self, timeout):
         with pytest.raises(ValueError, match="timeout"):
@@ -158,6 +163,33 @@ class TestTaskSpec:
             "timeout": 300.0,
         }, use_bin_type=True)
         with pytest.raises(ValueError, match="args"):
+            TaskSpec.unpack(data)
+
+    @pytest.mark.parametrize("kwargs", [{b"bad": 1}, {"": 1}])
+    def test_unpack_rejects_bad_kwarg_keys(self, kwargs):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "abc123",
+            "name": square.task_name,
+            "args": [],
+            "kwargs": kwargs,
+            "timeout": 300.0,
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="kwargs"):
+            TaskSpec.unpack(data)
+
+    def test_unpack_wraps_strict_msgpack_map_key_errors(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "abc123",
+            "name": square.task_name,
+            "args": [],
+            "kwargs": {1: "bad"},
+            "timeout": 300.0,
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="TaskSpec payload is not valid msgpack"):
             TaskSpec.unpack(data)
 
 

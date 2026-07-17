@@ -61,7 +61,7 @@ def _unpack_msgpack_dict(data: bytes, label: str) -> dict:
     """Decode msgpack and require a top-level mapping."""
     try:
         payload = msgpack.unpackb(data, raw=False)
-    except msgpack.exceptions.UnpackException as e:
+    except (msgpack.exceptions.UnpackException, ValueError) as e:
         raise ValueError(f"{label} payload is not valid msgpack") from e
     if not isinstance(payload, dict):
         raise ValueError(f"{label} payload not a dict: {type(payload).__name__}")
@@ -93,6 +93,12 @@ def _validate_optional_timeout(timeout: Optional[float]) -> Optional[float]:
     ):
         raise ValueError("timeout must be None or a positive finite number")
     return float(timeout)
+
+
+def _validate_kwargs(kwargs: dict, label: str) -> dict:
+    if any(not isinstance(key, str) or not key for key in kwargs):
+        raise ValueError(f"{label} kwargs keys must be non-empty strings")
+    return kwargs
 
 
 class RemoteTaskError(Exception):
@@ -171,7 +177,7 @@ class TaskSpec:
         # dump to msgpack-native types.
         schema = getattr(fn, "schema", None)
         arg_list: list = list(args)
-        kwarg_dict: dict = dict(kwargs or {})
+        kwarg_dict: dict = _validate_kwargs(dict(kwargs or {}), "TaskSpec")
         if schema is not None:
             if len(arg_list) == 1 and isinstance(arg_list[0], schema):
                 # Common shape: @task(schema=X) def f(args: X): ...
@@ -223,6 +229,7 @@ class TaskSpec:
             raise ValueError("TaskSpec field 'args' must be a list")
         if not isinstance(kwargs, dict):
             raise ValueError("TaskSpec field 'kwargs' must be a dict")
+        kwargs = _validate_kwargs(kwargs, "TaskSpec")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise ValueError("TaskSpec field 'timeout' must be a number")
         if not math.isfinite(float(timeout)) or float(timeout) <= 0:
