@@ -182,10 +182,9 @@ class TaskDispatcher:
             future = await self.submit(fn, item, timeout=timeout)
             futures.append(future)
 
-        results = []
-        for future in futures:
-            results.append(await future.result(timeout=timeout))
-        return results
+        return list(await asyncio.gather(
+            *(future.result(timeout=timeout) for future in futures)
+        ))
 
     async def _worker_listener(self, worker_id: str) -> None:
         """Listen for RESULT messages from one worker.

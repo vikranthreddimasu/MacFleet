@@ -268,6 +268,38 @@ class TestDispatcherWorkerIntegration:
             await _teardown(coordinator, worker)
 
     @pytest.mark.asyncio
+    async def test_map_awaits_results_concurrently(self, monkeypatch):
+        """map() should not multiply the per-call wait timeout by input size."""
+        transport = PeerTransport(local_id="solo", config=CONFIG)
+        dispatcher = TaskDispatcher(transport, ["worker-0"])
+        waiters = 0
+        all_waiting = asyncio.Event()
+
+        class FakeFuture:
+            def __init__(self, value: int):
+                self.value = value
+
+            async def result(self, timeout: float = 300.0) -> int:
+                nonlocal waiters
+                waiters += 1
+                if waiters == 3:
+                    all_waiting.set()
+                await all_waiting.wait()
+                return self.value
+
+        async def fake_submit(fn, item, timeout=300.0):
+            return FakeFuture(item)
+
+        monkeypatch.setattr(dispatcher, "submit", fake_submit)
+
+        results = await asyncio.wait_for(
+            dispatcher.map(times_two, [1, 2, 3], timeout=1.0),
+            timeout=0.5,
+        )
+
+        assert results == [1, 2, 3]
+
+    @pytest.mark.asyncio
     async def test_multiple_tasks_round_robin(self):
         """With 2 workers, tasks alternate between them."""
         coord = PeerTransport(local_id="coord", config=CONFIG)

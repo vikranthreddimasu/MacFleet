@@ -82,6 +82,19 @@ def _require_bool(payload: dict, key: str, label: str) -> bool:
     return value
 
 
+def _validate_optional_timeout(timeout: Optional[float]) -> Optional[float]:
+    if timeout is None:
+        return None
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(float(timeout))
+        or timeout <= 0
+    ):
+        raise ValueError("timeout must be None or a positive finite number")
+    return float(timeout)
+
+
 class RemoteTaskError(Exception):
     """Raised when a task fails on a remote worker.
 
@@ -366,7 +379,9 @@ class TaskFuture:
         Raises:
             RemoteTaskError: If the task failed on the worker.
             asyncio.TimeoutError: If timeout is exceeded.
+            ValueError: If timeout is not None or a positive finite number.
         """
-        await asyncio.wait_for(self._event.wait(), timeout=timeout)
+        wait_timeout = _validate_optional_timeout(timeout)
+        await asyncio.wait_for(self._event.wait(), timeout=wait_timeout)
         assert self._result is not None
         return self._result.unwrap()
