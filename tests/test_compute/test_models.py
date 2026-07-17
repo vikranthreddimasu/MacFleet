@@ -72,6 +72,11 @@ class TestTaskSpec:
         assert spec.timeout_sec == 60.0
         assert spec.args == [[1, 2, 3]]
 
+    @pytest.mark.parametrize("kwargs", [{1: "bad"}, {"": "bad"}])
+    def test_from_call_rejects_bad_kwarg_keys(self, kwargs):
+        with pytest.raises(ValueError, match="kwargs"):
+            TaskSpec.from_call(square, kwargs=kwargs)
+
     @pytest.mark.parametrize("timeout", [0, -1, True, float("nan"), float("inf")])
     def test_from_call_rejects_invalid_timeout(self, timeout):
         with pytest.raises(ValueError, match="timeout"):
@@ -158,6 +163,33 @@ class TestTaskSpec:
             "timeout": 300.0,
         }, use_bin_type=True)
         with pytest.raises(ValueError, match="args"):
+            TaskSpec.unpack(data)
+
+    @pytest.mark.parametrize("kwargs", [{b"bad": 1}, {"": 1}])
+    def test_unpack_rejects_bad_kwarg_keys(self, kwargs):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "abc123",
+            "name": square.task_name,
+            "args": [],
+            "kwargs": kwargs,
+            "timeout": 300.0,
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="kwargs"):
+            TaskSpec.unpack(data)
+
+    def test_unpack_wraps_strict_msgpack_map_key_errors(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "abc123",
+            "name": square.task_name,
+            "args": [],
+            "kwargs": {1: "bad"},
+            "timeout": 300.0,
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="TaskSpec payload is not valid msgpack"):
             TaskSpec.unpack(data)
 
 
@@ -297,6 +329,18 @@ class TestTaskResult:
         with pytest.raises(ValueError, match="ok"):
             TaskResult.unpack(data)
 
+    def test_unpack_rejects_bad_error_shape(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "task-bad-error",
+            "ok": False,
+            "value": None,
+            "error": ["not", "a", "string"],
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="error"):
+            TaskResult.unpack(data)
+
     def test_pack_rejects_result_larger_than_limit(self, monkeypatch):
         monkeypatch.setattr(models, "MAX_RESULT_BYTES", 1)
 
@@ -346,6 +390,13 @@ class TestTaskFuture:
         future = TaskFuture(task_id="f-3")
         with pytest.raises(asyncio.TimeoutError):
             await future.result(timeout=0.05)
+
+    @pytest.mark.parametrize("timeout", [0, -1, True, float("nan"), float("inf"), "soon"])
+    @pytest.mark.asyncio
+    async def test_result_rejects_invalid_timeout(self, timeout):
+        future = TaskFuture(task_id="f-3-invalid")
+        with pytest.raises(ValueError, match="timeout"):
+            await future.result(timeout=timeout)
 
     @pytest.mark.asyncio
     async def test_result_failure(self):

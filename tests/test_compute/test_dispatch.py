@@ -216,6 +216,8 @@ class TestDispatcherWorkerIntegration:
     @pytest.mark.asyncio
     async def test_dispatcher_ignores_malformed_result_frame(self):
         """A malformed RESULT frame must not kill the coordinator listener."""
+        import msgpack
+
         coordinator, worker, _ = await _setup_pair()
         try:
             dispatcher = TaskDispatcher(coordinator, ["worker-0"])
@@ -225,6 +227,16 @@ class TestDispatcherWorkerIntegration:
             await tw.start()
 
             await worker.send("coordinator", b"\x91\x01", msg_type=MessageType.RESULT)
+            await worker.send(
+                "coordinator",
+                msgpack.packb({
+                    "task_id": "bad-result-error",
+                    "ok": False,
+                    "value": None,
+                    "error": ["not", "a", "string"],
+                }, use_bin_type=True),
+                msg_type=MessageType.RESULT,
+            )
             await asyncio.sleep(0.05)
             listener = dispatcher._worker_listeners["worker-0"]
             assert not listener.done()
@@ -266,6 +278,38 @@ class TestDispatcherWorkerIntegration:
             await dispatcher.stop()
         finally:
             await _teardown(coordinator, worker)
+
+    @pytest.mark.asyncio
+    async def test_map_awaits_results_concurrently(self, monkeypatch):
+        """map() should not multiply the per-call wait timeout by input size."""
+        transport = PeerTransport(local_id="solo", config=CONFIG)
+        dispatcher = TaskDispatcher(transport, ["worker-0"])
+        waiters = 0
+        all_waiting = asyncio.Event()
+
+        class FakeFuture:
+            def __init__(self, value: int):
+                self.value = value
+
+            async def result(self, timeout: float = 300.0) -> int:
+                nonlocal waiters
+                waiters += 1
+                if waiters == 3:
+                    all_waiting.set()
+                await all_waiting.wait()
+                return self.value
+
+        async def fake_submit(fn, item, timeout=300.0):
+            return FakeFuture(item)
+
+        monkeypatch.setattr(dispatcher, "submit", fake_submit)
+
+        results = await asyncio.wait_for(
+            dispatcher.map(times_two, [1, 2, 3], timeout=1.0),
+            timeout=0.5,
+        )
+
+        assert results == [1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_multiple_tasks_round_robin(self):
