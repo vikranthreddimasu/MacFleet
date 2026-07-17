@@ -331,11 +331,14 @@ class TaskResult:
         if len(data) > MAX_RESULT_BYTES:
             raise ValueError(f"TaskResult size {len(data)}B exceeds max {MAX_RESULT_BYTES}B")
         d = _unpack_msgpack_dict(data, "TaskResult")
+        error = d.get("error")
+        if error is not None and not isinstance(error, str):
+            raise ValueError("TaskResult field 'error' must be a string or null")
         return cls(
             task_id=_require_str(d, "task_id", "TaskResult"),
             ok=_require_bool(d, "ok", "TaskResult"),
             value=d.get("value"),
-            error=d.get("error"),
+            error=error,
         )
 
     def unwrap(self) -> Any:

@@ -216,6 +216,8 @@ class TestDispatcherWorkerIntegration:
     @pytest.mark.asyncio
     async def test_dispatcher_ignores_malformed_result_frame(self):
         """A malformed RESULT frame must not kill the coordinator listener."""
+        import msgpack
+
         coordinator, worker, _ = await _setup_pair()
         try:
             dispatcher = TaskDispatcher(coordinator, ["worker-0"])
@@ -225,6 +227,16 @@ class TestDispatcherWorkerIntegration:
             await tw.start()
 
             await worker.send("coordinator", b"\x91\x01", msg_type=MessageType.RESULT)
+            await worker.send(
+                "coordinator",
+                msgpack.packb({
+                    "task_id": "bad-result-error",
+                    "ok": False,
+                    "value": None,
+                    "error": ["not", "a", "string"],
+                }, use_bin_type=True),
+                msg_type=MessageType.RESULT,
+            )
             await asyncio.sleep(0.05)
             listener = dispatcher._worker_listeners["worker-0"]
             assert not listener.done()

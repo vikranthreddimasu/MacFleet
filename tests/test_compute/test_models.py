@@ -297,6 +297,18 @@ class TestTaskResult:
         with pytest.raises(ValueError, match="ok"):
             TaskResult.unpack(data)
 
+    def test_unpack_rejects_bad_error_shape(self):
+        import msgpack
+
+        data = msgpack.packb({
+            "task_id": "task-bad-error",
+            "ok": False,
+            "value": None,
+            "error": ["not", "a", "string"],
+        }, use_bin_type=True)
+        with pytest.raises(ValueError, match="error"):
+            TaskResult.unpack(data)
+
     def test_pack_rejects_result_larger_than_limit(self, monkeypatch):
         monkeypatch.setattr(models, "MAX_RESULT_BYTES", 1)
 
