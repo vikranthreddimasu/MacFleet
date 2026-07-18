@@ -28,6 +28,22 @@ with macfleet.Pool() as pool:
 `pool.submit` and `pool.map` detect the `@task` decorator and route the
 call through the registry. Args/kwargs are serialized via msgpack.
 
+## Timeouts and local parallelism
+
+`timeout` is enforced for registered tasks in both single-Mac and
+fleet-backed execution:
+
+```python
+with macfleet.Pool() as pool:
+    result = pool.submit(resize, "/tmp/a.jpg", target_w=512, timeout=10)
+    results = pool.map(resize, image_paths, timeout=10, max_workers=4)
+```
+
+If a task misses its timeout, `Pool.submit`/`Pool.map` raise
+`TimeoutError` with the task id and timeout value. For a single-Mac
+pool, registered `pool.map` calls run in a local thread pool and preserve
+input order while honoring `max_workers`.
+
 ## Why not just `pool.submit(lambda x: ..., x)`?
 
 Undecorated functions are rejected by default:
