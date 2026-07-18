@@ -28,6 +28,8 @@ import time
 from concurrent.futures import (
     ProcessPoolExecutor,
     ThreadPoolExecutor,
+)
+from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
 )
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
@@ -979,7 +981,12 @@ class Pool:
             return []
 
         if self._is_registered_task(fn):
-            return [self._run_registered_task(fn, item, timeout=timeout) for item in items]
+            return self._run_registered_task_map(
+                fn,
+                items,
+                timeout=timeout,
+                max_workers=max_workers,
+            )
 
         self._ensure_legacy_pickle_allowed("map")
 
@@ -1118,6 +1125,56 @@ class Pool:
             ) from e
         finally:
             executor.shutdown(wait=future.done(), cancel_futures=True)
+
+    def _run_registered_task_map(
+        self,
+        fn: Any,
+        items: list[Any],
+        timeout: float = 300.0,
+        max_workers: Optional[int] = None,
+    ) -> list[Any]:
+        """Run registered tasks locally with bounded parallelism and ordered results."""
+        if max_workers is not None and (
+            not isinstance(max_workers, int)
+            or isinstance(max_workers, bool)
+            or max_workers < 1
+        ):
+            raise ValueError("max_workers must be a positive integer when provided")
+
+        import os
+        from concurrent.futures import wait
+
+        from macfleet.compute.models import TaskSpec
+
+        workers = max_workers or min(os.cpu_count() or 1, 4)
+        calls = []
+        for item in items:
+            spec = TaskSpec.from_call(fn, args=(item,), kwargs={}, timeout=timeout)
+            entry = spec.resolve()
+            resolved_args, resolved_kwargs = spec.validated_args(entry)
+            calls.append((spec, entry, resolved_args, resolved_kwargs))
+
+        executor = ThreadPoolExecutor(max_workers=workers)
+        futures = [
+            executor.submit(entry.fn, *resolved_args, **resolved_kwargs)
+            for _, entry, resolved_args, resolved_kwargs in calls
+        ]
+        try:
+            _, not_done = wait(futures, timeout=timeout)
+            if not_done:
+                for future in not_done:
+                    future.cancel()
+                first_timeout = futures.index(next(iter(not_done)))
+                timed_out_spec = calls[first_timeout][0]
+                raise TimeoutError(
+                    f"Pool.map task {timed_out_spec.task_id!r} timed out after {timeout}s"
+                )
+            return [future.result() for future in futures]
+        finally:
+            executor.shutdown(
+                wait=all(future.done() for future in futures),
+                cancel_futures=True,
+            )
 
     def run(self, fn: Callable, *args: Any, **kwargs: Any) -> Any:
         """Run a function on the pool. Shorthand for submit().
