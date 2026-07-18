@@ -25,7 +25,11 @@ import asyncio
 import logging
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import (
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+)
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 
 if TYPE_CHECKING:
@@ -1103,9 +1107,17 @@ class Pool:
         spec = TaskSpec.from_call(fn, args=args, kwargs=kwargs, timeout=timeout)
         entry = spec.resolve()
         resolved_args, resolved_kwargs = spec.validated_args(entry)
-        # Invoke the registered callable in-process. A future PR wires
-        # this to TaskDispatcher when pool.world_size > 1.
-        return entry.fn(*resolved_args, **resolved_kwargs)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(entry.fn, *resolved_args, **resolved_kwargs)
+        try:
+            return future.result(timeout=spec.timeout_sec)
+        except FutureTimeoutError as e:
+            future.cancel()
+            raise TimeoutError(
+                f"Pool task {spec.task_id!r} timed out after {spec.timeout_sec}s"
+            ) from e
+        finally:
+            executor.shutdown(wait=future.done(), cancel_futures=True)
 
     def run(self, fn: Callable, *args: Any, **kwargs: Any) -> Any:
         """Run a function on the pool. Shorthand for submit().

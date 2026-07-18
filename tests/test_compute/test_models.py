@@ -388,7 +388,7 @@ class TestTaskFuture:
     @pytest.mark.asyncio
     async def test_result_timeout(self):
         future = TaskFuture(task_id="f-3")
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(asyncio.TimeoutError, match="f-3.*0.05s"):
             await future.result(timeout=0.05)
 
     @pytest.mark.parametrize("timeout", [0, -1, True, float("nan"), float("inf"), "soon"])

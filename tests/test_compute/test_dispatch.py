@@ -10,6 +10,7 @@ Issue 20 fixed.
 """
 
 import asyncio
+import time
 
 import pytest
 
@@ -52,6 +53,12 @@ def bad_fn(x: int) -> int:
 @task(remote=False)
 def local_only_secret(x: int) -> int:
     return x + 999
+
+
+@task
+def slow_identity(x: int, delay: float = 0.3) -> int:
+    time.sleep(delay)
+    return x
 
 
 async def _setup_pair() -> tuple[PeerTransport, PeerTransport, int]:
@@ -350,6 +357,30 @@ class TestDispatcherWorkerIntegration:
             await coord.disconnect_all()
             await w0.disconnect_all()
             await w1.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_worker_stop_returns_after_timed_out_task(self):
+        """A timed-out user task must not make worker shutdown wait for the thread."""
+        coordinator, worker, _ = await _setup_pair()
+        try:
+            dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+            tw = TaskWorker(worker, "coordinator", max_workers=1)
+
+            await dispatcher.start()
+            await tw.start()
+
+            future = await dispatcher.submit(slow_identity, 7, timeout=0.05, delay=0.5)
+            with pytest.raises(RemoteTaskError, match="timed out"):
+                await future.result(timeout=1.0)
+
+            start = time.monotonic()
+            await tw.stop()
+            elapsed = time.monotonic() - start
+            assert elapsed < 0.25
+
+            await dispatcher.stop()
+        finally:
+            await _teardown(coordinator, worker)
 
 
 class TestDispatcherEdgeCases:

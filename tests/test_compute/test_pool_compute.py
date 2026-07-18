@@ -1,5 +1,7 @@
 """Tests for Pool.map(), Pool.submit(), Pool.run() — single-node fast path."""
 
+import time
+
 import pytest
 
 from macfleet import task
@@ -29,6 +31,12 @@ def _power(base, exp=2):
 @task
 def _get_value():
     return 42
+
+
+@task
+def _slow_value(delay):
+    time.sleep(delay)
+    return "done"
 
 
 class TestPoolMap:
@@ -78,6 +86,15 @@ class TestPoolSubmit:
         pool = Pool(open=True)
         with pytest.raises(RuntimeError, match="Must join"):
             pool.submit(_square, 5)
+
+    def test_submit_timeout_is_enforced_for_registered_task(self):
+        with Pool(open=True) as pool:
+            start = time.monotonic()
+            with pytest.raises(TimeoutError, match="timed out after 0.05s"):
+                pool.submit(_slow_value, 0.5, timeout=0.05)
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 0.25
 
 
 class TestPoolRun:

@@ -392,6 +392,11 @@ class TaskFuture:
             ValueError: If timeout is not None or a positive finite number.
         """
         wait_timeout = _validate_optional_timeout(timeout)
-        await asyncio.wait_for(self._event.wait(), timeout=wait_timeout)
+        try:
+            await asyncio.wait_for(self._event.wait(), timeout=wait_timeout)
+        except asyncio.TimeoutError as e:
+            raise asyncio.TimeoutError(
+                f"Task {self.task_id!r} timed out after {wait_timeout}s"
+            ) from e
         assert self._result is not None
         return self._result.unwrap()

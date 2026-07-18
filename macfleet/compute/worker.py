@@ -130,7 +130,7 @@ class TaskWorker:
             await asyncio.gather(*self._inflight, return_exceptions=True)
             self._inflight.clear()
         if self._executor:
-            self._executor.shutdown(wait=True)
+            self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
 
     async def _listen_tasks(self) -> None:
