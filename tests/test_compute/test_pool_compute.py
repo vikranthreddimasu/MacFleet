@@ -1,5 +1,7 @@
 """Tests for Pool.map(), Pool.submit(), Pool.run() — single-node fast path."""
 
+import time
+
 import pytest
 
 from macfleet import task
@@ -29,6 +31,19 @@ def _power(base, exp=2):
 @task
 def _get_value():
     return 42
+
+
+@task
+def _slow_value(delay):
+    time.sleep(delay)
+    return "done"
+
+
+@task
+def _slow_square(payload):
+    delay, value = payload
+    time.sleep(delay)
+    return value * value
 
 
 class TestPoolMap:
@@ -62,6 +77,35 @@ class TestPoolMap:
         with pytest.raises(RuntimeError, match="Must join"):
             pool.map(_square, [1])
 
+    def test_map_honors_max_workers_for_registered_tasks(self):
+        with Pool(open=True) as pool:
+            start = time.monotonic()
+            results = pool.map(
+                _slow_square,
+                [(0.2, 1), (0.2, 2), (0.2, 3)],
+                timeout=1.0,
+                max_workers=3,
+            )
+            elapsed = time.monotonic() - start
+
+        assert results == [1, 4, 9]
+        assert elapsed < 0.4
+
+    def test_map_timeout_is_enforced_for_registered_tasks(self):
+        with Pool(open=True) as pool:
+            start = time.monotonic()
+            with pytest.raises(TimeoutError, match="Pool.map task .* timed out after 0.05s"):
+                pool.map(_slow_value, [0.5], timeout=0.05)
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 0.25
+
+    @pytest.mark.parametrize("max_workers", [0, -1, True, 1.5])
+    def test_map_rejects_invalid_max_workers_for_registered_tasks(self, max_workers):
+        with Pool(open=True) as pool:
+            with pytest.raises(ValueError, match="max_workers"):
+                pool.map(_square, [1], max_workers=max_workers)
+
 
 class TestPoolSubmit:
     def test_submit_basic(self):
@@ -78,6 +122,15 @@ class TestPoolSubmit:
         pool = Pool(open=True)
         with pytest.raises(RuntimeError, match="Must join"):
             pool.submit(_square, 5)
+
+    def test_submit_timeout_is_enforced_for_registered_task(self):
+        with Pool(open=True) as pool:
+            start = time.monotonic()
+            with pytest.raises(TimeoutError, match="timed out after 0.05s"):
+                pool.submit(_slow_value, 0.5, timeout=0.05)
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 0.25
 
 
 class TestPoolRun:
