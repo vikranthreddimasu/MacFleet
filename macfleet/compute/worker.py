@@ -200,9 +200,29 @@ class TaskWorker:
             result = TaskResult.failure(spec.task_id, e)
 
         try:
+            payload = result.pack()
+        except (TypeError, ValueError) as e:
+            logger.warning(
+                "Task %s produced an unserializable result: %s",
+                spec.task_id[:8], e,
+            )
+            audit_event(
+                "task.result_serialization_failed",
+                task_name=spec.task_name,
+                coordinator=self._coordinator,
+                error_type=type(e).__name__,
+            )
+            result = TaskResult(
+                task_id=spec.task_id,
+                ok=False,
+                error=f"Task result could not be serialized: {e}",
+            )
+            payload = result.pack()
+
+        try:
             await self._transport.send(
                 self._coordinator,
-                result.pack(),
+                payload,
                 msg_type=MessageType.RESULT,
             )
         except (ConnectionError, OSError) as e:

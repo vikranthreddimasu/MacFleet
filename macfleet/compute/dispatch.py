@@ -125,6 +125,10 @@ class TaskDispatcher:
             raise RuntimeError("TaskDispatcher must be started before submitting tasks")
 
         spec = TaskSpec.from_call(fn, args, kwargs, timeout=timeout)
+        try:
+            payload = spec.pack()
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"TaskSpec could not be serialized: {e}") from e
         future = TaskFuture(task_id=spec.task_id)
 
         worker_id = self._pick_live_worker()
@@ -141,7 +145,7 @@ class TaskDispatcher:
         self._pending[spec.task_id] = future
         self._task_to_worker[spec.task_id] = worker_id
         try:
-            await self._transport.send(worker_id, spec.pack(), msg_type=MessageType.TASK)
+            await self._transport.send(worker_id, payload, msg_type=MessageType.TASK)
         except (ConnectionError, OSError) as e:
             self._pending.pop(spec.task_id, None)
             self._task_to_worker.pop(spec.task_id, None)

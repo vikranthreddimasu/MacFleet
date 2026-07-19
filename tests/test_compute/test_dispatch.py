@@ -61,6 +61,11 @@ def slow_identity(x: int, delay: float = 0.3) -> int:
     return x
 
 
+@task
+def returns_unserializable_object():
+    return object()
+
+
 async def _setup_pair() -> tuple[PeerTransport, PeerTransport, int]:
     """Create a connected coordinator-worker transport pair over loopback."""
     coordinator = PeerTransport(local_id="coordinator", config=CONFIG)
@@ -382,6 +387,34 @@ class TestDispatcherWorkerIntegration:
         finally:
             await _teardown(coordinator, worker)
 
+    @pytest.mark.asyncio
+    async def test_unserializable_worker_result_returns_remote_error(self):
+        """Worker return values that cannot cross msgpack fail the task, not the listener."""
+        coordinator, worker, _ = await _setup_pair()
+        try:
+            dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+            tw = TaskWorker(worker, "coordinator", max_workers=1)
+
+            await dispatcher.start()
+            await tw.start()
+
+            future = await dispatcher.submit(returns_unserializable_object, timeout=5.0)
+            with pytest.raises(RemoteTaskError) as exc_info:
+                await future.result(timeout=5.0)
+
+            assert "Task result could not be serialized" in exc_info.value.remote_traceback
+            assert dispatcher.pending_count == 0
+            assert tw._listener_task is not None
+            assert not tw._listener_task.done()
+
+            healthy = await dispatcher.submit(times_two, 21, timeout=5.0)
+            assert await healthy.result(timeout=5.0) == 42
+
+            await tw.stop()
+            await dispatcher.stop()
+        finally:
+            await _teardown(coordinator, worker)
+
 
 class TestDispatcherEdgeCases:
     def test_no_workers_raises(self):
@@ -405,6 +438,19 @@ class TestDispatcherEdgeCases:
         async def run():
             with pytest.raises(RuntimeError, match="must be started"):
                 await dispatcher.submit(times_two, 42)
+
+        asyncio.run(run())
+
+    def test_unserializable_task_args_do_not_leak_pending_future(self):
+        transport = PeerTransport(local_id="solo", config=CONFIG)
+        dispatcher = TaskDispatcher(transport, ["worker-0"])
+
+        async def run():
+            await dispatcher.start()
+            with pytest.raises(ValueError, match="TaskSpec could not be serialized"):
+                await dispatcher.submit(times_two, object(), timeout=1.0)
+            assert dispatcher.pending_count == 0
+            await dispatcher.stop()
 
         asyncio.run(run())
 
