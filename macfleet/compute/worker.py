@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from macfleet.comm.protocol import MessageType
 from macfleet.comm.transport import PeerTransport
-from macfleet.compute.authz import DEFAULT_TASK_POLICY, TaskAuthorizationPolicy
+from macfleet.compute.authz import DEFAULT_TASK_POLICY, TaskAuthorizationError, TaskAuthorizationPolicy
 from macfleet.compute.models import TaskNotRegisteredError, TaskResult, TaskSpec
 from macfleet.security.audit import audit_event
 
@@ -190,6 +190,14 @@ class TaskWorker:
                 ok=False,
                 error=f"Task timed out after {spec.timeout_sec}s",
             )
+        except TaskAuthorizationError as e:
+            audit_event(
+                "task.authorization_denied",
+                task_name=spec.task_name,
+                coordinator=self._coordinator,
+                reason=str(e),
+            )
+            result = TaskResult.failure(spec.task_id, e)
         except Exception as e:
             audit_event(
                 "task.failed",
