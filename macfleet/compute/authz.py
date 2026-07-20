@@ -56,6 +56,7 @@ class TaskAuthorizationPolicy:
             self.denied_tasks,
             allow_none=False,
         )
+        assert denied_tasks is not None
         overlap = sorted((allowed_tasks or frozenset()) & denied_tasks)
         if overlap:
             raise ValueError(
