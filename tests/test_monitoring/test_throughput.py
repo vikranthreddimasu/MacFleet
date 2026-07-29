@@ -42,6 +42,9 @@ class TestStepMetrics:
             ("compute_time_sec", -0.1),
             ("sync_time_sec", float("nan")),
             ("step_time_sec", float("inf")),
+            ("timestamp", -0.1),
+            ("loss", float("nan")),
+            ("loss", True),
         ],
     )
     def test_rejects_invalid_metrics(self, field, value):
@@ -56,6 +59,17 @@ class TestStepMetrics:
 
         with pytest.raises(ValueError, match=field):
             StepMetrics(**kwargs)
+
+    def test_normalizes_integer_loss(self):
+        m = StepMetrics(
+            step=0,
+            samples=32,
+            compute_time_sec=0.08,
+            sync_time_sec=0.02,
+            step_time_sec=0.1,
+            loss=1,
+        )
+        assert m.loss == 1.0
 
 
 # ------------------------------------------------------------------ #
@@ -104,6 +118,17 @@ class TestThroughputTracker:
             context.sync_done()
             with pytest.raises(RuntimeError, match="only be called once"):
                 context.sync_done()
+
+    def test_loss_must_be_recorded_inside_context_once(self):
+        context = ThroughputTracker().step(1)
+
+        with pytest.raises(RuntimeError, match="inside a step context"):
+            context.record_loss(1.0)
+
+        with context:
+            context.record_loss(1.0)
+            with pytest.raises(RuntimeError, match="only be called once"):
+                context.record_loss(0.5)
 
     def test_rolling_average(self):
         tracker = ThroughputTracker(window_size=3)
@@ -198,3 +223,14 @@ class TestStepContext:
         assert tracker.total_steps == 0
         assert tracker.total_samples == 0
         assert tracker.throughput_history == []
+
+    @pytest.mark.parametrize("loss", [float("nan"), float("inf"), True, "1.0"])
+    def test_rejects_invalid_loss_values(self, loss):
+        tracker = ThroughputTracker()
+
+        with pytest.raises(ValueError, match="loss"):
+            with tracker.step(32) as s:
+                s.record_loss(loss)
+
+        assert tracker.total_steps == 0
+        assert tracker.total_samples == 0

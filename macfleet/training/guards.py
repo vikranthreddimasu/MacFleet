@@ -132,12 +132,22 @@ def check_dataset_sufficient(
     required = batch_size * min_batches
     if dataset_len < required:
         shortfall = required - dataset_len
+        max_batch_size = dataset_len // min_batches
+        if max_batch_size >= 1:
+            remediation = (
+                f"Either: (a) collect more data, or "
+                f"(b) reduce batch_size to {max_batch_size} or smaller."
+            )
+        else:
+            remediation = (
+                f"Either: (a) collect at least {min_batches} samples, or "
+                f"(b) lower min_batches; no positive batch_size can produce "
+                f"{min_batches} full batch(es) from {dataset_len} sample(s)."
+            )
         raise DatasetSizeError(
             f"Dataset has {dataset_len} samples but needs >= {required} to "
             f"run at least {min_batches} batch(es) of size {batch_size} "
             f"across {world_size} rank(s). "
             f"Shortfall: {shortfall} samples. "
-            f"Either: (a) collect more data, "
-            f"(b) reduce batch_size to {dataset_len // min_batches} or "
-            f"smaller, or (c) reduce world_size."
+            f"{remediation}"
         )

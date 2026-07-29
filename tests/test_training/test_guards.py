@@ -122,6 +122,7 @@ class TestCheckDatasetSufficient:
         with pytest.raises(DatasetSizeError) as exc:
             check_dataset_sufficient(50, 128, 1)
         assert "reduce batch_size" in str(exc.value).lower()
+        assert "reduce batch_size to 50" in str(exc.value)
 
     def test_error_suggests_more_data(self):
         with pytest.raises(DatasetSizeError) as exc:
@@ -136,6 +137,17 @@ class TestCheckDatasetSufficient:
                 dataset_len=200, batch_size=128, world_size=1, min_batches=10,
             )
         assert "10 batch" in str(exc.value)
+
+    def test_min_batches_error_never_suggests_zero_batch_size(self):
+        with pytest.raises(DatasetSizeError) as exc:
+            check_dataset_sufficient(
+                dataset_len=5, batch_size=10, world_size=1, min_batches=10,
+            )
+
+        msg = str(exc.value)
+        assert "batch_size to 0" not in msg
+        assert "lower min_batches" in msg
+        assert "no positive batch_size" in msg
 
     def test_world_size_must_be_positive(self):
         with pytest.raises(DatasetSizeError, match="world_size must be a positive"):
