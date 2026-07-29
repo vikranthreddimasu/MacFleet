@@ -35,6 +35,7 @@ class StepMetrics:
             ("compute_time_sec", self.compute_time_sec),
             ("sync_time_sec", self.sync_time_sec),
             ("step_time_sec", self.step_time_sec),
+            ("timestamp", self.timestamp),
         ):
             if (
                 isinstance(value, bool)
@@ -43,6 +44,14 @@ class StepMetrics:
                 or value < 0
             ):
                 raise ValueError(f"{name} must be a non-negative finite number")
+        if self.loss is not None:
+            if (
+                isinstance(self.loss, bool)
+                or not isinstance(self.loss, (int, float))
+                or not math.isfinite(float(self.loss))
+            ):
+                raise ValueError("loss must be a finite number when recorded")
+            self.loss = float(self.loss)
 
     @property
     def throughput(self) -> float:
@@ -256,4 +265,10 @@ class StepContext:
 
     def record_loss(self, loss: float) -> None:
         """Record the loss value for this step."""
-        self._loss = loss
+        if (
+            isinstance(loss, bool)
+            or not isinstance(loss, (int, float))
+            or not math.isfinite(float(loss))
+        ):
+            raise ValueError("loss must be a finite number")
+        self._loss = float(loss)
