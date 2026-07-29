@@ -265,6 +265,10 @@ class StepContext:
 
     def record_loss(self, loss: float) -> None:
         """Record the loss value for this step."""
+        if self._start == 0:
+            raise RuntimeError("record_loss() must be called inside a step context")
+        if self._loss is not None:
+            raise RuntimeError("record_loss() may only be called once per step")
         if (
             isinstance(loss, bool)
             or not isinstance(loss, (int, float))

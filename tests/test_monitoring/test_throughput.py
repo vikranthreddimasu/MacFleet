@@ -119,6 +119,17 @@ class TestThroughputTracker:
             with pytest.raises(RuntimeError, match="only be called once"):
                 context.sync_done()
 
+    def test_loss_must_be_recorded_inside_context_once(self):
+        context = ThroughputTracker().step(1)
+
+        with pytest.raises(RuntimeError, match="inside a step context"):
+            context.record_loss(1.0)
+
+        with context:
+            context.record_loss(1.0)
+            with pytest.raises(RuntimeError, match="only be called once"):
+                context.record_loss(0.5)
+
     def test_rolling_average(self):
         tracker = ThroughputTracker(window_size=3)
 
