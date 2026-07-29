@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Optional
 
 
 class TaskAuthorizationError(PermissionError):
     """Raised when a worker refuses to execute a task."""
+
+
+def _normalize_task_names(
+    field_name: str,
+    value: Optional[Iterable[str]],
+    *,
+    allow_none: bool,
+) -> Optional[frozenset[str]]:
+    if value is None:
+        if allow_none:
+            return None
+        return frozenset()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        raise ValueError(f"{field_name} must be a collection of task names")
+    normalized = frozenset(value)
+    if any(not isinstance(task_name, str) or not task_name for task_name in normalized):
+        raise ValueError(f"{field_name} must contain only non-empty task names")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -27,14 +46,25 @@ class TaskAuthorizationPolicy:
     def __post_init__(self) -> None:
         if not isinstance(self.role, str) or not self.role:
             raise ValueError("role must be a non-empty string")
-        for name, task_names in (
-            ("allowed_tasks", self.allowed_tasks),
-            ("denied_tasks", self.denied_tasks),
-        ):
-            if task_names is not None and any(
-                not isinstance(task_name, str) or not task_name for task_name in task_names
-            ):
-                raise ValueError(f"{name} must contain only non-empty task names")
+        allowed_tasks = _normalize_task_names(
+            "allowed_tasks",
+            self.allowed_tasks,
+            allow_none=True,
+        )
+        denied_tasks = _normalize_task_names(
+            "denied_tasks",
+            self.denied_tasks,
+            allow_none=False,
+        )
+        assert denied_tasks is not None
+        overlap = sorted((allowed_tasks or frozenset()) & denied_tasks)
+        if overlap:
+            raise ValueError(
+                "allowed_tasks and denied_tasks overlap: "
+                f"{', '.join(overlap)}"
+            )
+        object.__setattr__(self, "allowed_tasks", allowed_tasks)
+        object.__setattr__(self, "denied_tasks", denied_tasks)
         if (
             isinstance(self.max_timeout_sec, bool)
             or not isinstance(self.max_timeout_sec, (int, float))

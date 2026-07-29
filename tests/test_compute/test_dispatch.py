@@ -175,8 +175,13 @@ class TestDispatcherWorkerIntegration:
             await _teardown(coordinator, worker)
 
     @pytest.mark.asyncio
-    async def test_worker_allowlist_blocks_unlisted_task(self):
+    async def test_worker_allowlist_blocks_unlisted_task(self, monkeypatch):
         """Workers can restrict execution to an explicit task allowlist."""
+        audit_events = []
+        monkeypatch.setattr(
+            "macfleet.compute.worker.audit_event",
+            lambda event, **fields: audit_events.append((event, fields)),
+        )
         coordinator, worker, _ = await _setup_pair()
         try:
             dispatcher = TaskDispatcher(coordinator, ["worker-0"])
@@ -195,6 +200,14 @@ class TestDispatcherWorkerIntegration:
             with pytest.raises(RemoteTaskError) as exc_info:
                 await blocked.result(timeout=5.0)
             assert "not in the worker allowlist" in exc_info.value.remote_traceback
+            assert (
+                "task.authorization_denied",
+                {
+                    "task_name": pow_two.task_name,
+                    "coordinator": "coordinator",
+                    "reason": f"Task {pow_two.task_name!r} is not in the worker allowlist",
+                },
+            ) in audit_events
 
             await tw.stop()
             await dispatcher.stop()
