@@ -698,7 +698,7 @@ def _load_train_config(config_path: str) -> dict[str, object]:
             loaded = json.loads(path.read_text())
         elif suffix in {".yaml", ".yml"}:
             try:
-                import yaml
+                import yaml  # type: ignore[import-untyped]
             except ImportError as e:
                 raise click.ClickException(
                     "Reading YAML configs requires PyYAML. Install with "
