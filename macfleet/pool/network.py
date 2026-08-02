@@ -260,20 +260,26 @@ def _parse_ifconfig() -> list[NetworkLink]:
 
 
 async def measure_latency(host: str, port: int, timeout: float = 5.0) -> float:
-    """Measure TCP round-trip latency to a peer in milliseconds."""
+    """Measure TCP connection latency to a peer in milliseconds.
+
+    ``timeout`` bounds the complete probe, including connection cleanup.
+    Returns -1 when the peer cannot complete the probe in time.
+    """
     timeout = _validate_positive_finite("timeout", timeout)
+    writer = None
     try:
-        start = time.monotonic()
-        _, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
-            timeout=timeout,
-        )
-        elapsed = (time.monotonic() - start) * 1000.0
-        writer.close()
-        await writer.wait_closed()
-        return elapsed
+        async with asyncio.timeout(timeout):
+            start = time.monotonic()
+            _, writer = await asyncio.open_connection(host, port)
+            elapsed = (time.monotonic() - start) * 1000.0
+            writer.close()
+            await writer.wait_closed()
+            return elapsed
     except (OSError, asyncio.TimeoutError):
         return -1.0
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 async def measure_bandwidth(
@@ -284,12 +290,11 @@ async def measure_bandwidth(
 ) -> float:
     """Measure TCP bandwidth to a peer in Mbps.
 
-    Sends a payload, waits for the receiver to close the connection
-    (signaling it has drained the bytes), and divides total elapsed
-    time by payload size. The wait_closed() bound is the closest the
-    stdlib affords to a real ACK — without it, writer.drain() only
-    confirms the kernel send buffer received the bytes, not the wire.
-    Requires a listening peer that accepts and discards data.
+    Sends a payload, then waits for the receiver to close the connection
+    after draining the bytes. ``timeout`` bounds the complete probe: connect,
+    transfer, receiver acknowledgement, and connection cleanup. Returns 0
+    when any phase fails or the receiver does not acknowledge completion.
+    Requires a listening peer that reads until EOF and then closes.
     """
     payload_mb = _validate_positive_finite("payload_mb", payload_mb)
     timeout = _validate_positive_finite("timeout", timeout)
@@ -297,43 +302,39 @@ async def measure_bandwidth(
     if payload_bytes == 0:
         raise ValueError("payload_mb must represent at least one byte")
     chunk_size = 65536
+    writer = None
 
     try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port),
-            timeout=timeout,
-        )
+        async with asyncio.timeout(timeout):
+            reader, writer = await asyncio.open_connection(host, port)
 
-        data = b"\x00" * chunk_size
-        start = time.monotonic()
-        sent = 0
-        while sent < payload_bytes:
-            to_send = min(chunk_size, payload_bytes - sent)
-            writer.write(data[:to_send])
-            await writer.drain()
-            sent += to_send
+            data = b"\x00" * chunk_size
+            start = time.monotonic()
+            sent = 0
+            while sent < payload_bytes:
+                to_send = min(chunk_size, payload_bytes - sent)
+                writer.write(data[:to_send])
+                await writer.drain()
+                sent += to_send
 
-        # Half-close the writer side so the peer sees EOF, then wait
-        # for the connection to fully close — this is our acknowledgement
-        # signal that everything we sent has actually been read on the
-        # other end (or the receiver hung up). Either way, the elapsed
-        # time more closely reflects wire bandwidth than the local
-        # send-buffer drain time alone.
-        if writer.can_write_eof():
+            # Half-close so the peer sees EOF. A full close from the peer is
+            # the acknowledgement that its handler finished draining data.
+            if not writer.can_write_eof():
+                return 0.0
             writer.write_eof()
-        try:
-            await asyncio.wait_for(reader.read(), timeout=timeout)
-        except asyncio.TimeoutError:
-            pass
-        elapsed = time.monotonic() - start
-        writer.close()
-        await writer.wait_closed()
+            await reader.read()
+            elapsed = time.monotonic() - start
+            writer.close()
+            await writer.wait_closed()
 
-        if elapsed > 0:
-            return (payload_bytes * 8) / (elapsed * 1_000_000)  # Mbps
-        return 0.0
+            if elapsed > 0:
+                return (payload_bytes * 8) / (elapsed * 1_000_000)  # Mbps
+            return 0.0
     except (OSError, asyncio.TimeoutError):
         return 0.0
+    finally:
+        if writer is not None:
+            writer.close()
 
 
 def get_network_topology() -> NetworkTopology:

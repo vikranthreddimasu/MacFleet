@@ -1,5 +1,8 @@
 """Tests for network detection and link scoring."""
 
+import asyncio
+import time
+
 import pytest
 
 from macfleet.pool import network
@@ -124,3 +127,143 @@ class TestNetworkProbes:
     async def test_bandwidth_rejects_invalid_payload_size(self, payload_mb):
         with pytest.raises(ValueError, match="payload_mb"):
             await network.measure_bandwidth("127.0.0.1", 9, payload_mb=payload_mb)
+
+    async def test_latency_timeout_bounds_connection_close(self, monkeypatch):
+        writer = _ProbeWriter(wait_closed_delay=None)
+
+        async def open_connection(host, port):
+            return _ProbeReader(), writer
+
+        monkeypatch.setattr(network.asyncio, "open_connection", open_connection)
+
+        started = time.monotonic()
+        result = await asyncio.wait_for(
+            network.measure_latency("peer", 5000, timeout=0.01),
+            timeout=0.2,
+        )
+
+        assert result == -1.0
+        assert time.monotonic() - started < 0.15
+        assert writer.closed
+
+    async def test_bandwidth_requires_receiver_acknowledgement(self, monkeypatch):
+        writer = _ProbeWriter()
+
+        async def open_connection(host, port):
+            return _ProbeReader(read_delay=None), writer
+
+        monkeypatch.setattr(network.asyncio, "open_connection", open_connection)
+
+        result = await network.measure_bandwidth(
+            "peer",
+            5000,
+            payload_mb=0.001,
+            timeout=0.01,
+        )
+
+        assert result == 0.0
+        assert writer.closed
+
+    async def test_bandwidth_timeout_is_end_to_end(self, monkeypatch):
+        writer = _ProbeWriter()
+
+        async def open_connection(host, port):
+            await asyncio.sleep(0.03)
+            return _ProbeReader(read_delay=0.03), writer
+
+        monkeypatch.setattr(network.asyncio, "open_connection", open_connection)
+
+        started = time.monotonic()
+        result = await network.measure_bandwidth(
+            "peer",
+            5000,
+            payload_mb=0.001,
+            timeout=0.05,
+        )
+
+        assert result == 0.0
+        assert time.monotonic() - started < 0.09
+        assert writer.closed
+
+    async def test_bandwidth_timeout_bounds_stalled_drain(self, monkeypatch):
+        writer = _ProbeWriter(drain_delay=None)
+
+        async def open_connection(host, port):
+            return _ProbeReader(), writer
+
+        monkeypatch.setattr(network.asyncio, "open_connection", open_connection)
+
+        result = await asyncio.wait_for(
+            network.measure_bandwidth(
+                "peer",
+                5000,
+                payload_mb=0.001,
+                timeout=0.01,
+            ),
+            timeout=0.2,
+        )
+
+        assert result == 0.0
+        assert writer.closed
+
+    async def test_bandwidth_reports_measurement_after_acknowledgement(self, monkeypatch):
+        writer = _ProbeWriter()
+
+        async def open_connection(host, port):
+            return _ProbeReader(), writer
+
+        monkeypatch.setattr(network.asyncio, "open_connection", open_connection)
+
+        result = await network.measure_bandwidth(
+            "peer",
+            5000,
+            payload_mb=0.001,
+            timeout=0.1,
+        )
+
+        assert result > 0.0
+        assert writer.bytes_written == int(0.001 * 1024 * 1024)
+        assert writer.eof_written
+        assert writer.closed
+
+
+class _ProbeReader:
+    def __init__(self, read_delay=0.0):
+        self.read_delay = read_delay
+
+    async def read(self):
+        if self.read_delay is None:
+            await asyncio.Future()
+        await asyncio.sleep(self.read_delay)
+        return b""
+
+
+class _ProbeWriter:
+    def __init__(self, drain_delay=0.0, wait_closed_delay=0.0):
+        self.drain_delay = drain_delay
+        self.wait_closed_delay = wait_closed_delay
+        self.bytes_written = 0
+        self.eof_written = False
+        self.closed = False
+
+    def write(self, data):
+        self.bytes_written += len(data)
+
+    async def drain(self):
+        if self.drain_delay is None:
+            await asyncio.Future()
+        await asyncio.sleep(self.drain_delay)
+
+    def can_write_eof(self):
+        return True
+
+    def write_eof(self):
+        self.eof_written = True
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        if self.wait_closed_delay is None:
+            await asyncio.Future()
+        await asyncio.sleep(self.wait_closed_delay)
