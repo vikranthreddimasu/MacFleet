@@ -191,3 +191,28 @@ class TestWeightComputations:
     def test_zero_throughput(self):
         weights = compute_weights_from_throughput([0.0, 0.0])
         assert weights == [0.5, 0.5]
+
+    @pytest.mark.parametrize(
+        "gpu_cores",
+        [[-1, 2], [1.5, 2], [True, 2], [10**10000, 2]],
+    )
+    def test_invalid_gpu_capacities_are_rejected(self, gpu_cores):
+        with pytest.raises(ValueError, match="gpu_cores"):
+            compute_weights_from_gpu_cores(gpu_cores)
+
+    @pytest.mark.parametrize(
+        "throughputs",
+        [
+            [-1.0, 2.0],
+            [float("nan"), 2.0],
+            [float("inf"), 2.0],
+            [True, 2.0],
+            ["1", 2.0],
+        ],
+    )
+    def test_invalid_throughput_capacities_are_rejected(self, throughputs):
+        with pytest.raises(ValueError, match="throughputs"):
+            compute_weights_from_throughput(throughputs)
+
+    def test_extreme_finite_throughputs_normalize_without_overflow(self):
+        assert compute_weights_from_throughput([1e308, 1e308]) == [0.5, 0.5]

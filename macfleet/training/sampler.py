@@ -195,21 +195,56 @@ class DistributedBatchSampler(Sampler[list[int]]):
 # --------------------------------------------------------------------------- #
 
 
+def _normalize_capacities(
+    values: list[int] | list[float],
+    *,
+    name: str,
+    integers_only: bool,
+) -> list[float]:
+    """Validate non-negative capacities and normalize without overflow."""
+    if not values:
+        return []
+
+    capacities: list[float] = []
+    for value in values:
+        valid_type = (
+            isinstance(value, int)
+            if integers_only
+            else isinstance(value, (int, float))
+        )
+        if isinstance(value, bool) or not valid_type:
+            kind = "non-negative integers" if integers_only else "finite non-negative numbers"
+            raise ValueError(f"{name} must contain {kind}")
+        try:
+            capacity = float(value)
+        except (OverflowError, ValueError) as exc:
+            raise ValueError(f"{name} must contain finite non-negative numbers") from exc
+        if not math.isfinite(capacity) or capacity < 0:
+            raise ValueError(f"{name} must contain finite non-negative numbers")
+        capacities.append(capacity)
+
+    maximum = max(capacities)
+    if maximum == 0:
+        return [1.0 / len(capacities)] * len(capacities)
+
+    scaled = [capacity / maximum for capacity in capacities]
+    total = sum(scaled)
+    return [capacity / total for capacity in scaled]
+
+
 def compute_weights_from_gpu_cores(gpu_cores: list[int]) -> list[float]:
     """Compute workload weights proportional to GPU core counts."""
-    if not gpu_cores:
-        return []
-    total = sum(gpu_cores)
-    if total == 0:
-        return [1.0 / len(gpu_cores)] * len(gpu_cores)
-    return [c / total for c in gpu_cores]
+    return _normalize_capacities(
+        gpu_cores,
+        name="gpu_cores",
+        integers_only=True,
+    )
 
 
 def compute_weights_from_throughput(throughputs: list[float]) -> list[float]:
     """Compute workload weights proportional to measured throughput."""
-    if not throughputs:
-        return []
-    total = sum(throughputs)
-    if total == 0:
-        return [1.0 / len(throughputs)] * len(throughputs)
-    return [t / total for t in throughputs]
+    return _normalize_capacities(
+        throughputs,
+        name="throughputs",
+        integers_only=False,
+    )
