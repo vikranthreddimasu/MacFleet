@@ -1,5 +1,7 @@
 """Tests for network detection and link scoring."""
 
+import pytest
+
 from macfleet.pool import network
 from macfleet.pool.network import (
     LinkType,
@@ -96,3 +98,29 @@ class TestDetectInterfaces:
         topo = get_network_topology()
         assert isinstance(topo, NetworkTopology)
         assert topo.hostname != ""
+
+
+class TestNetworkProbes:
+    @pytest.mark.parametrize(
+        "timeout",
+        [0, -1, True, float("nan"), float("inf"), "soon"],
+    )
+    async def test_latency_rejects_invalid_timeout(self, timeout):
+        with pytest.raises(ValueError, match="timeout"):
+            await network.measure_latency("127.0.0.1", 9, timeout=timeout)
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [0, -1, True, float("nan"), float("inf"), "soon"],
+    )
+    async def test_bandwidth_rejects_invalid_timeout(self, timeout):
+        with pytest.raises(ValueError, match="timeout"):
+            await network.measure_bandwidth("127.0.0.1", 9, timeout=timeout)
+
+    @pytest.mark.parametrize(
+        "payload_mb",
+        [0, -1, True, float("nan"), float("inf"), "large"],
+    )
+    async def test_bandwidth_rejects_invalid_payload_size(self, payload_mb):
+        with pytest.raises(ValueError, match="payload_mb"):
+            await network.measure_bandwidth("127.0.0.1", 9, payload_mb=payload_mb)

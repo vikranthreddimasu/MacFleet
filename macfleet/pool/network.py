@@ -7,12 +7,24 @@ and produces composite scores for routing tensor traffic through the best link.
 from __future__ import annotations
 
 import asyncio
+import math
 import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+
+def _validate_positive_finite(name: str, value: float) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be a positive finite number")
+    return float(value)
 
 
 class LinkType(Enum):
@@ -249,6 +261,7 @@ def _parse_ifconfig() -> list[NetworkLink]:
 
 async def measure_latency(host: str, port: int, timeout: float = 5.0) -> float:
     """Measure TCP round-trip latency to a peer in milliseconds."""
+    timeout = _validate_positive_finite("timeout", timeout)
     try:
         start = time.monotonic()
         _, writer = await asyncio.wait_for(
@@ -278,7 +291,11 @@ async def measure_bandwidth(
     confirms the kernel send buffer received the bytes, not the wire.
     Requires a listening peer that accepts and discards data.
     """
+    payload_mb = _validate_positive_finite("payload_mb", payload_mb)
+    timeout = _validate_positive_finite("timeout", timeout)
     payload_bytes = int(payload_mb * 1024 * 1024)
+    if payload_bytes == 0:
+        raise ValueError("payload_mb must represent at least one byte")
     chunk_size = 65536
 
     try:
