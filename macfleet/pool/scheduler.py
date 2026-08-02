@@ -122,24 +122,32 @@ class Scheduler:
         ranks = self.registry.get_ranks()
 
         assignments: list[WorkloadAssignment] = []
-        remaining = global_batch_size
-
         sorted_nodes = sorted(weights.keys(), key=lambda nid: ranks.get(nid, 999))
+
+        ideal_batches = {
+            node_id: global_batch_size * weights[node_id]
+            for node_id in sorted_nodes
+        }
+        batches = {
+            node_id: int(ideal_batches[node_id])
+            for node_id in sorted_nodes
+        }
+        remaining = global_batch_size - sum(batches.values())
+        remainder_order = sorted(
+            sorted_nodes,
+            key=lambda node_id: (
+                -(ideal_batches[node_id] - batches[node_id]),
+                ranks.get(node_id, 999),
+                node_id,
+            ),
+        )
+        for node_id in remainder_order[:remaining]:
+            batches[node_id] += 1
 
         for i, node_id in enumerate(sorted_nodes):
             weight = weights[node_id]
             rank = ranks.get(node_id, i)
-
-            if i == len(sorted_nodes) - 1:
-                # Last node gets remainder (clamped: when global_batch_size <
-                # node count, earlier max(1, ...) bumps can exhaust the budget).
-                batch = max(0, remaining)
-            elif remaining <= 0:
-                # Budget already exhausted — don't hand out batches we can't back.
-                batch = 0
-            else:
-                batch = max(1, int(global_batch_size * weight))
-                remaining -= batch
+            batch = batches[node_id]
 
             is_viable = batch >= self.config.min_batch_per_node
 

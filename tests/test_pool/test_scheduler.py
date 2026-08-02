@@ -129,6 +129,38 @@ class TestSchedulerAssignment:
         by_id = {a.node_id: a for a in assignments}
         assert by_id["b"].batch_size > by_id["a"].batch_size
 
+    def test_remainder_favors_largest_fractional_allocation(self):
+        reg = ClusterRegistry("a")
+        reg.register(_make_node("a", gpu_cores=34))
+        reg.register(_make_node("b", gpu_cores=33))
+        reg.register(_make_node("c", gpu_cores=33))
+
+        assignments = Scheduler(
+            reg,
+            SchedulerConfig(use_throughput=False),
+        ).assign(global_batch_size=10)
+
+        by_id = {assignment.node_id: assignment.batch_size for assignment in assignments}
+        assert by_id == {"a": 4, "b": 3, "c": 3}
+
+    def test_batch_allocation_is_independent_of_registration_order(self):
+        allocations = []
+        for registration_order in (("a", "b", "c"), ("c", "b", "a")):
+            reg = ClusterRegistry("a")
+            core_counts = {"a": 34, "b": 33, "c": 33}
+            for node_id in registration_order:
+                reg.register(_make_node(node_id, gpu_cores=core_counts[node_id]))
+
+            assignments = Scheduler(
+                reg,
+                SchedulerConfig(use_throughput=False),
+            ).assign(global_batch_size=10)
+            allocations.append(
+                {assignment.node_id: assignment.batch_size for assignment in assignments}
+            )
+
+        assert allocations == [{"a": 4, "b": 3, "c": 3}] * 2
+
     def test_minimum_batch_guard(self):
         reg = ClusterRegistry("strong")
         reg.register(_make_node("strong", gpu_cores=100))
