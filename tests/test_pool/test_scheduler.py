@@ -106,6 +106,44 @@ class TestSchedulerWeights:
 
         assert weights == pytest.approx({"air": 1 / 3, "pro": 2 / 3})
 
+    @pytest.mark.parametrize("invalid_cores", [-1, float("nan"), float("inf"), True])
+    def test_invalid_gpu_capacity_cannot_create_invalid_weights(self, invalid_cores):
+        reg = ClusterRegistry("invalid")
+        invalid = _make_node("invalid", gpu_cores=10)
+        invalid.hardware.gpu_cores = invalid_cores
+        reg.register(invalid)
+        reg.register(_make_node("valid", gpu_cores=20))
+
+        weights = Scheduler(reg, SchedulerConfig(use_throughput=False)).compute_weights()
+
+        assert weights == {"invalid": 0.0, "valid": 1.0}
+
+    def test_all_invalid_gpu_capacities_fall_back_to_equal_weights(self):
+        reg = ClusterRegistry("a")
+        a = _make_node("a")
+        b = _make_node("b")
+        a.hardware.gpu_cores = -1
+        b.hardware.gpu_cores = float("nan")
+        reg.register(a)
+        reg.register(b)
+
+        weights = Scheduler(reg, SchedulerConfig(use_throughput=False)).compute_weights()
+
+        assert weights == {"a": 0.5, "b": 0.5}
+
+    def test_extreme_finite_throughput_normalizes_without_overflow(self):
+        reg = ClusterRegistry("a")
+        a = _make_node("a")
+        b = _make_node("b")
+        a.throughput_samples_sec = 1e308
+        b.throughput_samples_sec = 1e308
+        reg.register(a)
+        reg.register(b)
+
+        weights = Scheduler(reg).compute_weights()
+
+        assert weights == {"a": 0.5, "b": 0.5}
+
 
 class TestSchedulerAssignment:
     @pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
