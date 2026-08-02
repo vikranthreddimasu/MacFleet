@@ -106,6 +106,44 @@ class TestSchedulerWeights:
 
         assert weights == pytest.approx({"air": 1 / 3, "pro": 2 / 3})
 
+    @pytest.mark.parametrize("invalid_cores", [-1, float("nan"), float("inf"), True])
+    def test_invalid_gpu_capacity_cannot_create_invalid_weights(self, invalid_cores):
+        reg = ClusterRegistry("invalid")
+        invalid = _make_node("invalid", gpu_cores=10)
+        invalid.hardware.gpu_cores = invalid_cores
+        reg.register(invalid)
+        reg.register(_make_node("valid", gpu_cores=20))
+
+        weights = Scheduler(reg, SchedulerConfig(use_throughput=False)).compute_weights()
+
+        assert weights == {"invalid": 0.0, "valid": 1.0}
+
+    def test_all_invalid_gpu_capacities_fall_back_to_equal_weights(self):
+        reg = ClusterRegistry("a")
+        a = _make_node("a")
+        b = _make_node("b")
+        a.hardware.gpu_cores = -1
+        b.hardware.gpu_cores = float("nan")
+        reg.register(a)
+        reg.register(b)
+
+        weights = Scheduler(reg, SchedulerConfig(use_throughput=False)).compute_weights()
+
+        assert weights == {"a": 0.5, "b": 0.5}
+
+    def test_extreme_finite_throughput_normalizes_without_overflow(self):
+        reg = ClusterRegistry("a")
+        a = _make_node("a")
+        b = _make_node("b")
+        a.throughput_samples_sec = 1e308
+        b.throughput_samples_sec = 1e308
+        reg.register(a)
+        reg.register(b)
+
+        weights = Scheduler(reg).compute_weights()
+
+        assert weights == {"a": 0.5, "b": 0.5}
+
 
 class TestSchedulerAssignment:
     @pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
@@ -128,6 +166,38 @@ class TestSchedulerAssignment:
         # Pro (20 cores) should get more
         by_id = {a.node_id: a for a in assignments}
         assert by_id["b"].batch_size > by_id["a"].batch_size
+
+    def test_remainder_favors_largest_fractional_allocation(self):
+        reg = ClusterRegistry("a")
+        reg.register(_make_node("a", gpu_cores=34))
+        reg.register(_make_node("b", gpu_cores=33))
+        reg.register(_make_node("c", gpu_cores=33))
+
+        assignments = Scheduler(
+            reg,
+            SchedulerConfig(use_throughput=False),
+        ).assign(global_batch_size=10)
+
+        by_id = {assignment.node_id: assignment.batch_size for assignment in assignments}
+        assert by_id == {"a": 4, "b": 3, "c": 3}
+
+    def test_batch_allocation_is_independent_of_registration_order(self):
+        allocations = []
+        for registration_order in (("a", "b", "c"), ("c", "b", "a")):
+            reg = ClusterRegistry("a")
+            core_counts = {"a": 34, "b": 33, "c": 33}
+            for node_id in registration_order:
+                reg.register(_make_node(node_id, gpu_cores=core_counts[node_id]))
+
+            assignments = Scheduler(
+                reg,
+                SchedulerConfig(use_throughput=False),
+            ).assign(global_batch_size=10)
+            allocations.append(
+                {assignment.node_id: assignment.batch_size for assignment in assignments}
+            )
+
+        assert allocations == [{"a": 4, "b": 3, "c": 3}] * 2
 
     def test_minimum_batch_guard(self):
         reg = ClusterRegistry("strong")

@@ -13,6 +13,17 @@ from typing import Optional
 from macfleet.pool.registry import ClusterRegistry
 
 
+def _positive_finite_capacity(value: object) -> float:
+    """Return a usable scheduling capacity, or zero for invalid telemetry."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    try:
+        capacity = float(value)
+    except (OverflowError, ValueError):
+        return 0.0
+    return capacity if math.isfinite(capacity) and capacity > 0 else 0.0
+
+
 @dataclass
 class WorkloadAssignment:
     """Workload assignment for a single node."""
@@ -83,25 +94,24 @@ class Scheduler:
 
         raw_weights: dict[str, float] = {}
         for node in nodes:
-            if (
-                self.config.use_throughput
-                and math.isfinite(node.throughput_samples_sec)
-                and node.throughput_samples_sec > 0
-            ):
-                base = node.throughput_samples_sec
-            else:
-                base = float(node.hardware.gpu_cores)
+            throughput = _positive_finite_capacity(node.throughput_samples_sec)
+            gpu_capacity = _positive_finite_capacity(node.hardware.gpu_cores)
+            base = throughput if self.config.use_throughput and throughput else gpu_capacity
 
             factor = node.hardware.thermal_pressure.workload_multiplier
             raw_weights[node.node_id] = base * factor
 
-        total = sum(raw_weights.values())
-        if total <= 0:
+        max_weight = max(raw_weights.values())
+        if max_weight <= 0:
             # Equal split
             n = len(nodes)
             return {nid: 1.0 / n for nid in raw_weights}
 
-        return {nid: w / total for nid, w in raw_weights.items()}
+        # Normalize after scaling by the largest capacity. Summing raw finite
+        # values can still overflow (for example, two 1e308 throughput samples).
+        scaled_weights = {nid: weight / max_weight for nid, weight in raw_weights.items()}
+        total = sum(scaled_weights.values())
+        return {nid: weight / total for nid, weight in scaled_weights.items()}
 
     def assign(self, global_batch_size: int) -> list[WorkloadAssignment]:
         """Produce workload assignments for all alive nodes.
@@ -122,24 +132,32 @@ class Scheduler:
         ranks = self.registry.get_ranks()
 
         assignments: list[WorkloadAssignment] = []
-        remaining = global_batch_size
-
         sorted_nodes = sorted(weights.keys(), key=lambda nid: ranks.get(nid, 999))
+
+        ideal_batches = {
+            node_id: global_batch_size * weights[node_id]
+            for node_id in sorted_nodes
+        }
+        batches = {
+            node_id: int(ideal_batches[node_id])
+            for node_id in sorted_nodes
+        }
+        remaining = global_batch_size - sum(batches.values())
+        remainder_order = sorted(
+            sorted_nodes,
+            key=lambda node_id: (
+                -(ideal_batches[node_id] - batches[node_id]),
+                ranks.get(node_id, 999),
+                node_id,
+            ),
+        )
+        for node_id in remainder_order[:remaining]:
+            batches[node_id] += 1
 
         for i, node_id in enumerate(sorted_nodes):
             weight = weights[node_id]
             rank = ranks.get(node_id, i)
-
-            if i == len(sorted_nodes) - 1:
-                # Last node gets remainder (clamped: when global_batch_size <
-                # node count, earlier max(1, ...) bumps can exhaust the budget).
-                batch = max(0, remaining)
-            elif remaining <= 0:
-                # Budget already exhausted — don't hand out batches we can't back.
-                batch = 0
-            else:
-                batch = max(1, int(global_batch_size * weight))
-                remaining -= batch
+            batch = batches[node_id]
 
             is_viable = batch >= self.config.min_batch_per_node
 
