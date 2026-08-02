@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from macfleet.pool.discovery import MACFLEET_SERVICE_TYPE, ServiceRegistry
+from macfleet.pool.discovery import MACFLEET_SERVICE_TYPE, DiscoveredNode, ServiceRegistry
 from macfleet.security.auth import DEFAULT_SERVICE_TYPE, SecurityConfig
 
 
@@ -201,3 +203,47 @@ class TestDiscoveryCacheRemoval:
             None, service_type, f"node-xyz.{service_type}",
         )
         assert seen == ["node-xyz"]
+
+
+class TestDiscoveredNodeValidation:
+    @pytest.mark.parametrize(
+        ("port", "data_port"),
+        [
+            (0, 50052),
+            (65536, 50052),
+            (50051, -1),
+            (50051, 65536),
+        ],
+    )
+    def test_rejects_invalid_ports(self, port, data_port):
+        with pytest.raises(ValueError, match="port"):
+            DiscoveredNode(
+                hostname="mac.local",
+                node_id="node-a",
+                ip_address="127.0.0.1",
+                port=port,
+                gpu_cores=0,
+                ram_gb=0,
+                chip_name="unknown",
+                link_types="",
+                pool_version="2.2.1",
+                compute_score=0.0,
+                data_port=data_port,
+            )
+
+    @pytest.mark.parametrize("compute_score", [math.nan, math.inf, -0.1])
+    def test_rejects_invalid_compute_score(self, compute_score):
+        with pytest.raises(ValueError, match="compute_score"):
+            DiscoveredNode(
+                hostname="mac.local",
+                node_id="node-a",
+                ip_address="127.0.0.1",
+                port=50051,
+                gpu_cores=0,
+                ram_gb=0,
+                chip_name="unknown",
+                link_types="",
+                pool_version="2.2.1",
+                compute_score=compute_score,
+                data_port=50052,
+            )
