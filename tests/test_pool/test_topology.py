@@ -153,3 +153,78 @@ def test_deserialize_network_links_rejects_non_finite_telemetry():
     payload = '[{"i":"en0","t":"ethernet","ip":"192.168.1.2","b":NaN}]'
 
     assert deserialize_network_links(payload) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("b", True),
+        ("b", "100"),
+        ("b", -1),
+        ("l", True),
+        ("l", "5"),
+        ("l", -1),
+        ("r", True),
+        ("r", "0.1"),
+        ("r", -0.1),
+        ("r", 1.01),
+        ("m", True),
+        ("m", 1500.5),
+        ("m", "1500"),
+        ("m", 0),
+        ("m", 65536),
+    ],
+)
+def test_deserialize_network_links_rejects_invalid_telemetry_types_and_bounds(
+    field, value
+):
+    item = {"i": "en0", "t": "ethernet", "ip": "192.168.1.2", field: value}
+
+    assert deserialize_network_links(json.dumps([item])) == ()
+
+
+def test_deserialize_network_links_accepts_loss_and_mtu_boundaries():
+    payload = json.dumps(
+        [
+            {
+                "i": "en0",
+                "t": "ethernet",
+                "ip": "192.168.1.2",
+                "r": 1,
+                "m": 65535,
+            }
+        ]
+    )
+
+    restored = deserialize_network_links(payload)
+
+    assert len(restored) == 1
+    assert restored[0].loss_rate == 1.0
+    assert restored[0].mtu == 65535
+
+
+def test_serialize_network_links_omits_invalid_local_telemetry():
+    link = NetworkLink(
+        "en0",
+        LinkType.ETHERNET,
+        "192.168.1.2",
+        bandwidth_mbps=float("nan"),
+        latency_ms=-1,
+        loss_rate=2,
+        mtu=1500.5,  # type: ignore[arg-type]
+    )
+
+    payload = json.loads(serialize_network_links([link]))
+
+    assert payload == [{"i": "en0", "t": "ethernet", "ip": "192.168.1.2"}]
+
+
+def test_deserialize_network_links_rejects_too_many_advertisements():
+    payload = json.dumps(
+        [
+            {"i": f"en{index}", "t": "ethernet", "ip": f"192.168.1.{index + 1}"}
+            for index in range(9)
+        ]
+    )
+
+    assert deserialize_network_links(payload) == ()
