@@ -153,3 +153,51 @@ def test_deserialize_network_links_rejects_non_finite_telemetry():
     payload = '[{"i":"en0","t":"ethernet","ip":"192.168.1.2","b":NaN}]'
 
     assert deserialize_network_links(payload) == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("b", True),
+        ("b", "100"),
+        ("b", -1),
+        ("l", True),
+        ("l", "5"),
+        ("l", -1),
+        ("r", True),
+        ("r", "0.1"),
+        ("r", -0.1),
+        ("r", 1.01),
+        ("m", True),
+        ("m", 1500.5),
+        ("m", "1500"),
+        ("m", 0),
+        ("m", 65536),
+    ],
+)
+def test_deserialize_network_links_rejects_invalid_telemetry_types_and_bounds(
+    field, value
+):
+    item = {"i": "en0", "t": "ethernet", "ip": "192.168.1.2", field: value}
+
+    assert deserialize_network_links(json.dumps([item])) == ()
+
+
+def test_deserialize_network_links_accepts_loss_and_mtu_boundaries():
+    payload = json.dumps(
+        [
+            {
+                "i": "en0",
+                "t": "ethernet",
+                "ip": "192.168.1.2",
+                "r": 1,
+                "m": 65535,
+            }
+        ]
+    )
+
+    restored = deserialize_network_links(payload)
+
+    assert len(restored) == 1
+    assert restored[0].loss_rate == 1.0
+    assert restored[0].mtu == 65535
