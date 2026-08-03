@@ -53,20 +53,36 @@ def _telemetry_number(
     maximum: float | None = None,
 ) -> float:
     raw = item[short_name] if short_name in item else item.get(long_name, 0.0)
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+    if not _number_in_range(raw, maximum=maximum):
         raise ValueError(f"{long_name} must be a number")
+    assert isinstance(raw, (int, float))
     value = float(raw)
-    if not math.isfinite(value) or value < 0 or (
-        maximum is not None and value > maximum
-    ):
-        raise ValueError(f"{long_name} is outside its valid range")
     return value
+
+
+def _number_in_range(value: object, *, maximum: float | None = None) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and value >= 0
+        and (maximum is None or value <= maximum)
+    )
+
+
+def _valid_mtu(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 1 <= value <= _MAX_MTU
+    )
 
 
 def _telemetry_mtu(item: dict[object, object]) -> int:
     raw = item["m"] if "m" in item else item.get("mtu", 1500)
-    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= _MAX_MTU:
+    if not _valid_mtu(raw):
         raise ValueError("mtu must be an integer between 1 and 65535")
+    assert isinstance(raw, int)
     return raw
 
 
@@ -205,18 +221,18 @@ def serialize_network_links(links: Sequence[NetworkLink]) -> str:
             "t": link.link_type.value,
             "ip": link.ip_address,
         }
-        if link.bandwidth_mbps:
+        if link.bandwidth_mbps and _number_in_range(link.bandwidth_mbps):
             item["b"] = link.bandwidth_mbps
-        if link.latency_ms:
+        if link.latency_ms and _number_in_range(link.latency_ms):
             item["l"] = link.latency_ms
-        if link.loss_rate:
+        if link.loss_rate and _number_in_range(link.loss_rate, maximum=1.0):
             item["r"] = link.loss_rate
-        if link.mtu != 1500:
+        if link.mtu != 1500 and _valid_mtu(link.mtu):
             item["m"] = link.mtu
         payload.append(item)
         if len(payload) >= _MAX_SERIALIZED_LINKS:
             break
-    return json.dumps(payload, separators=(",", ":"))
+    return json.dumps(payload, separators=(",", ":"), allow_nan=False)
 
 
 def deserialize_network_links(payload: str) -> tuple[NetworkLink, ...]:
@@ -226,6 +242,8 @@ def deserialize_network_links(payload: str) -> tuple[NetworkLink, ...]:
     except (TypeError, ValueError):
         return ()
     if not isinstance(raw, list):
+        return ()
+    if len(raw) > _MAX_SERIALIZED_LINKS:
         return ()
 
     links: list[NetworkLink] = []
