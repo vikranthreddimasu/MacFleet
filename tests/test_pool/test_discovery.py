@@ -96,3 +96,35 @@ class TestDiscoveryNumericValidation:
         info = _service_info(properties={b"data_port": b"0"}, port=65535)
 
         assert PoolServiceListener()._parse_service_info(info) is None
+
+
+class TestDiscoveryTextValidation:
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            (b"node_id", b"n" * 129),
+            (b"node_id", b"peer\x1b[31m"),
+            (b"chip_name", b"c" * 129),
+            (b"chip_name", b"M4\nforged-output"),
+            (b"link_types", b"l" * 129),
+            (b"pool_version", b"v" * 65),
+        ],
+    )
+    def test_unsafe_text_property_rejects_peer(self, key, value):
+        info = _service_info(properties={key: value})
+
+        assert PoolServiceListener()._parse_service_info(info) is None
+
+    def test_empty_node_id_falls_back_to_hostname(self):
+        info = _service_info(properties={b"node_id": b""})
+
+        node = PoolServiceListener()._parse_service_info(info)
+
+        assert node is not None
+        assert node.node_id == "peer-1.local"
+
+    def test_unsafe_hostname_rejects_peer(self):
+        info = _service_info()
+        info.server = "peer\nforged.local."
+
+        assert PoolServiceListener()._parse_service_info(info) is None

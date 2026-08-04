@@ -19,12 +19,20 @@ from zeroconf.asyncio import AsyncZeroconf
 import macfleet
 from macfleet.pool.network import NetworkLink
 from macfleet.pool.topology import deserialize_network_links, serialize_network_links
-from macfleet.security.auth import DEFAULT_SERVICE_TYPE, SecurityConfig
+from macfleet.security.auth import (
+    DEFAULT_SERVICE_TYPE,
+    MAX_NODE_ID_BYTES,
+    SecurityConfig,
+)
 
 MACFLEET_SERVICE_TYPE = DEFAULT_SERVICE_TYPE
 DEFAULT_TTL = 120
 MAX_DISCOVERY_GPU_CORES = 1024
 MAX_DISCOVERY_RAM_GB = 65_536
+MAX_DISCOVERY_HOSTNAME_BYTES = 253
+MAX_DISCOVERY_CHIP_NAME_BYTES = 128
+MAX_DISCOVERY_LINK_TYPES_BYTES = 128
+MAX_DISCOVERY_VERSION_BYTES = 64
 
 
 def _parse_bounded_int(
@@ -49,6 +57,39 @@ def _parse_nonnegative_finite_float(value: bytes, *, field: str) -> float:
     if not math.isfinite(parsed) or parsed < 0:
         raise ValueError(f"{field} must be non-negative and finite")
     return parsed
+
+
+def _validate_bounded_text(
+    value: str,
+    *,
+    maximum_bytes: int,
+    field: str,
+    allow_empty: bool = True,
+) -> str:
+    """Require bounded printable text before retaining or displaying it."""
+    if (not allow_empty and not value) or len(value.encode()) > maximum_bytes:
+        raise ValueError(f"{field} exceeds its size limit or is empty")
+    if any(not character.isprintable() for character in value):
+        raise ValueError(f"{field} contains control characters")
+    return value
+
+
+def _decode_bounded_text(
+    value: bytes,
+    *,
+    maximum_bytes: int,
+    field: str,
+    allow_empty: bool = True,
+) -> str:
+    """Decode an untrusted mDNS TXT value and validate display safety."""
+    if len(value) > maximum_bytes:
+        raise ValueError(f"{field} exceeds its size limit")
+    return _validate_bounded_text(
+        value.decode(),
+        maximum_bytes=maximum_bytes,
+        field=field,
+        allow_empty=allow_empty,
+    )
 
 
 @dataclass
@@ -176,13 +217,28 @@ class PoolServiceListener(ServiceListener):
                 return None
 
             props = info.properties
-            hostname = info.server.rstrip(".")
+            hostname = _validate_bounded_text(
+                info.server.rstrip("."),
+                maximum_bytes=MAX_DISCOVERY_HOSTNAME_BYTES,
+                field="hostname",
+                allow_empty=False,
+            )
 
             def _prop(key: bytes, default: bytes) -> bytes:
                 val = props.get(key)
                 return val if isinstance(val, bytes) else default
 
-            node_id = _prop(b"node_id", b"").decode() or hostname
+            node_id = _decode_bounded_text(
+                _prop(b"node_id", b""),
+                maximum_bytes=MAX_NODE_ID_BYTES,
+                field="node_id",
+            ) or hostname
+            node_id = _validate_bounded_text(
+                node_id,
+                maximum_bytes=MAX_NODE_ID_BYTES,
+                field="node_id",
+                allow_empty=False,
+            )
             gpu_cores = _parse_bounded_int(
                 _prop(b"gpu_cores", b"0"),
                 minimum=0,
@@ -195,9 +251,23 @@ class PoolServiceListener(ServiceListener):
                 maximum=MAX_DISCOVERY_RAM_GB,
                 field="ram_gb",
             )
-            chip_name = _prop(b"chip_name", b"unknown").decode()
-            link_types = _prop(b"link_types", b"").decode()
-            pool_version = _prop(b"pool_version", b"0.0.0").decode()
+            chip_name = _decode_bounded_text(
+                _prop(b"chip_name", b"unknown"),
+                maximum_bytes=MAX_DISCOVERY_CHIP_NAME_BYTES,
+                field="chip_name",
+                allow_empty=False,
+            )
+            link_types = _decode_bounded_text(
+                _prop(b"link_types", b""),
+                maximum_bytes=MAX_DISCOVERY_LINK_TYPES_BYTES,
+                field="link_types",
+            )
+            pool_version = _decode_bounded_text(
+                _prop(b"pool_version", b"0.0.0"),
+                maximum_bytes=MAX_DISCOVERY_VERSION_BYTES,
+                field="pool_version",
+                allow_empty=False,
+            )
             compute_score = _parse_nonnegative_finite_float(
                 _prop(b"compute_score", b"0"), field="compute_score"
             )
