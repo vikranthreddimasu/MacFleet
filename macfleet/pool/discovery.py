@@ -33,6 +33,8 @@ MAX_DISCOVERY_HOSTNAME_BYTES = 253
 MAX_DISCOVERY_CHIP_NAME_BYTES = 128
 MAX_DISCOVERY_LINK_TYPES_BYTES = 128
 MAX_DISCOVERY_VERSION_BYTES = 64
+MAX_MDNS_INSTANCE_NAME_BYTES = 63
+MAX_MDNS_TXT_ITEM_BYTES = 255
 
 
 def _parse_bounded_int(
@@ -44,6 +46,22 @@ def _parse_bounded_int(
 ) -> int:
     """Parse a bounded integer from an untrusted mDNS TXT value."""
     parsed = int(value.decode())
+    return _validate_bounded_int(
+        parsed, minimum=minimum, maximum=maximum, field=field
+    )
+
+
+def _validate_bounded_int(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+    field: str,
+) -> int:
+    """Require an integer value within protocol-safe bounds."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer")
+    parsed = value
     if not minimum <= parsed <= maximum:
         raise ValueError(
             f"{field} must be between {minimum} and {maximum}, got {parsed}"
@@ -54,6 +72,14 @@ def _parse_bounded_int(
 def _parse_nonnegative_finite_float(value: bytes, *, field: str) -> float:
     """Parse a non-negative finite float from an untrusted mDNS TXT value."""
     parsed = float(value.decode())
+    return _validate_nonnegative_finite_number(parsed, field=field)
+
+
+def _validate_nonnegative_finite_number(value: object, *, field: str) -> float:
+    """Require a numeric value suitable for scoring and serialization."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a number")
+    parsed = float(value)
     if not math.isfinite(parsed) or parsed < 0:
         raise ValueError(f"{field} must be non-negative and finite")
     return parsed
@@ -90,6 +116,42 @@ def _decode_bounded_text(
         field=field,
         allow_empty=allow_empty,
     )
+
+
+def _encode_bounded_text(
+    value: str,
+    *,
+    maximum_bytes: int,
+    field: str,
+    allow_empty: bool = True,
+) -> bytes:
+    """Validate local text before encoding it into an mDNS TXT record."""
+    return _validate_bounded_text(
+        value,
+        maximum_bytes=maximum_bytes,
+        field=field,
+        allow_empty=allow_empty,
+    ).encode()
+
+
+def _mdns_txt_item_fits(key: bytes, value: bytes) -> bool:
+    """Return whether ``key=value`` fits one DNS TXT character-string."""
+    return len(key) + 1 + len(value) <= MAX_MDNS_TXT_ITEM_BYTES
+
+
+def _serialize_network_links_for_mdns(
+    network_links: tuple[NetworkLink, ...],
+) -> bytes:
+    """Keep as many links as fit in mDNS's 255-byte TXT item limit."""
+    selected: list[NetworkLink] = []
+    encoded = b"[]"
+    key = b"network_links"
+    for link in network_links:
+        candidate = serialize_network_links((*selected, link)).encode()
+        if candidate != encoded and _mdns_txt_item_fits(key, candidate):
+            selected.append(link)
+            encoded = candidate
+    return encoded
 
 
 @dataclass
@@ -390,22 +452,64 @@ class ServiceRegistry:
         sensitive — it's just the TCP port the transport listens on. Peers
         need it to initiate the authenticated handshake.
         """
+        node_id_bytes = _encode_bounded_text(
+            node_id,
+            maximum_bytes=MAX_MDNS_INSTANCE_NAME_BYTES,
+            field="node_id",
+            allow_empty=False,
+        )
+        pool_version_bytes = _encode_bounded_text(
+            macfleet.__version__,
+            maximum_bytes=MAX_DISCOVERY_VERSION_BYTES,
+            field="pool_version",
+            allow_empty=False,
+        )
+        data_port = _validate_bounded_int(
+            data_port, minimum=1, maximum=65_535, field="data_port"
+        )
+        data_port_bytes = str(data_port).encode()
         if self._security.is_secure:
             return {
-                b"node_id": node_id.encode(),
-                b"pool_version": macfleet.__version__.encode(),
-                b"data_port": str(data_port).encode(),
+                b"node_id": node_id_bytes,
+                b"pool_version": pool_version_bytes,
+                b"data_port": data_port_bytes,
             }
+        gpu_cores = _validate_bounded_int(
+            gpu_cores,
+            minimum=0,
+            maximum=MAX_DISCOVERY_GPU_CORES,
+            field="gpu_cores",
+        )
+        ram_gb = _validate_bounded_int(
+            ram_gb,
+            minimum=0,
+            maximum=MAX_DISCOVERY_RAM_GB,
+            field="ram_gb",
+        )
+        chip_name_bytes = _encode_bounded_text(
+            chip_name,
+            maximum_bytes=MAX_DISCOVERY_CHIP_NAME_BYTES,
+            field="chip_name",
+            allow_empty=False,
+        )
+        link_types_bytes = _encode_bounded_text(
+            link_types,
+            maximum_bytes=MAX_DISCOVERY_LINK_TYPES_BYTES,
+            field="link_types",
+        )
+        compute_score = _validate_nonnegative_finite_number(
+            compute_score, field="compute_score"
+        )
         return {
-            b"node_id": node_id.encode(),
+            b"node_id": node_id_bytes,
             b"gpu_cores": str(gpu_cores).encode(),
             b"ram_gb": str(ram_gb).encode(),
-            b"chip_name": chip_name.encode(),
-            b"link_types": link_types.encode(),
-            b"network_links": serialize_network_links(network_links).encode(),
-            b"pool_version": macfleet.__version__.encode(),
+            b"chip_name": chip_name_bytes,
+            b"link_types": link_types_bytes,
+            b"network_links": _serialize_network_links_for_mdns(network_links),
+            b"pool_version": pool_version_bytes,
             b"compute_score": f"{compute_score:.1f}".encode(),
-            b"data_port": str(data_port).encode(),
+            b"data_port": data_port_bytes,
         }
 
     def register_node(

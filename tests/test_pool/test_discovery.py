@@ -7,7 +7,9 @@ import socket
 import pytest
 from zeroconf import ServiceInfo
 
-from macfleet.pool.discovery import PoolServiceListener
+from macfleet.pool.discovery import PoolServiceListener, ServiceRegistry
+from macfleet.pool.network import LinkType, NetworkLink
+from macfleet.pool.topology import deserialize_network_links
 
 SERVICE_TYPE = "_macfleet._tcp.local."
 
@@ -128,3 +130,65 @@ class TestDiscoveryTextValidation:
         info.server = "peer\nforged.local."
 
         assert PoolServiceListener()._parse_service_info(info) is None
+
+
+class TestDiscoveryAdvertisementValidation:
+    def _properties(self, **overrides):
+        values = {
+            "node_id": "node-1",
+            "gpu_cores": 20,
+            "ram_gb": 64,
+            "chip_name": "Apple M4 Ultra",
+            "link_types": "ethernet",
+            "compute_score": 512.0,
+            "data_port": 50052,
+        }
+        values.update(overrides)
+        return ServiceRegistry()._build_properties(**values)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"node_id": "n" * 64},
+            {"gpu_cores": -1},
+            {"gpu_cores": 1025},
+            {"ram_gb": 65537},
+            {"chip_name": "M4\nforged-output"},
+            {"link_types": "l" * 129},
+            {"compute_score": float("nan")},
+            {"data_port": 0},
+            {"data_port": 65536},
+        ],
+    )
+    def test_invalid_local_property_is_rejected(self, overrides):
+        with pytest.raises(ValueError):
+            self._properties(**overrides)
+
+    def test_rich_topology_is_trimmed_to_mdns_txt_limit(self):
+        links = tuple(
+            NetworkLink(
+                interface=f"en{index}",
+                link_type=LinkType.ETHERNET,
+                ip_address=f"192.0.2.{index + 1}",
+                bandwidth_mbps=1000.0,
+                latency_ms=1.0,
+                loss_rate=0.01,
+                mtu=9000,
+            )
+            for index in range(8)
+        )
+
+        properties = self._properties(network_links=links)
+        encoded_links = properties[b"network_links"]
+
+        assert len(b"network_links=") + len(encoded_links) <= 255
+        restored = deserialize_network_links(encoded_links.decode())
+        assert 0 < len(restored) < len(links)
+        ServiceInfo(
+            SERVICE_TYPE,
+            f"node-1.{SERVICE_TYPE}",
+            addresses=[socket.inet_aton("192.0.2.100")],
+            port=50051,
+            properties=properties,
+            server="node-1.local.",
+        )
