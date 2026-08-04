@@ -6,6 +6,7 @@ Ported from v1 comm/discovery.py with extended properties for pool metadata:
 """
 
 import asyncio
+import math
 import socket
 import threading
 import time
@@ -22,6 +23,32 @@ from macfleet.security.auth import DEFAULT_SERVICE_TYPE, SecurityConfig
 
 MACFLEET_SERVICE_TYPE = DEFAULT_SERVICE_TYPE
 DEFAULT_TTL = 120
+MAX_DISCOVERY_GPU_CORES = 1024
+MAX_DISCOVERY_RAM_GB = 65_536
+
+
+def _parse_bounded_int(
+    value: bytes,
+    *,
+    minimum: int,
+    maximum: int,
+    field: str,
+) -> int:
+    """Parse a bounded integer from an untrusted mDNS TXT value."""
+    parsed = int(value.decode())
+    if not minimum <= parsed <= maximum:
+        raise ValueError(
+            f"{field} must be between {minimum} and {maximum}, got {parsed}"
+        )
+    return parsed
+
+
+def _parse_nonnegative_finite_float(value: bytes, *, field: str) -> float:
+    """Parse a non-negative finite float from an untrusted mDNS TXT value."""
+    parsed = float(value.decode())
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ValueError(f"{field} must be non-negative and finite")
+    return parsed
 
 
 @dataclass
@@ -156,20 +183,47 @@ class PoolServiceListener(ServiceListener):
                 return val if isinstance(val, bytes) else default
 
             node_id = _prop(b"node_id", b"").decode() or hostname
-            gpu_cores = int(_prop(b"gpu_cores", b"0").decode())
-            ram_gb = int(_prop(b"ram_gb", b"0").decode())
+            gpu_cores = _parse_bounded_int(
+                _prop(b"gpu_cores", b"0"),
+                minimum=0,
+                maximum=MAX_DISCOVERY_GPU_CORES,
+                field="gpu_cores",
+            )
+            ram_gb = _parse_bounded_int(
+                _prop(b"ram_gb", b"0"),
+                minimum=0,
+                maximum=MAX_DISCOVERY_RAM_GB,
+                field="ram_gb",
+            )
             chip_name = _prop(b"chip_name", b"unknown").decode()
             link_types = _prop(b"link_types", b"").decode()
             pool_version = _prop(b"pool_version", b"0.0.0").decode()
-            compute_score = float(_prop(b"compute_score", b"0").decode())
-            # data_port advertised since v2.2; 2.1.x peers lack this. DiscoveredNode
-            # __post_init__ falls back to heartbeat port + 1 when 0.
-            data_port = int(_prop(b"data_port", b"0").decode())
+            compute_score = _parse_nonnegative_finite_float(
+                _prop(b"compute_score", b"0"), field="compute_score"
+            )
+            # data_port advertised since v2.2; 2.1.x peers lack this. Derive
+            # heartbeat port + 1 when absent, after checking for overflow.
+            data_port = _parse_bounded_int(
+                _prop(b"data_port", b"0"),
+                minimum=0,
+                maximum=65_535,
+                field="data_port",
+            )
             network_links = deserialize_network_links(
                 _prop(b"network_links", b"").decode()
             )
 
-            if info.port is None:
+            if (
+                isinstance(info.port, bool)
+                or not isinstance(info.port, int)
+                or not 1 <= info.port <= 65_535
+            ):
+                return None
+            if data_port == 0:
+                if info.port == 65_535:
+                    return None
+                data_port = info.port + 1
+            if data_port == info.port:
                 return None
 
             return DiscoveredNode(
