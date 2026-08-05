@@ -238,6 +238,34 @@ class TestAPingV2ServerHandler:
         server.close()
         await server.wait_closed()
 
+    async def test_v2_signed_invalid_hw_no_response(self):
+        """Valid HMAC cannot make malformed HW telemetry acceptable."""
+        sec = SecurityConfig(token="fleet-token")
+        fleet_key = sec.fleet_key
+        agent = _start_agent("fleet-token")
+
+        server = await asyncio.start_server(
+            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+        )
+        port = server.sockets[0].getsockname()[1]
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        nonce = secrets.token_bytes(16)
+        invalid_hw = b'{"gpu_cores":true,"data_port":70000}'
+        sig = sign_heartbeat_with_hw(fleet_key, "pinger", nonce, invalid_hw)
+        writer.write(
+            f"APING pinger {nonce.hex()} {sig.hex()} {invalid_hw.hex()}\n".encode()
+        )
+        await writer.drain()
+
+        response = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+        assert not response.startswith(b"APONG")
+
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+
     async def test_v2_oversize_hw_rejected(self):
         """HW payload past HW_HANDSHAKE_MAX_JSON_BYTES → silently dropped."""
         sec = SecurityConfig(token="fleet-token")
