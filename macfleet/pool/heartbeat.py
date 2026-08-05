@@ -16,8 +16,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Optional
 
+from macfleet.comm.transport import HardwareExchange
 from macfleet.security.auth import (
     HW_HANDSHAKE_MAX_JSON_BYTES,
+    HandshakeHwValidationError,
     SecurityConfig,
     create_client_ssl_context,
     sign_heartbeat,
@@ -269,6 +271,10 @@ class GossipHeartbeat:
                         fleet_key, resp_node_id, resp_nonce, nonce, resp_sig,
                         hw_json=resp_hw,
                     ):
+                        return False
+                    try:
+                        HardwareExchange.from_json_bytes(resp_hw)
+                    except HandshakeHwValidationError:
                         return False
                     if self._on_peer_hw is not None:
                         try:
