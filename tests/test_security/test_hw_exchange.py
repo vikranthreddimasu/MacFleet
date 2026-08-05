@@ -100,6 +100,7 @@ class TestHardwareExchangeDataclass:
             ("data_port", 65_536),
             ("chip_name", 123),
             ("chip_name", "M4\nforged-node"),
+            ("chip_name", "\ud800"),
             ("chip_name", "M" * 129),
         ],
     )
@@ -131,6 +132,28 @@ class TestHardwareExchangeDataclass:
         assert hw.ram_gb == 65_536.0
         assert hw.memory_bandwidth_gbps == 100_000.0
         assert hw.data_port == 65_535
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("wire_version", 256),
+            ("gpu_cores", True),
+            ("gpu_cores", 1025),
+            ("ram_gb", float("nan")),
+            ("memory_bandwidth_gbps", float("inf")),
+            ("chip_name", "M4\nforged-node"),
+            ("chip_name", "é" * 65),
+            ("has_ane", 1),
+            ("mps_available", "yes"),
+            ("mlx_available", None),
+            ("data_port", 65_536),
+        ],
+    )
+    def test_to_json_bytes_rejects_invalid_local_fields(self, field, value):
+        hw = HardwareExchange(**{field: value})
+
+        with pytest.raises(HandshakeHwValidationError, match=field):
+            hw.to_json_bytes()
 
 
 class TestSignVerifyHwProfile:

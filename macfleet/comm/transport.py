@@ -139,7 +139,11 @@ def _validate_hw_chip_name(value: object) -> str:
     """Require bounded printable text before displaying a peer chip name."""
     if not isinstance(value, str):
         raise HandshakeHwValidationError("chip_name must be a string")
-    if len(value.encode("utf-8")) > MAX_HW_CHIP_NAME_BYTES:
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise HandshakeHwValidationError("chip_name is not valid UTF-8 text") from e
+    if len(encoded) > MAX_HW_CHIP_NAME_BYTES:
         raise HandshakeHwValidationError(
             f"chip_name exceeds {MAX_HW_CHIP_NAME_BYTES} UTF-8 bytes"
         )
@@ -208,8 +212,9 @@ class HardwareExchange:
     data_port: int = 0
 
     def to_json_bytes(self) -> bytes:
-        """Stable JSON encoding (sort_keys so HMAC is deterministic)."""
-        return json.dumps(asdict(self), sort_keys=True).encode("utf-8")
+        """Validate and encode stable standards-compliant JSON for signing."""
+        payload = _validate_hw_payload(asdict(self))
+        return json.dumps(payload, sort_keys=True, allow_nan=False).encode("utf-8")
 
     @classmethod
     def from_json_bytes(cls, data: bytes) -> "HardwareExchange":

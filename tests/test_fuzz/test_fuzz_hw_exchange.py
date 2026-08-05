@@ -31,13 +31,18 @@ json_dict = st.dictionaries(
     max_size=20,
 )
 
+printable_chip_name = st.text(
+    alphabet=st.characters(min_codepoint=32, max_codepoint=126),
+    max_size=80,
+)
+
 
 class TestHardwareExchangeRoundtrip:
     @given(
         gpu_cores=st.integers(min_value=0, max_value=128),
         ram_gb=st.floats(min_value=0.0, max_value=2048.0, allow_nan=False),
         bw=st.floats(min_value=0.0, max_value=10000.0, allow_nan=False),
-        chip_name=st.text(min_size=0, max_size=80),
+        chip_name=printable_chip_name,
         has_ane=st.booleans(),
         mps=st.booleans(),
         mlx=st.booleans(),
@@ -69,10 +74,6 @@ class TestHardwareExchangeJSONRobust:
         except HandshakeHwValidationError:
             # Known field with the wrong type triggers this.
             pass
-        except TypeError:
-            # Field type mismatches that slip past filtering — expected
-            # to raise TypeError on dataclass construction.
-            pass
 
     @given(blob=st.binary(min_size=0, max_size=2048))
     @settings(max_examples=400, deadline=None)
@@ -82,9 +83,6 @@ class TestHardwareExchangeJSONRobust:
         try:
             HardwareExchange.from_json_bytes(blob)
         except HandshakeHwValidationError:
-            pass
-        except TypeError:
-            # Edge case where filtered dict has wrong types
             pass
 
     def test_non_object_top_level_rejected(self):
@@ -122,7 +120,7 @@ class TestHardwareExchangeJSONDeterminism:
 
     @given(
         gpu_cores=st.integers(min_value=0, max_value=128),
-        chip_name=st.text(min_size=0, max_size=40),
+        chip_name=printable_chip_name,
     )
     @settings(max_examples=100, deadline=None)
     def test_same_input_produces_same_bytes(self, gpu_cores, chip_name):
@@ -132,7 +130,7 @@ class TestHardwareExchangeJSONDeterminism:
 
     @given(
         gpu_cores=st.integers(min_value=0, max_value=128),
-        chip_name=st.text(min_size=0, max_size=40),
+        chip_name=printable_chip_name,
     )
     @settings(max_examples=100, deadline=None)
     def test_keys_sorted(self, gpu_cores, chip_name):
