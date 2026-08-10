@@ -18,9 +18,11 @@ import pytest
 
 from macfleet.comm.transport import HardwareExchange
 from macfleet.pool.agent import PoolAgent
+from macfleet.pool.heartbeat import GossipHeartbeat, PeerState
 from macfleet.security.auth import (
     HW_HANDSHAKE_MAX_JSON_BYTES,
     SecurityConfig,
+    sign_heartbeat_response,
     sign_heartbeat_with_hw,
     verify_heartbeat_with_hw,
 )
@@ -238,6 +240,34 @@ class TestAPingV2ServerHandler:
         server.close()
         await server.wait_closed()
 
+    async def test_v2_signed_invalid_hw_no_response(self):
+        """Valid HMAC cannot make malformed HW telemetry acceptable."""
+        sec = SecurityConfig(token="fleet-token")
+        fleet_key = sec.fleet_key
+        agent = _start_agent("fleet-token")
+
+        server = await asyncio.start_server(
+            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+        )
+        port = server.sockets[0].getsockname()[1]
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        nonce = secrets.token_bytes(16)
+        invalid_hw = b'{"gpu_cores":true,"data_port":70000}'
+        sig = sign_heartbeat_with_hw(fleet_key, "pinger", nonce, invalid_hw)
+        writer.write(
+            f"APING pinger {nonce.hex()} {sig.hex()} {invalid_hw.hex()}\n".encode()
+        )
+        await writer.drain()
+
+        response = await asyncio.wait_for(reader.read(1024), timeout=1.0)
+        assert not response.startswith(b"APONG")
+
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+
     async def test_v2_oversize_hw_rejected(self):
         """HW payload past HW_HANDSHAKE_MAX_JSON_BYTES → silently dropped."""
         sec = SecurityConfig(token="fleet-token")
@@ -286,6 +316,54 @@ class TestAPingV2ServerHandler:
         await writer.wait_closed()
         server.close()
         await server.wait_closed()
+
+
+class TestAPongV2ClientHandler:
+    async def test_signed_invalid_hw_does_not_mark_peer_alive(self):
+        sec = SecurityConfig(token="fleet-token")
+        sec.tls = False
+        fleet_key = sec.fleet_key
+        received: list[bytes] = []
+
+        async def invalid_peer(reader, writer):
+            request = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            parts = request.decode().strip().split(" ")
+            req_nonce = bytes.fromhex(parts[2])
+            invalid_hw = b'{"ram_gb":NaN,"data_port":70000}'
+            resp_nonce = secrets.token_bytes(16)
+            sig = sign_heartbeat_response(
+                fleet_key,
+                "invalid-peer",
+                resp_nonce,
+                req_nonce,
+                hw_json=invalid_hw,
+            )
+            writer.write(
+                (
+                    f"APONG invalid-peer {resp_nonce.hex()} {sig.hex()} "
+                    f"{invalid_hw.hex()}\n"
+                ).encode()
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(invalid_peer, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        heartbeat = GossipHeartbeat(
+            node_id="client",
+            security=sec,
+            local_hw_provider=lambda: HardwareExchange(gpu_cores=8).to_json_bytes(),
+            on_peer_hw=lambda _peer_id, hw_json: received.append(hw_json),
+        )
+        peer = PeerState("invalid-peer", "127.0.0.1", port)
+
+        try:
+            assert await heartbeat._ping_peer(peer) is False
+            assert received == []
+        finally:
+            server.close()
+            await server.wait_closed()
 
 
 # ------------------------------------------------------------------ #

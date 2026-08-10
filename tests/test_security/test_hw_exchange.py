@@ -7,6 +7,7 @@ and A7 (wire_version byte in the payload).
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -65,6 +66,94 @@ class TestHardwareExchangeDataclass:
     def test_from_json_bytes_rejects_invalid_utf8(self):
         with pytest.raises(HandshakeHwValidationError):
             HardwareExchange.from_json_bytes(b'\xff\xfe\xfd')
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("wire_version", True),
+            ("wire_version", 1.0),
+            ("wire_version", 0),
+            ("wire_version", 256),
+            ("gpu_cores", True),
+            ("gpu_cores", 8.0),
+            ("gpu_cores", -1),
+            ("gpu_cores", 1025),
+            ("ram_gb", True),
+            ("ram_gb", "16"),
+            ("ram_gb", -1),
+            ("ram_gb", float("nan")),
+            ("ram_gb", float("inf")),
+            ("ram_gb", 65_537),
+            ("memory_bandwidth_gbps", True),
+            ("memory_bandwidth_gbps", "400"),
+            ("memory_bandwidth_gbps", -1),
+            ("memory_bandwidth_gbps", float("nan")),
+            ("memory_bandwidth_gbps", float("inf")),
+            ("memory_bandwidth_gbps", 100_001),
+            ("has_ane", 1),
+            ("has_ane", "true"),
+            ("mps_available", 0),
+            ("mlx_available", None),
+            ("data_port", True),
+            ("data_port", 50052.0),
+            ("data_port", -1),
+            ("data_port", 65_536),
+            ("chip_name", 123),
+            ("chip_name", "M4\nforged-node"),
+            ("chip_name", "\ud800"),
+            ("chip_name", "M" * 129),
+        ],
+    )
+    def test_from_json_bytes_rejects_invalid_known_fields(self, field, value):
+        payload = json.dumps({field: value}).encode()
+
+        with pytest.raises(HandshakeHwValidationError, match=field):
+            HardwareExchange.from_json_bytes(payload)
+
+    def test_from_json_bytes_accepts_protocol_boundaries(self):
+        hw = HardwareExchange.from_json_bytes(
+            json.dumps(
+                {
+                    "wire_version": 255,
+                    "gpu_cores": 1024,
+                    "ram_gb": 65_536,
+                    "memory_bandwidth_gbps": 100_000,
+                    "chip_name": "M" * 128,
+                    "has_ane": True,
+                    "mps_available": False,
+                    "mlx_available": True,
+                    "data_port": 65_535,
+                }
+            ).encode()
+        )
+
+        assert hw.wire_version == 255
+        assert hw.gpu_cores == 1024
+        assert hw.ram_gb == 65_536.0
+        assert hw.memory_bandwidth_gbps == 100_000.0
+        assert hw.data_port == 65_535
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("wire_version", 256),
+            ("gpu_cores", True),
+            ("gpu_cores", 1025),
+            ("ram_gb", float("nan")),
+            ("memory_bandwidth_gbps", float("inf")),
+            ("chip_name", "M4\nforged-node"),
+            ("chip_name", "é" * 65),
+            ("has_ane", 1),
+            ("mps_available", "yes"),
+            ("mlx_available", None),
+            ("data_port", 65_536),
+        ],
+    )
+    def test_to_json_bytes_rejects_invalid_local_fields(self, field, value):
+        hw = HardwareExchange(**{field: value})
+
+        with pytest.raises(HandshakeHwValidationError, match=field):
+            hw.to_json_bytes()
 
 
 class TestSignVerifyHwProfile:

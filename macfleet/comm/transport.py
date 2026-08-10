@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import socket
 import struct
 import time
@@ -49,6 +50,11 @@ from macfleet.security.auth import (
 )
 
 logger = logging.getLogger(__name__)
+
+MAX_HW_GPU_CORES = 1024
+MAX_HW_RAM_GB = 65_536
+MAX_HW_MEMORY_BANDWIDTH_GBPS = 100_000
+MAX_HW_CHIP_NAME_BYTES = 128
 
 
 def _audit_transport_auth(event: str, **fields: Any) -> None:
@@ -88,6 +94,100 @@ class TransportConfig:
         }.get(link_type, self.default_buffer_bytes)
 
 
+def _validate_hw_int(
+    value: object,
+    *,
+    field_name: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    """Require a strict JSON integer within the HW protocol bounds."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HandshakeHwValidationError(f"{field_name} must be an integer")
+    if not minimum <= value <= maximum:
+        raise HandshakeHwValidationError(
+            f"{field_name} must be between {minimum} and {maximum}, got {value}"
+        )
+    return value
+
+
+def _validate_hw_number(
+    value: object,
+    *,
+    field_name: str,
+    maximum: float,
+) -> float:
+    """Require a finite, non-negative JSON number within HW protocol bounds."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HandshakeHwValidationError(f"{field_name} must be a number")
+    parsed = float(value)
+    if not math.isfinite(parsed) or not 0 <= parsed <= maximum:
+        raise HandshakeHwValidationError(
+            f"{field_name} must be finite and between 0 and {maximum:g}, got {value}"
+        )
+    return parsed
+
+
+def _validate_hw_bool(value: object, *, field_name: str) -> bool:
+    """Require an actual JSON boolean, not Python's integer-compatible bool."""
+    if not isinstance(value, bool):
+        raise HandshakeHwValidationError(f"{field_name} must be a boolean")
+    return value
+
+
+def _validate_hw_chip_name(value: object) -> str:
+    """Require bounded printable text before displaying a peer chip name."""
+    if not isinstance(value, str):
+        raise HandshakeHwValidationError("chip_name must be a string")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise HandshakeHwValidationError("chip_name is not valid UTF-8 text") from e
+    if len(encoded) > MAX_HW_CHIP_NAME_BYTES:
+        raise HandshakeHwValidationError(
+            f"chip_name exceeds {MAX_HW_CHIP_NAME_BYTES} UTF-8 bytes"
+        )
+    if any(not character.isprintable() for character in value):
+        raise HandshakeHwValidationError("chip_name contains control characters")
+    return value
+
+
+def _validate_hw_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate known HW fields while preserving missing-field defaults."""
+    validators: dict[str, Callable[[object], object]] = {
+        "wire_version": lambda value: _validate_hw_int(
+            value, field_name="wire_version", minimum=1, maximum=255
+        ),
+        "gpu_cores": lambda value: _validate_hw_int(
+            value, field_name="gpu_cores", minimum=0, maximum=MAX_HW_GPU_CORES
+        ),
+        "ram_gb": lambda value: _validate_hw_number(
+            value, field_name="ram_gb", maximum=MAX_HW_RAM_GB
+        ),
+        "memory_bandwidth_gbps": lambda value: _validate_hw_number(
+            value,
+            field_name="memory_bandwidth_gbps",
+            maximum=MAX_HW_MEMORY_BANDWIDTH_GBPS,
+        ),
+        "chip_name": _validate_hw_chip_name,
+        "has_ane": lambda value: _validate_hw_bool(value, field_name="has_ane"),
+        "mps_available": lambda value: _validate_hw_bool(
+            value, field_name="mps_available"
+        ),
+        "mlx_available": lambda value: _validate_hw_bool(
+            value, field_name="mlx_available"
+        ),
+        "data_port": lambda value: _validate_hw_int(
+            value, field_name="data_port", minimum=0, maximum=65_535
+        ),
+    }
+    return {
+        key: validators[key](value)
+        for key, value in payload.items()
+        if key in validators
+    }
+
+
 @dataclass
 class HardwareExchange:
     """Hardware profile that peers exchange during the v2.2 authenticated handshake.
@@ -112,8 +212,9 @@ class HardwareExchange:
     data_port: int = 0
 
     def to_json_bytes(self) -> bytes:
-        """Stable JSON encoding (sort_keys so HMAC is deterministic)."""
-        return json.dumps(asdict(self), sort_keys=True).encode("utf-8")
+        """Validate and encode stable standards-compliant JSON for signing."""
+        payload = _validate_hw_payload(asdict(self))
+        return json.dumps(payload, sort_keys=True, allow_nan=False).encode("utf-8")
 
     @classmethod
     def from_json_bytes(cls, data: bytes) -> "HardwareExchange":
@@ -124,14 +225,11 @@ class HardwareExchange:
         """
         try:
             payload = json.loads(data.decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise HandshakeHwValidationError("HW payload not a JSON object")
-            # Only accept known fields; ignore extras for forward compat
-            known = {f for f in cls.__dataclass_fields__}
-            filtered = {k: v for k, v in payload.items() if k in known}
-            return cls(**filtered)
         except (ValueError, TypeError, UnicodeDecodeError) as e:
             raise HandshakeHwValidationError(f"HW payload deserialization failed: {e}") from e
+        if not isinstance(payload, dict):
+            raise HandshakeHwValidationError("HW payload not a JSON object")
+        return cls(**_validate_hw_payload(payload))
 
 
 def _pack_hw_suffix(

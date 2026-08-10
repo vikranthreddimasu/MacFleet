@@ -537,6 +537,16 @@ class PoolAgent:
                         self._heartbeat_rate_limiter.record_failure(peer_ip)
                         logger.debug("APING v2 auth failed from peer %s", peer_node_id)
                         return
+                    try:
+                        HardwareExchange.from_json_bytes(hw_json)
+                    except HandshakeHwValidationError as e:
+                        self._heartbeat_rate_limiter.record_failure(peer_ip)
+                        logger.debug(
+                            "APING v2 from %s: invalid HW payload: %s",
+                            peer_node_id,
+                            e,
+                        )
+                        return
                     self._heartbeat_rate_limiter.record_success(peer_ip)
                     # Reply with APONG v2 (5-field) carrying local HW. The
                     # signature is bound to the request nonce (v2.3) — replay
