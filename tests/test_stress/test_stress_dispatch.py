@@ -16,6 +16,7 @@ import pytest
 from macfleet import task
 from macfleet.comm.transport import PeerTransport, TransportConfig
 from macfleet.compute.dispatch import TaskDispatcher
+from macfleet.compute.models import RemoteTaskError
 from macfleet.compute.worker import TaskWorker
 
 CONFIG = TransportConfig(connect_timeout_sec=5.0, recv_timeout_sec=10.0)
@@ -199,6 +200,26 @@ class TestDispatcherLeakDetection:
                 # They resolve as failures because the dispatcher stopped.
                 assert f._result is not None
                 assert f._result.ok is False
+        finally:
+            await coord.disconnect_all()
+            await worker.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_declared_timeout_drains_unanswered_task(self):
+        """A connected but silent worker must not leak the coordinator future."""
+        coord, worker = await _setup_pair()
+        try:
+            dispatcher = TaskDispatcher(coord, ["w-0"])
+            await dispatcher.start()
+
+            future = await dispatcher.submit(_stress_double, 1, timeout=0.05)
+            with pytest.raises(RemoteTaskError, match="timed out"):
+                await future.result(timeout=1.0)
+
+            assert dispatcher.pending_count == 0
+            assert not dispatcher._task_to_worker
+            assert not dispatcher._pending_timeouts
+            await dispatcher.stop()
         finally:
             await coord.disconnect_all()
             await worker.disconnect_all()
