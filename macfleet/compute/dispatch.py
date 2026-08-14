@@ -41,6 +41,7 @@ class TaskDispatcher:
         # task_id -> worker_id, so a disconnect only fails THAT worker's
         # outstanding tasks rather than every pending future.
         self._task_to_worker: dict[str, str] = {}
+        self._pending_timeouts: dict[str, asyncio.Task] = {}
         self._next_worker = 0
         self._worker_listeners: dict[str, asyncio.Task] = {}
         self._running = False
@@ -89,13 +90,35 @@ class TaskDispatcher:
             return
         from macfleet.compute.models import TaskResult
         for task_id, future in list(self._pending.items()):
+            self._cancel_timeout(task_id)
             if not future.done:
                 future.set_result(
                     TaskResult(task_id=task_id, ok=False, error=reason)
                 )
         self._pending.clear()
         self._task_to_worker.clear()
-        self._worker_listeners.clear()
+
+    def _cancel_timeout(self, task_id: str) -> None:
+        task = self._pending_timeouts.pop(task_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def _expire_task(self, task_id: str, timeout: float) -> None:
+        """Fail a task that received no result before its declared deadline."""
+        try:
+            await asyncio.sleep(timeout)
+        except asyncio.CancelledError:
+            return
+
+        future = self._pending.pop(task_id, None)
+        self._task_to_worker.pop(task_id, None)
+        self._pending_timeouts.pop(task_id, None)
+        if future is not None and not future.done:
+            future.set_result(TaskResult(
+                task_id=task_id,
+                ok=False,
+                error=f"Task timed out after {timeout}s without a worker result",
+            ))
 
     def _fail_pending_for_worker(self, worker_id: str, reason: str) -> None:
         """Fail just the tasks routed to a dead worker; leave others alone."""
@@ -104,6 +127,7 @@ class TaskDispatcher:
         for tid in dead_ids:
             future = self._pending.pop(tid, None)
             self._task_to_worker.pop(tid, None)
+            self._cancel_timeout(tid)
             if future is not None and not future.done:
                 future.set_result(TaskResult(task_id=tid, ok=False, error=reason))
 
@@ -152,6 +176,9 @@ class TaskDispatcher:
             from macfleet.compute.models import TaskResult
             future.set_result(TaskResult(task_id=spec.task_id, ok=False, error=str(e)))
             return future
+        self._pending_timeouts[spec.task_id] = asyncio.create_task(
+            self._expire_task(spec.task_id, spec.timeout_sec)
+        )
         logger.debug("Dispatched task %s to %s", spec.task_id[:8], worker_id)
         return future
 
@@ -215,6 +242,7 @@ class TaskDispatcher:
                     future = self._pending.pop(result.task_id, None)
                     self._task_to_worker.pop(result.task_id, None)
                     if future:
+                        self._cancel_timeout(result.task_id)
                         future.set_result(result)
                         logger.debug(
                             "Result for task %s from %s (ok=%s)",
