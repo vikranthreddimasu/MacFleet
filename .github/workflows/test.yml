@@ -93,15 +93,6 @@ jobs:
             tests/test_integration/test_pool_training_processes.py \
             tests/test_integration/test_repeated_training.py \
             tests/test_integration/test_training_safety.py -v
-      - name: Trace repeated MLX suite with parent GPU state
-        run: |
-          for run in $(seq 1 20); do
-            echo "MLX full-suite reproduction $run"
-            python -m pytest tests/test_engines/test_mlx_engine.py \
-              tests/test_sdk/test_sdk_mlx.py \
-              tests/test_integration/test_pool_training_processes.py \
-              tests/test_integration/test_training_safety.py -v -s || exit "$?"
-          done
 
   integration:
     name: integration (macos-arm64, py3.12)
