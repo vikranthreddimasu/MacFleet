@@ -514,11 +514,15 @@ async def test_silent_worker_expires_without_caller_timeout():
 
 
 async def test_cancelled_submission_does_not_leak_pending_task():
+    from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
     transport = PeerTransport(local_id="coordinator")
-    transport.get_connection = lambda peer: object()
-    transport.send = AsyncMock(side_effect=asyncio.CancelledError)
+    conn = SimpleNamespace(
+        send_bytes=AsyncMock(side_effect=asyncio.CancelledError),
+        recv_message=AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    transport.get_connection = lambda peer: conn
     dispatcher = TaskDispatcher(transport, ["worker"])
     dispatcher._running = True
     with pytest.raises(asyncio.CancelledError):
@@ -549,5 +553,74 @@ async def test_submission_deadline_cancels_blocked_send_and_closes_stream():
         assert dispatcher.pending_count == 0
         assert not dispatcher._deadlines
         assert not dispatcher._task_to_worker
+    finally:
+        await dispatcher.stop()
+
+
+async def test_dispatcher_receives_results_after_worker_reconnects():
+    coordinator, transport, port = await _setup_pair()
+    dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+    worker = TaskWorker(transport, "coordinator", max_workers=1)
+    try:
+        await dispatcher.start()
+        await worker.start()
+        first = await dispatcher.submit(times_two, 1, timeout=1)
+        assert await first.result(timeout=1) == 2
+        await worker.stop()
+        await coordinator.disconnect("worker-0")
+        await transport.disconnect("coordinator")
+        await asyncio.wait_for(dispatcher._worker_listeners["worker-0"], 1)
+        await coordinator.connect("worker-0", "127.0.0.1", port)
+        await worker.start()
+        second = await dispatcher.submit(times_two, 21, timeout=.3)
+        assert await second.result(timeout=1) == 42
+        assert dispatcher.pending_count == 0
+    finally:
+        await worker.stop()
+        await dispatcher.stop()
+        await _teardown(coordinator, transport)
+
+
+async def test_replaced_listener_cannot_fail_new_connection_tasks():
+    from types import SimpleNamespace
+
+    from macfleet.compute.models import TaskResult, TaskSpec
+
+    listening = asyncio.Event()
+    results = asyncio.Queue()
+
+    async def old_receive(**kwargs):
+        listening.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise ConnectionError("old stream closed")
+
+    async def receive(**kwargs):
+        return await results.get()
+
+    old = SimpleNamespace(recv_message=old_receive)
+    new = SimpleNamespace(recv_message=receive)
+    current = [old]
+
+    async def send(payload, **kwargs):
+        if current[0] is new:
+            spec = TaskSpec.unpack(payload)
+            results.put_nowait(SimpleNamespace(
+                msg_type=MessageType.RESULT, payload=TaskResult.success(spec.task_id, 42).pack(),
+            ))
+
+    old.send_bytes = new.send_bytes = send
+    dispatcher = TaskDispatcher(SimpleNamespace(get_connection=lambda _: current[0]), ["worker"])
+    await dispatcher.start()
+    try:
+        await asyncio.wait_for(listening.wait(), 1)
+        first = await dispatcher.submit(times_two, 1, timeout=1)
+        current[0] = new
+        second = await dispatcher.submit(times_two, 21, timeout=.3)
+        with pytest.raises(RemoteTaskError, match="connection replaced"):
+            await first.result(timeout=1)
+        assert await second.result(timeout=1) == 42
+        assert not dispatcher._deadlines
     finally:
         await dispatcher.stop()

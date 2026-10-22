@@ -16,7 +16,7 @@ import logging
 from typing import Any, Callable, Iterable, Optional
 
 from macfleet.comm.protocol import MessageType
-from macfleet.comm.transport import PeerTransport
+from macfleet.comm.transport import PeerConnection, PeerTransport
 from macfleet.compute.models import TaskFuture, TaskResult, TaskSpec
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,9 @@ class TaskDispatcher:
         self._task_to_worker: dict[str, str] = {}
         self._next_worker = 0
         self._worker_listeners: dict[str, asyncio.Task] = {}
+        self._worker_connections: dict[str, PeerConnection] = {}
+        self._listener_tasks: set[asyncio.Task] = set()
+        self._lifecycle_lock = asyncio.Lock()
         self._running = False
 
     @property
@@ -56,29 +59,43 @@ class TaskDispatcher:
 
     async def start(self) -> None:
         """Start per-worker result listeners."""
-        if self._running:
-            raise RuntimeError("TaskDispatcher is already running")
-        if not self._workers:
-            return
-        self._running = True
-        for worker_id in self._workers:
-            self._worker_listeners[worker_id] = asyncio.create_task(
-                self._worker_listener(worker_id)
-            )
+        async with self._lifecycle_lock:
+            if self._running:
+                raise RuntimeError("TaskDispatcher is already running")
+            if not self._workers:
+                return
+            self._running = True
+            for worker_id in self._workers:
+                conn = self._transport.get_connection(worker_id)
+                if conn is not None:
+                    self._listen_on(worker_id, conn)
 
     async def stop(self) -> None:
         """Stop all listeners and cancel pending futures."""
-        self._running = False
-        for task in self._worker_listeners.values():
-            if not task.done():
+        async with self._lifecycle_lock:
+            self._running = False
+            tasks = tuple(self._listener_tasks)
+            for task in tasks:
                 task.cancel()
-        for task in self._worker_listeners.values():
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self._worker_listeners.clear()
-        self._fail_pending("dispatcher stopped")
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                self._worker_listeners.clear()
+                self._worker_connections.clear()
+                self._fail_pending("dispatcher stopped")
+
+    def _listen_on(self, worker_id: str, conn: PeerConnection) -> None:
+        previous = self._worker_listeners.get(worker_id)
+        if self._worker_connections.get(worker_id) is conn and previous is not None and not previous.done():
+            return
+        if previous is not None:
+            previous.cancel()
+            self._fail_pending_for_worker(worker_id, f"worker {worker_id} connection replaced")
+        self._worker_connections[worker_id] = conn
+        listener = asyncio.create_task(self._worker_listener(worker_id, conn))
+        self._worker_listeners[worker_id] = listener
+        self._listener_tasks.add(listener)
+        listener.add_done_callback(self._listener_tasks.discard)
 
     def _finish(self, result: TaskResult) -> None:
         future = self._pending.pop(result.task_id, None)
@@ -122,13 +139,14 @@ class TaskDispatcher:
             raise ValueError(f"TaskSpec could not be serialized: {e}") from e
         future = TaskFuture(task_id=spec.task_id)
 
-        worker_id = self._pick_live_worker()
-        if worker_id is None:
+        worker = self._pick_live_worker()
+        if worker is None:
             future.set_result(TaskResult(
                 task_id=spec.task_id, ok=False,
                 error="no live workers (all known workers are disconnected)",
             ))
             return future
+        worker_id, conn = worker
 
         # Record the assignment BEFORE the send so that a send-side
         # failure can be cleaned up by callers if needed.
@@ -143,7 +161,7 @@ class TaskDispatcher:
         )
         try:
             await asyncio.wait_for(
-                self._transport.send(worker_id, payload, msg_type=MessageType.TASK),
+                conn.send_bytes(payload, msg_type=MessageType.TASK),
                 timeout=spec.timeout_sec,
             )
         except asyncio.TimeoutError:
@@ -158,7 +176,7 @@ class TaskDispatcher:
         logger.debug("Dispatched task %s to %s", spec.task_id[:8], worker_id)
         return future
 
-    def _pick_live_worker(self) -> Optional[str]:
+    def _pick_live_worker(self) -> Optional[tuple[str, PeerConnection]]:
         """Round-robin to the next worker with an active transport connection.
 
         Skips entries in self._workers that no longer have a live
@@ -169,8 +187,10 @@ class TaskDispatcher:
         for _ in range(n):
             candidate = self._workers[self._next_worker % n]
             self._next_worker += 1
-            if self._transport.get_connection(candidate) is not None:
-                return candidate
+            conn = self._transport.get_connection(candidate)
+            if conn is not None:
+                self._listen_on(candidate, conn)
+                return candidate, conn
         return None
 
     async def map(
@@ -193,22 +213,19 @@ class TaskDispatcher:
             *(future.result(timeout=timeout) for future in futures)
         ))
 
-    async def _worker_listener(self, worker_id: str) -> None:
+    async def _worker_listener(self, worker_id: str, conn: PeerConnection) -> None:
         """Listen for RESULT messages from one worker.
 
         Blocks on recv_message() for this worker's connection.
         Routes results to the matching TaskFuture.
         """
-        conn = self._transport.get_connection(worker_id)
-        if conn is None:
-            logger.error("No connection to worker %s", worker_id)
-            return
-
         while self._running:
             try:
                 msg = await conn.recv_message(
                     timeout=None,  # Task deadlines own liveness; an idle worker is not a failed worker.
                 )
+                if self._worker_connections.get(worker_id) is not conn:
+                    return
                 if msg.msg_type == MessageType.RESULT:
                     try:
                         result = TaskResult.unpack(msg.payload)
@@ -220,11 +237,13 @@ class TaskDispatcher:
                         continue
                     self._finish(result)
             except asyncio.TimeoutError:
-                self._fail_pending_for_worker(worker_id, f"worker {worker_id} connection timed out")
+                if self._worker_connections.get(worker_id) is conn:
+                    self._fail_pending_for_worker(worker_id, f"worker {worker_id} connection timed out")
                 return
             except asyncio.CancelledError:
                 return
             except (ConnectionError, OSError, EOFError, asyncio.IncompleteReadError, ValueError) as e:
                 logger.warning("Lost connection to worker %s: %s", worker_id, e)
-                self._fail_pending_for_worker(worker_id, f"worker {worker_id} disconnected: {e}")
+                if self._worker_connections.get(worker_id) is conn:
+                    self._fail_pending_for_worker(worker_id, f"worker {worker_id} disconnected: {e}")
                 return

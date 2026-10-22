@@ -5,6 +5,8 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from macfleet import task
 from macfleet.comm.protocol import MessageType
 from macfleet.compute.models import TaskResult, TaskSpec
@@ -114,4 +116,67 @@ async def test_worker_shutdown_bounds_blocked_result_delivery():
         assert not worker._inflight
         assert worker._executor is None
     finally:
+        await worker.stop()
+
+
+@pytest.mark.parametrize("cancel_stop", [False, True])
+async def test_restart_waits_for_previous_calls_to_finish(cancel_stop):
+    incoming = asyncio.Queue()
+    outgoing = asyncio.Queue()
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    @task(name="tests.worker_capacity.restart")
+    def blocked():
+        loop.call_soon_threadsafe(started.set)
+        release.wait(timeout=5)
+        return 42
+
+    async def receive(**kwargs):
+        return await incoming.get()
+
+    async def send(peer, payload, **kwargs):
+        await outgoing.put(TaskResult.unpack(payload))
+
+    transport = SimpleNamespace(get_connection=lambda peer: SimpleNamespace(recv_message=receive), send=send)
+    worker = TaskWorker(transport, "coordinator", max_workers=1)
+    await worker.start()
+    try:
+        incoming.put_nowait(SimpleNamespace(
+            msg_type=MessageType.TASK,
+            payload=TaskSpec.from_call(blocked, timeout=1 if cancel_stop else .02).pack(),
+        ))
+        await asyncio.wait_for(started.wait(), 1)
+        if cancel_stop:
+            stopping = asyncio.create_task(worker.stop())
+            await asyncio.sleep(0)
+            stopping.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await stopping
+        else:
+            assert not (await asyncio.wait_for(outgoing.get(), 1)).ok
+            await worker.stop()
+        assert worker._executor is None
+        with pytest.raises(RuntimeError, match="still executing"):
+            await worker.start()
+
+        release.set()
+
+        async def restart_when_finished():
+            while True:
+                try:
+                    await worker.start()
+                    return
+                except RuntimeError:
+                    await asyncio.sleep(.01)
+
+        await asyncio.wait_for(restart_when_finished(), 1)
+        spec = TaskSpec.from_call(blocked, timeout=1)
+        incoming.put_nowait(SimpleNamespace(msg_type=MessageType.TASK, payload=spec.pack()))
+        result = await asyncio.wait_for(outgoing.get(), 1)
+        assert result.task_id == spec.task_id
+        assert result.unwrap() == 42
+    finally:
+        release.set()
         await worker.stop()

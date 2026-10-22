@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Reliability and simplification
 
+- Clean up interrupted pool joins before propagating the error, allowing the
+  same Pool instance to join again without leaving background agents behind.
+- Move initialized Torch optimizer state with the model onto MPS, and reject
+  non-finite Torch/MLX gradients before changing weights or optimizer moments.
+- Keep worker concurrency bounded across restarts and reattach dispatch result
+  listeners to replacement connections without accepting stale results.
+- Cancel outbound handshakes during transport shutdown and ignore heartbeat
+  results for removed or replaced peer endpoints.
+- Exercise repeated public-API training across two and three processes for both
+  Torch and MLX, including identical final model hashes and safe failure paths.
+
 - Keep Torch and MLX out of the pool and NumPy import paths; probe optional
   hardware runtimes in bounded subprocesses.
 - Share Torch batch handling and MLX dataset validation between local and
