@@ -91,6 +91,7 @@ jobs:
           python -m pytest tests/test_engines/test_mlx_engine.py \
             tests/test_sdk/test_sdk_mlx.py \
             tests/test_integration/test_pool_training_processes.py \
+            tests/test_integration/test_repeated_training.py \
             tests/test_integration/test_training_safety.py -v
       - name: Trace repeated MLX suite with parent GPU state
         run: |
