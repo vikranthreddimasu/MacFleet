@@ -518,3 +518,46 @@ class TestGather:
             assert r1 is None  # non-dst rank gets None
         finally:
             await _teardown_mesh(transports)
+
+@pytest.mark.parametrize("size", [2, 3, 4])
+async def test_integer_mean_preserves_fraction(size):
+    transports, _ = await _setup_mesh(size)
+    try:
+        groups = _make_groups(transports)
+        arrays = [np.array([120 if i == 0 else 121], dtype=np.int8) for i in range(size)]
+        results = await asyncio.gather(*(g.allreduce(a) for g, a in zip(groups, arrays)))
+        for result in results:
+            np.testing.assert_allclose(result, [121 - 1 / size])
+    finally:
+        await _teardown_mesh(transports)
+
+
+async def test_broadcastable_shape_mismatch_is_rejected():
+    transports, _ = await _setup_mesh(2)
+    try:
+        groups = _make_groups(transports)
+        results = await asyncio.gather(
+            groups[0].allreduce(np.ones(1, dtype=np.float32)),
+            groups[1].allreduce(np.ones(3, dtype=np.float32)), return_exceptions=True,
+        )
+        assert all(isinstance(result, ValueError) for result in results)
+    finally:
+        await _teardown_mesh(transports)
+
+
+async def test_failed_send_cancels_sibling_receive():
+    cancelled = asyncio.Event()
+
+    async def fail():
+        await asyncio.sleep(0)
+        raise ConnectionError("send failed")
+
+    async def receive():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    with pytest.raises(ConnectionError, match="send failed"):
+        await collectives._gather(fail(), receive())
+    assert cancelled.is_set()

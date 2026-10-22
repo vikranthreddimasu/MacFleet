@@ -383,7 +383,7 @@ class TestNaNGradientGuard:
             _, engine0 = _make_model_and_engine(seed=42)
             _, engine1 = _make_model_and_engine(seed=42)
 
-            dp0 = DataParallel(engine0, groups[0])
+            dp0 = DataParallel(engine0, groups[0], config=DataParallelConfig(allow_degraded=True))
             dp1 = DataParallel(engine1, groups[1])
 
             # Normal forward/backward on both
@@ -422,8 +422,8 @@ class TestEmptyGradientGuard:
             param.requires_grad_(False)
         engine._trainable_params = [p for p in engine._model.parameters() if p.requires_grad]
 
-        elapsed = await dp.sync_gradients()
-        assert elapsed == 0.0
+        with pytest.raises(SyncDegradedError, match="No trainable gradients"):
+            await dp.sync_gradients()
 
 
 class _ArrayEngine:
@@ -526,7 +526,7 @@ class TestDataParallelDegradedState:
     @pytest.mark.asyncio
     async def test_local_invalid_gradient_is_zeroed_and_reported(self, isolated_audit_log):
         engine = _ArrayEngine([1.0, np.nan, 3.0])
-        dp = DataParallel(engine, _EchoGroup())
+        dp = DataParallel(engine, _EchoGroup(), config=DataParallelConfig(allow_degraded=True))
 
         await dp.sync_gradients()
 
@@ -567,3 +567,82 @@ class TestDataParallelCompressionSafety:
         assert dp._compressor is not None
         assert dp._compressor.level.value == "light"
         assert dp._compressor._topk is None
+
+async def test_local_nan_aborts_without_applying_gradients(isolated_audit_log):
+    engine = _ArrayEngine([1.0, np.nan])
+    dp = DataParallel(engine, _EchoGroup())
+    with pytest.raises(SyncDegradedError, match="local_gradients_nan_or_inf"):
+        await dp.sync_gradients()
+    assert engine.applied is None
+
+
+async def test_model_mismatch_rejected_even_on_average_sized_rank():
+    transports = await _setup_mesh(3)
+    try:
+        groups = _make_groups(transports)
+        dps = []
+        for group, size in zip(groups, [1, 2, 3]):
+            engine = TorchEngine(device="cpu")
+            engine.load_model(nn.Linear(size, 1, bias=False))
+            dps.append(DataParallel(engine, group))
+        results = await asyncio.wait_for(
+            asyncio.gather(*(dp.setup() for dp in dps), return_exceptions=True), 5,
+        )
+        assert all(isinstance(result, RuntimeError) for result in results)
+        assert all("Model architecture mismatch" in str(result) for result in results)
+    finally:
+        await _teardown_mesh(transports)
+
+
+async def test_model_validation_does_not_swallow_transport_failure():
+    from unittest.mock import AsyncMock
+
+    _, engine = _make_model_and_engine(seed=0)
+    group = _EchoGroup()
+    group.gather = AsyncMock(side_effect=ConnectionError("peer disconnected"))
+    group.broadcast = AsyncMock()
+    with pytest.raises(ConnectionError, match="peer disconnected"):
+        await DataParallel(engine, group).setup()
+    group.broadcast.assert_not_called()
+
+async def test_setup_synchronizes_frozen_weights_buffers_and_optimizer_state():
+    transports = await _setup_mesh(2)
+    try:
+        engines = []
+        for rank in range(2):
+            model = nn.Linear(2, 1)
+            model.bias.requires_grad_(False)
+            model.register_buffer("counter", torch.tensor(rank))
+            engine = TorchEngine(device="cpu")
+            engine.load_model(model, torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9))
+            engine.backward(model(torch.ones(1, 2)).sum() * (rank + 1))
+            engine.step()
+            engines.append(engine)
+        groups = _make_groups(transports)
+        await asyncio.gather(*(DataParallel(e, g).setup() for e, g in zip(engines, groups)))
+        for name, value in engines[0].model.state_dict().items():
+            assert torch.equal(value, engines[1].model.state_dict()[name])
+        for engine in engines:
+            engine.zero_grad()
+            engine.backward(engine.model(torch.ones(1, 2)).sum())
+            engine.step()
+        np.testing.assert_array_equal(engines[0].get_flat_parameters(), engines[1].get_flat_parameters())
+    finally:
+        await _teardown_mesh(transports)
+
+
+async def test_equal_count_different_layout_is_rejected_on_all_ranks():
+    transports = await _setup_mesh(2)
+    try:
+        engines = []
+        for inputs, outputs in [(2, 2), (1, 4)]:
+            engine = TorchEngine(device="cpu")
+            engine.load_model(nn.Linear(inputs, outputs, bias=False))
+            engines.append(engine)
+        groups = _make_groups(transports)
+        results = await asyncio.gather(
+            *(DataParallel(e, g).setup() for e, g in zip(engines, groups)), return_exceptions=True,
+        )
+        assert all(isinstance(result, RuntimeError) and "layout" in str(result) for result in results)
+    finally:
+        await _teardown_mesh(transports)

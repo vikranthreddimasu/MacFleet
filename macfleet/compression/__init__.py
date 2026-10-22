@@ -4,9 +4,12 @@ Two pipelines:
 - `adaptive.py` (numpy-native, v2) — required, no optional deps. Used by
   DataParallel's sync_gradients flow.
 - `pipeline.py` + `topk.py` + `quantize.py` (torch-based, v1 compat) —
-  scheduled for deletion in v2.3 per TODOS.md. Imports are guarded by
-  try/except so the numpy path stays usable when torch isn't installed.
+  loaded only when explicitly requested, keeping the numpy path independent.
 """
+
+from importlib import import_module
+from importlib.util import find_spec
+from typing import TYPE_CHECKING
 
 # Numpy-native adaptive compression (v2) — no torch required
 from macfleet.compression.adaptive import (
@@ -28,8 +31,7 @@ __all__ = [
     "NumpyFP16Compressor",
 ]
 
-# Torch-based pipeline (v1 compat) — optional, requires `pip install macfleet[torch]`
-try:
+if TYPE_CHECKING:
     from macfleet.compression.pipeline import (  # noqa: F401
         CompressedGradient,
         CompressionPipeline,
@@ -41,16 +43,22 @@ try:
     from macfleet.compression.quantize import FP16Quantizer, Int8Quantizer  # noqa: F401
     from macfleet.compression.topk import TopKCompressor  # noqa: F401
 
-    __all__.extend([
-        "CompressionPipeline",
-        "CompressedGradient",
-        "Compressor",
-        "FP16Stage",
-        "TopKStage",
-        "create_pipeline",
-        "TopKCompressor",
-        "FP16Quantizer",
-        "Int8Quantizer",
-    ])
-except ImportError:
-    pass
+_TORCH_EXPORTS = {
+    "CompressionPipeline": "pipeline",
+    "CompressedGradient": "pipeline",
+    "Compressor": "pipeline",
+    "FP16Stage": "pipeline",
+    "TopKStage": "pipeline",
+    "create_pipeline": "pipeline",
+    "TopKCompressor": "topk",
+    "FP16Quantizer": "quantize",
+    "Int8Quantizer": "quantize",
+}
+if find_spec("torch") is not None:
+    __all__.extend(_TORCH_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name in _TORCH_EXPORTS and name in __all__:
+        return getattr(import_module(f"{__name__}.{_TORCH_EXPORTS[name]}"), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

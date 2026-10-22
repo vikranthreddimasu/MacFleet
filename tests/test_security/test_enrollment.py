@@ -326,3 +326,12 @@ async def test_request_enrollment_rejects_non_string_fleet_id(monkeypatch):
 
     with pytest.raises(EnrollmentError, match="invalid fleet id"):
         await _request_with_response_line(line, monkeypatch)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"ttl_sec": float("nan")}, {"ttl_sec": float("inf")}, {"ttl_sec": True},
+    {"max_uses": float("nan")}, {"max_uses": 1.5}, {"max_uses": True}, {"port": -1},
+])
+def test_enrollment_limits_cannot_disable_expiry_or_usage_caps(kwargs):
+    with pytest.raises(EnrollmentError):
+        EnrollmentServer(token="a" * 64, **kwargs)

@@ -13,6 +13,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from ipaddress import ip_address
 from typing import Optional
 
 
@@ -74,11 +75,14 @@ class NetworkTopology:
 
     @property
     def best_link(self) -> Optional[NetworkLink]:
-        """The highest-scored available link."""
-        scored = [l for l in self.links if l.score > 0]
+        """Best IPv4 link for the IPv4 listener and mDNS advertisement."""
+        links = [link for link in self.links if ip_address(link.ip_address).version == 4
+                 and not ip_address(link.ip_address).is_unspecified
+                 and not ip_address(link.ip_address).is_multicast]
+        scored = [link for link in links if link.score > 0]
         if not scored:
             return max(
-                self.links,
+                links,
                 key=lambda link: (
                     link.theoretical_bandwidth_mbps,
                     link.interface,
@@ -158,59 +162,9 @@ def detect_interfaces() -> list[NetworkLink]:
     Returns:
         List of NetworkLink objects with IP and link type.
     """
-    links: list[NetworkLink] = []
-    try:
-        # Use socket to get all interfaces with IPs
-        hostname = socket.gethostname()
-        # Get all IPs for this host
-        addrs = socket.getaddrinfo(hostname, None, socket.AF_INET)
-        seen_ips = set()
-
-        for addr_info in addrs:
-            ip = str(addr_info[4][0])  # stubs type this as str|int; AF_INET always yields str
-            if ip in seen_ips or ip == "127.0.0.1":
-                continue
-            seen_ips.add(ip)
-
-            # We don't have interface name from getaddrinfo,
-            # so use ifconfig to map IPs to interfaces
-            interface = _ip_to_interface(ip)
-            if interface:
-                link_type = _classify_interface(interface, ip)
-                links.append(NetworkLink(
-                    interface=interface,
-                    link_type=link_type,
-                    ip_address=ip,
-                    bandwidth_mbps=0.0,
-                    latency_ms=0.0,
-                ))
-    except (socket.gaierror, OSError):
-        pass
-
-    # Fallback: parse ifconfig directly
-    if not links:
-        links = _parse_ifconfig()
-
-    return links
-
-
-def _ip_to_interface(ip: str) -> Optional[str]:
-    """Map an IP address to its interface name using ifconfig."""
-    try:
-        result = subprocess.run(
-            ["ifconfig"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if result.returncode == 0:
-            current_iface = None
-            for line in result.stdout.split("\n"):
-                if not line.startswith("\t") and ":" in line:
-                    current_iface = line.split(":")[0]
-                if f"inet {ip} " in line and current_iface:
-                    return current_iface
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
-        pass
-    return None
+    # Hostname resolution can omit Thunderbolt/Ethernet addresses. Enumerate
+    # interfaces directly so routing sees every configured link.
+    return _parse_ifconfig()
 
 
 def _parse_ifconfig() -> list[NetworkLink]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import secrets
 import time
@@ -59,6 +60,16 @@ class HeartbeatConfig:
     suspicion_rounds: int = 3       # Missed rounds before suspected
     failure_timeout_sec: float = 10.0  # Suspected duration before failed
     fanout: int = 3                 # Number of peers to ping each round
+
+    def __post_init__(self) -> None:
+        for name in ("interval_sec", "failure_timeout_sec"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        for name in ("suspicion_rounds", "fanout"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
 
 
 class GossipHeartbeat:
@@ -133,7 +144,7 @@ class GossipHeartbeat:
         """Record that we heard from a peer (they're alive)."""
         if node_id in self._peers:
             peer = self._peers[node_id]
-            was_suspected = peer.status == NodeStatus.SUSPECTED
+            was_suspected = peer.status in (NodeStatus.SUSPECTED, NodeStatus.FAILED)
             peer.status = NodeStatus.ALIVE
             peer.last_seen = time.monotonic()
             peer.missed_rounds = 0
@@ -142,6 +153,8 @@ class GossipHeartbeat:
 
     async def start(self) -> None:
         """Start the gossip heartbeat loop."""
+        if self._running:
+            raise RuntimeError("Heartbeat is already running")
         self._running = True
         self._task = asyncio.create_task(self._gossip_loop())
 
@@ -166,7 +179,7 @@ class GossipHeartbeat:
         """Single gossip round: select peers, ping, update status."""
         candidates = [
             p for p in self._peers.values()
-            if p.status in (NodeStatus.ALIVE, NodeStatus.SUSPECTED)
+            if p.status in (NodeStatus.ALIVE, NodeStatus.SUSPECTED, NodeStatus.FAILED)
         ]
 
         if not candidates:
@@ -222,6 +235,7 @@ class GossipHeartbeat:
                     try:
                         local_hw_json = self._local_hw_provider()
                     except Exception:
+                        logger.exception("Unable to serialize local heartbeat hardware")
                         local_hw_json = None
                 nonce = secrets.token_bytes(16)
                 if local_hw_json is not None:
@@ -247,6 +261,8 @@ class GossipHeartbeat:
                 parts = response.decode().strip().split(" ")
                 if len(parts) == 4:
                     _, resp_node_id, resp_nonce_hex, resp_sig_hex = parts
+                    if resp_node_id != peer.node_id:
+                        return False
                     try:
                         resp_nonce = bytes.fromhex(resp_nonce_hex)
                         resp_sig = bytes.fromhex(resp_sig_hex)
@@ -257,6 +273,8 @@ class GossipHeartbeat:
                     )
                 if len(parts) == 5:
                     _, resp_node_id, resp_nonce_hex, resp_sig_hex, resp_hw_hex = parts
+                    if resp_node_id != peer.node_id:
+                        return False
                     try:
                         resp_nonce = bytes.fromhex(resp_nonce_hex)
                         resp_sig = bytes.fromhex(resp_sig_hex)
@@ -274,7 +292,7 @@ class GossipHeartbeat:
                         try:
                             self._on_peer_hw(resp_node_id, resp_hw)
                         except Exception:
-                            pass
+                            logger.exception("Unable to apply authenticated peer hardware for %s", peer.node_id)
                     return True
                 return False
             else:

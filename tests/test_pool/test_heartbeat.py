@@ -77,3 +77,15 @@ class TestGossipHeartbeat:
         assert config.suspicion_rounds == 3
         assert config.failure_timeout_sec == 10.0
         assert config.fanout == 3
+
+async def test_failed_peer_is_probed_and_recovers():
+    from unittest.mock import AsyncMock
+
+    recovered = []
+    heartbeat = GossipHeartbeat("self", on_recovered=recovered.append)
+    heartbeat.add_peer("peer", "127.0.0.1", 12345)
+    heartbeat._peers["peer"].status = NodeStatus.FAILED
+    heartbeat._ping_peer = AsyncMock(return_value=True)
+    await heartbeat._gossip_round()
+    assert recovered == ["peer"]
+    assert heartbeat.peers["peer"].status == NodeStatus.ALIVE

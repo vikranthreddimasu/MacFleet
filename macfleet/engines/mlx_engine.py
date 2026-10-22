@@ -15,6 +15,8 @@ layer, while model computation stays in MLX for maximum performance.
 from __future__ import annotations
 
 import io
+import json
+import logging
 import socket
 from typing import Any, Callable, Optional
 
@@ -24,7 +26,10 @@ from macfleet.engines.base import (
     EngineCapabilities,
     EngineType,
     HardwareProfile,
+    validate_flat_array,
 )
+
+logger = logging.getLogger(__name__)
 
 # MLX is optional — only imported when MLXEngine is instantiated
 try:
@@ -191,6 +196,8 @@ class MLXEngine:
             loss, self._grads = self._loss_and_grad_fn(self._model, batch)
 
         mx.eval(loss, self._grads)
+        if not bool(mx.isfinite(loss).all()):
+            raise ValueError("Loss is NaN or Inf; training aborted before optimizer update")
         self._last_loss = loss
         return loss
 
@@ -256,16 +263,32 @@ class MLXEngine:
             raise RuntimeError("apply_flat_gradients() called before backward()")
 
         flat_params = _flatten_params(self._grads)
+        validate_flat_array(flat_grads, sum(arr.size for _, arr in flat_params))
         offset = 0
         new_flat = []
 
         for name, grad_array in flat_params:
             numel = grad_array.size
             data = flat_grads[offset:offset + numel].reshape(grad_array.shape)
-            new_flat.append((name, mx.array(data)))
+            new_flat.append((name, mx.array(data, dtype=grad_array.dtype)))
             offset += numel
 
         self._grads = _unflatten_params(new_flat, self._grads)
+
+    def _optimizer_signature(self) -> str:
+        if self._optimizer is None:
+            return "null"
+        kind = type(self._optimizer)
+        settings = {name: value for name, value in vars(self._optimizer).items() if not name.startswith("_")}
+        return json.dumps([f"{kind.__module__}.{kind.__qualname__}", settings], sort_keys=True)
+
+    def model_signature(self) -> str:
+        return json.dumps([
+            "mlx", type(self._model).__qualname__,
+            [(name, list(arr.shape), str(arr.dtype)) for name, arr in _flatten_params(self._model.parameters())],
+            [(name, list(arr.shape)) for name, arr in _flatten_params(self._model.trainable_parameters())],
+            self._optimizer_signature(),
+        ])
 
     def get_flat_parameters(self) -> np.ndarray:
         """Flatten all parameters into a single numpy array (for broadcast)."""
@@ -282,13 +305,14 @@ class MLXEngine:
         """Write flat parameters back to model (after broadcast)."""
         params = self._model.parameters()
         flat = _flatten_params(params)
+        validate_flat_array(flat_params, sum(arr.size for _, arr in flat))
         offset = 0
         new_flat = []
 
         for name, param_array in flat:
             numel = param_array.size
             data = flat_params[offset:offset + numel].reshape(param_array.shape)
-            new_flat.append((name, mx.array(data)))
+            new_flat.append((name, mx.array(data, dtype=param_array.dtype)))
             offset += numel
 
         new_params = _unflatten_params(new_flat, params)
@@ -308,59 +332,57 @@ class MLXEngine:
         under an "__opt__." prefix so resuming preserves the optimizer
         instead of cold-starting its moment estimates.
         """
-        state = {}
+        state = {"__optimizer_config__": np.array(self._optimizer_signature())}
         for name, arr in _flatten_params(self._model.parameters()):
             state[name] = np.array(arr)
 
         if self._optimizer is not None:
-            try:
-                for name, arr in _flatten_params(self._optimizer.state):
-                    state[f"__opt__.{name}"] = np.array(arr)
-            except Exception:
-                # Optimizer state not serializable on this MLX version — fall
-                # back to model-only checkpoint rather than failing the save.
-                pass
+            from mlx.utils import tree_flatten
 
+            flat_state: list[tuple[str, Any]] = []
+            tree_flatten(self._optimizer.state, destination=flat_state)
+            for name, arr in flat_state:
+                state[f"__opt__.{name}"] = np.array(arr)
         buffer = io.BytesIO()
         np.savez(buffer, **state)  # type: ignore[arg-type]  # numpy 2.x stubs expose allow_pickle:bool; **state is safe here
         return buffer.getvalue()
 
     def load_state_dict(self, data: bytes) -> None:
-        """Load model (and optimizer, if checkpointed) state from bytes."""
-        buffer = io.BytesIO(data)
-        state = np.load(buffer, allow_pickle=False)
+        """Restore a complete model and optimizer, including fresh Adam moments."""
+        from mlx.utils import tree_unflatten
 
         params = self._model.parameters()
         flat = _flatten_params(params)
-        new_flat = []
-
-        for name, arr in flat:
-            if name in state:
-                new_flat.append((name, mx.array(state[name])))
-            else:
-                new_flat.append((name, arr))
-
+        with np.load(io.BytesIO(data), allow_pickle=False) as state:
+            names = {name for name, _ in flat}
+            saved_names = {name for name in state.files
+                           if not name.startswith("__opt__.") and name != "__optimizer_config__"}
+            if names != saved_names:
+                raise ValueError("Checkpoint model parameters do not match the loaded model")
+            new_flat = []
+            for name, arr in flat:
+                saved = state[name]
+                if saved.shape != arr.shape:
+                    raise ValueError(f"Checkpoint shape mismatch for {name}: {saved.shape} != {arr.shape}")
+                new_flat.append((name, mx.array(saved)))
+            opt_flat = [
+                (name.removeprefix("__opt__."), mx.array(state[name]))
+                for name in state.files if name.startswith("__opt__.")
+            ]
+            if self._optimizer is not None and opt_flat:
+                saved_config = state["__optimizer_config__"].item() if "__optimizer_config__" in state else None
+                if saved_config != self._optimizer_signature():
+                    raise ValueError(
+                        "Checkpoint optimizer configuration is missing or does not match the loaded optimizer"
+                    )
         new_params = _unflatten_params(new_flat, params)
         self._model.update(new_params)
-        mx.eval(self._model.parameters())
-
-        # Restore optimizer state if present (best-effort; old checkpoints and
-        # MLX versions without serializable state simply skip this).
         if self._optimizer is not None:
-            try:
-                opt_template = self._optimizer.state
-                opt_flat = _flatten_params(opt_template)
-                if opt_flat and any(f"__opt__.{n}" in state for n, _ in opt_flat):
-                    restored = [
-                        (n, mx.array(state[f"__opt__.{n}"]))
-                        if f"__opt__.{n}" in state
-                        else (n, a)
-                        for n, a in opt_flat
-                    ]
-                    self._optimizer.state = _unflatten_params(restored, opt_template)
-                    mx.eval(self._optimizer.state)
-            except Exception:
-                pass
+            if opt_flat:
+                self._optimizer.state = tree_unflatten(opt_flat)
+            else:
+                logger.warning("Checkpoint has no optimizer state; only model weights were restored")
+        mx.eval(self._model.parameters())
 
     # ------------------------------------------------------------------ #
     # Engine protocol: introspection                                     #

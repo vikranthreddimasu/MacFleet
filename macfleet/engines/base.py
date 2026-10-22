@@ -13,6 +13,14 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 
 
+def validate_flat_array(array: np.ndarray, expected_size: int) -> None:
+    """Validate the entire engine update before mutating any model state."""
+    if not isinstance(array, np.ndarray) or array.ndim != 1 or array.size != expected_size:
+        raise ValueError(f"Expected a flat array with {expected_size} elements")
+    if array.dtype.kind != "f" or not np.isfinite(array).all():
+        raise ValueError("Engine updates require finite floating-point values")
+
+
 class EngineType(Enum):
     """Supported training engine types."""
     TORCH = "torch"
@@ -109,6 +117,10 @@ class Engine(Protocol):
 
     def apply_flat_gradients(self, flat_grads: np.ndarray) -> None:
         """Apply averaged gradients from AllReduce (1D float32 numpy array)."""
+        ...
+
+    def model_signature(self) -> str:
+        """Stable engine/model layout description used to reject incompatible ranks."""
         ...
 
     def get_flat_parameters(self) -> np.ndarray:

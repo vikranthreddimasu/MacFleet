@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import shlex
 import signal
 import sys
 import time
@@ -1437,10 +1438,11 @@ def pair(
             fleet_id=result.fleet_id,
             server_node=result.server_node,
         )
+        join_command = shlex.join(["macfleet", "join"] + (["--fleet-id", result.fleet_id] if result.fleet_id else []))
         console.print(
             f"[green]Paired.[/green] Token written to {TOKEN_FILE}"
             + (f" (fleet: [bold]{result.fleet_id}[/bold])" if result.fleet_id else "")
-            + f"\n[dim]Server: {result.server_node}. Next: macfleet join[/dim]"
+            + f"\n[dim]Server: {result.server_node}. Next: {join_command}[/dim]"
         )
         return
 
@@ -1485,10 +1487,11 @@ def pair(
     confirm_token_replacement(can_prompt=not from_stdin)
     write_pairing_token(token)
     audit_event("pairing.completed", mode="legacy_url", fleet_id=fleet_id)
+    join_command = shlex.join(["macfleet", "join"] + (["--fleet-id", fleet_id] if fleet_id else []))
     console.print(
         f"[green]Paired from legacy token URL.[/green] Token written to {TOKEN_FILE}"
         + (f" (fleet: [bold]{fleet_id}[/bold])" if fleet_id else "")
-        + "\n[dim]Next: macfleet join[/dim]"
+        + f"\n[dim]Next: {join_command}[/dim]"
     )
 
 

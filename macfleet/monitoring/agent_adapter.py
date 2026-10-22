@@ -90,15 +90,8 @@ def build_node_health_for_self(
 def build_node_health_for_peers(agent: PoolAgent) -> list[NodeHealth]:
     """Snapshot peer nodes using only what's observable via the registry.
 
-    v2.2 note: we don't yet have a gossip channel for peers to report
-    their own thermal/memory state back to the coordinator, so the
-    returned NodeHealth for remote peers is intentionally sparse — just
-    what the registry already knows (node_id, thermal_pressure from
-    heartbeat gossip via HardwareProfile.thermal_pressure).
-
-    A later PR (Issue 12: richer heartbeat gossip) will add per-peer
-    memory pressure, battery state, and throughput to the wire so this
-    adapter can populate them here.
+    Heartbeats carry hardware capabilities, not live sensor measurements.
+    Remote health remains unknown until actual readings are available.
     """
     out: list[NodeHealth] = []
     if agent.registry is None:
@@ -107,24 +100,17 @@ def build_node_health_for_peers(agent: PoolAgent) -> list[NodeHealth]:
     for record in agent.registry.alive_nodes:
         if record.node_id == agent.node_id:
             continue  # self is handled by build_node_health_for_self
-        hw = record.hardware
         health = NodeHealth(
             node_id=record.node_id,
             timestamp=time.time(),
-            status=HealthStatus.UNKNOWN,  # reclassified from health_score below
+            status=HealthStatus.UNKNOWN,
             thermal=None,  # No gossip channel yet; see docstring
             memory=None,
             loss_trend="stable",
             throughput_samples_sec=0.0,
             avg_sync_time_sec=0.0,
         )
-        # Stub thermal from the hardware profile (set at join time / refreshed
-        # by gossip) so a peer reporting SERIOUS pressure shows as DEGRADED
-        # rather than the hardcoded HEALTHY the previous code emitted.
-        if hw.thermal_pressure:
-            from macfleet.monitoring.thermal import ThermalState
-            health.thermal = ThermalState(pressure=hw.thermal_pressure)
-        health.status = classify_health(health.health_score)
+        # Peer sensor readings are not carried by the heartbeat protocol.
         out.append(health)
     return out
 

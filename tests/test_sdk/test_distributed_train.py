@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import socket
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -64,6 +65,27 @@ def _make_dataset(n: int = 512) -> tuple:
 
 
 class TestDistributedTorchTrain:
+    @pytest.mark.parametrize("custom_loss", [False, True])
+    async def test_input_only_dataset_uses_every_rank_sample(self, custom_loss):
+        specs = _make_specs(2)
+        models = [nn.Linear(1, 1, bias=False) for _ in specs]
+        for model in models:
+            nn.init.ones_(model.weight)
+
+        results = await asyncio.gather(*(
+            _distributed_train_torch(
+                local_id=spec.node_id, nodes=specs, model=model,
+                dataset=torch.ones(4, 1), epochs=1, batch_size=4, lr=0.1,
+                optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+                loss_fn=(lambda output: output.mean()) if custom_loss else None,
+                device="cpu", rendezvous_timeout_sec=5,
+            )
+            for spec, model in zip(specs, models)
+        ))
+        assert results[0]["params_sha256"] == results[1]["params_sha256"]
+        for model in models:
+            assert model.weight.item() == pytest.approx(0.9 if custom_loss else 0.8)
+
     @pytest.mark.asyncio
     async def test_two_rank_params_sync_and_convergence(self):
         specs = _make_specs(2)
@@ -212,3 +234,35 @@ class TestDistributedMLXTrain:
         assert r0["params_sha256"] == r1["params_sha256"]
         assert r0["steps"] == r1["steps"] > 0
         assert r0["loss_history"][-1] < r0["loss_history"][0]
+
+
+def test_distributed_intent_does_not_silently_train_alone():
+    pool = Pool(open=True, enable_pool_distributed=True)
+    pool._joined = True
+    with pytest.raises(RuntimeError, match="no live peers"):
+        pool.train(None, None)
+
+
+def test_unknown_training_option_is_rejected():
+    with Pool(open=True) as pool:
+        with pytest.raises(TypeError, match="Unknown training option"):
+            pool.train(None, None, epoch=1)
+
+
+def test_numpy_regression_targets_remain_floating_point():
+    from macfleet.sdk.pool import _torch_dataset
+
+    dataset = _torch_dataset((np.ones((4, 2)), np.full((4, 1), 0.75)))
+    assert dataset.tensors[1].dtype == torch.float32
+    np.testing.assert_array_equal(dataset.tensors[1].numpy(), np.full((4, 1), 0.75))
+
+
+async def test_global_batch_size_must_not_be_silently_rounded():
+    specs = _make_specs(2)
+    results = await asyncio.gather(*(
+        _distributed_train_torch(local_id=f"node-{i}", nodes=specs, model=_make_model(i),
+                                 dataset=_make_dataset(128), epochs=1, batch_size=3,
+                                 lr=0.01, device="cpu", rendezvous_timeout_sec=5)
+        for i in range(2)
+    ), return_exceptions=True)
+    assert all(isinstance(result, ValueError) and "divisible" in str(result) for result in results)

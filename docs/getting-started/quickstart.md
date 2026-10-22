@@ -109,18 +109,17 @@ Not every job is a training loop. Register any function as a task:
 ```python
 @macfleet.task
 def resize(image_path: str) -> dict:
-    # runs on any node in the fleet
+    # runs locally through the registered-task API
     ...
     return {"width": w, "height": h}
 
-with macfleet.Pool(enable_pool_distributed=True) as pool:
+with macfleet.Pool() as pool:
     results = pool.map(resize, image_paths)
 ```
 
-One gotcha: both Macs must have imported the module that declares
-`resize` before the dispatch, otherwise the remote worker throws
-`TaskNotRegisteredError`. See [Registered tasks](../guides/tasks.md)
-for the full story.
+`Pool.map` runs locally. Remote tasks require explicit `TaskDispatcher` and
+`TaskWorker` transports with the same registered callable on both machines.
+See [Registered tasks](../guides/tasks.md).
 
 ## Next steps
 

@@ -10,6 +10,7 @@ layer, while model computation stays in PyTorch/MPS for maximum performance.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import socket
 from typing import Any, Optional
@@ -22,6 +23,7 @@ from macfleet.engines.base import (
     EngineCapabilities,
     EngineType,
     HardwareProfile,
+    validate_flat_array,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,6 +114,7 @@ class TorchEngine:
         """
         self._model = model.to(self._device)
         self._optimizer = optimizer
+        self._optimizer_layout()
         self._trainable_params = self._collect_trainable_params()
 
     def _collect_trainable_params(self) -> list[nn.Parameter]:
@@ -133,12 +136,15 @@ class TorchEngine:
 
     def backward(self, loss: Any) -> None:
         """Run backward pass."""
+        if not bool(torch.isfinite(loss).all()):
+            raise ValueError("Loss is NaN or Inf; training aborted before backward")
         loss.backward()
 
     def step(self) -> None:
         """Optimizer step."""
-        if self._optimizer:
-            self._optimizer.step()
+        if self._optimizer is None:
+            raise RuntimeError("No optimizer loaded; call load_model(model, optimizer) before step()")
+        self._optimizer.step()
 
     def zero_grad(self) -> None:
         """Zero all gradients."""
@@ -174,6 +180,7 @@ class TorchEngine:
         references to .grad). Only the initial step pays the .to(device)
         cost when grad is first created.
         """
+        validate_flat_array(flat_grads, sum(p.numel() for p in self._collect_trainable_params()))
         offset = 0
         for param in self._collect_trainable_params():
             numel = param.numel()
@@ -185,13 +192,36 @@ class TorchEngine:
                 # device-side allocation.
                 param.grad.copy_(cpu_grad)
             else:
-                param.grad = cpu_grad.to(self._device)
+                param.grad = cpu_grad.to(device=param.device, dtype=param.dtype)
             offset += numel
+
+    def _optimizer_layout(self) -> dict:
+        if self._optimizer is None:
+            return {}
+        if self._model is None:
+            raise RuntimeError("No model loaded")
+        names = {id(param): name for name, param in self._model.named_parameters()}
+        try:
+            groups = [[names[id(param)] for param in group["params"]] for group in self._optimizer.param_groups]
+        except KeyError as exc:
+            raise ValueError("Optimizer contains parameters outside the loaded model") from exc
+        kind = type(self._optimizer)
+        return {"type": f"{kind.__module__}.{kind.__qualname__}", "groups": groups}
+
+    def model_signature(self) -> str:
+        if self._model is None:
+            raise RuntimeError("No model loaded")
+        return json.dumps([
+            "torch", type(self._model).__qualname__,
+            [(name, list(p.shape), str(p.dtype), p.requires_grad) for name, p in self._model.named_parameters()],
+            [(name, list(b.shape), str(b.dtype)) for name, b in self._model.named_buffers()],
+            self._optimizer_layout(),
+        ])
 
     def get_flat_parameters(self) -> np.ndarray:
         """Flatten all parameters into a single numpy array (for broadcast)."""
         params = []
-        for param in self._collect_trainable_params():
+        for param in (list(self._model.parameters()) if self._model is not None else []):
             params.append(param.detach().cpu().float().numpy().flatten())
         if not params:
             return np.array([], dtype=np.float32)
@@ -199,8 +229,10 @@ class TorchEngine:
 
     def apply_flat_parameters(self, flat_params: np.ndarray) -> None:
         """Write flat parameters back to model (after broadcast)."""
+        parameters = list(self._model.parameters()) if self._model is not None else []
+        validate_flat_array(flat_params, sum(p.numel() for p in parameters))
         offset = 0
-        for param in self._collect_trainable_params():
+        for param in parameters:
             numel = param.numel()
             data = flat_params[offset : offset + numel].reshape(param.shape)
             param.data.copy_(torch.from_numpy(data.copy()).to(self._device))
@@ -217,6 +249,7 @@ class TorchEngine:
         state = {"model": self._model.state_dict()}
         if self._optimizer:
             state["optimizer"] = self._optimizer.state_dict()
+            state["optimizer_layout"] = self._optimizer_layout()
         torch.save(state, buffer)
         return buffer.getvalue()
 
@@ -225,7 +258,20 @@ class TorchEngine:
         assert self._model is not None, "No model loaded — call load_model() first"
         buffer = io.BytesIO(data)
         state = torch.load(buffer, map_location=self._device, weights_only=True)
-        self._model.load_state_dict(state["model"])
+        if self._optimizer is not None and "optimizer" in state:
+            if state.get("optimizer_layout") != self._optimizer_layout():
+                raise ValueError(
+                    "Checkpoint optimizer parameter order/type is missing or does not match the loaded optimizer"
+                )
+        current = self._model.state_dict()
+        saved = state["model"]
+        if current.keys() != saved.keys() or any(
+            isinstance(value, torch.Tensor) and (not isinstance(saved[name], torch.Tensor)
+                                                or value.shape != saved[name].shape)
+            for name, value in current.items()
+        ):
+            raise ValueError("Checkpoint model parameters do not match the loaded model")
+        self._model.load_state_dict(saved)
         if self._optimizer and "optimizer" in state:
             self._optimizer.load_state_dict(state["optimizer"])
 

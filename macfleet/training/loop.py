@@ -7,8 +7,6 @@ The loop is async-native so gradient sync (network I/O) can overlap
 with other work. Supports:
     - Weighted batch allocation (via sampler)
     - Gradient sync timing
-    - Periodic checkpointing
-    - Early stopping on loss plateau
     - Progress reporting via callbacks
 """
 
@@ -42,6 +40,10 @@ class TrainingConfig:
         _require_positive_int("epochs", self.epochs)
         _require_non_negative_int("log_every_n_steps", self.log_every_n_steps)
         _require_non_negative_int("checkpoint_every_n_steps", self.checkpoint_every_n_steps)
+        if self.checkpoint_every_n_steps:
+            raise TrainingConfigError(
+                "checkpoint_every_n_steps is not implemented. Save engine.state_dict() from on_step instead."
+            )
         if (
             not isinstance(self.max_grad_norm, (int, float))
             or isinstance(self.max_grad_norm, bool)
@@ -139,6 +141,14 @@ async def training_loop(
             # Gradient sync across all nodes
             sync_time = await dp.sync_gradients()
 
+            if config.max_grad_norm > 0:
+                gradients = engine.get_flat_gradients()
+                norm = float(np.linalg.norm(gradients.astype(np.float64)))
+                if not math.isfinite(norm):
+                    raise RuntimeError("Non-finite gradient norm; optimizer step aborted")
+                if norm > config.max_grad_norm:
+                    engine.apply_flat_gradients(gradients * (config.max_grad_norm / norm))
+
             # Optimizer step
             engine.step()
 
@@ -159,6 +169,9 @@ async def training_loop(
 
             if config.on_step and config.log_every_n_steps > 0 and global_step % config.log_every_n_steps == 0:
                 config.on_step(global_step, step_result)
+
+        if not epoch_losses:
+            raise RuntimeError(f"Training epoch {epoch} produced no batches; check the dataset and sampler")
 
         epoch_result = EpochResult(
             epoch=epoch,

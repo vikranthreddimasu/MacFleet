@@ -7,15 +7,15 @@ The core API:
 ```python
 pool.train(
     model,                    # nn.Module (torch) or mlx model
-    dataset,                  # Dataset, (X, y) tuple, or iterable
+    dataset,                  # sized Dataset or (X, y) tuple
     epochs=10,
     batch_size=128,           # global batch; split across ranks
     lr=0.001,
     optimizer=None,           # default: Adam(lr)
     loss_fn=None,             # default: model returns loss directly
     engine=None,              # "torch" or "mlx"; None → Pool's default
-    compression="none",       # "none" | "light" | "moderate" | "aggressive" | "adaptive"
-    distributed=None,         # None=auto (multi-node iff pool has peers),
+    compression="none",       # "none" | "light" | "adaptive"
+    distributed=None,         # None=follow Pool distributed intent,
                               # True=require peers, False=force single-node
 )
 ```
@@ -32,6 +32,12 @@ a clean synchronized gradient. `unsynced_steps` counts allreduce or
 connection failures. `validation_fallback_steps` counts NaN/Inf,
 metadata, or shape-validation failures that were discarded before they
 could poison the model.
+
+Torch accepts a sized dataset, an input tensor, or paired `(X, y)` arrays.
+Input-only batches pass all samples to the model; a custom loss receives
+`loss_fn(outputs)`. Paired batches use `loss_fn(outputs, targets)`. MLX requires
+paired arrays and uses `loss_fn(model, inputs, targets)`. Both engines reject
+paired arrays with different sample counts.
 
 ## Mutation semantics
 
@@ -102,7 +108,8 @@ The save either succeeds completely or leaves the previous checkpoint
 untouched. No half-written .pt files.
 
 If training crashes mid-save, your previous epoch checkpoint is still
-loadable. Ctrl-C is safe. Power loss is safe.
+loadable after an interrupted write. Use `fsync_dir=True` when saving if the
+directory entry also needs to be synced for durability across power loss.
 
 ## Single-node vs distributed
 
@@ -129,7 +136,7 @@ with macfleet.Pool(
 Distributed training is **SPMD: run the same script on every Mac.**
 Each Pool joins the fleet and waits for quorum; `pool.train()` then
 forms a gradient mesh over the data ports, broadcasts rank 0's
-initial weights, and allreduces gradients after every backward pass.
+model, buffers and optimizer state, and allreduces gradients after every backward pass.
 Ranks are derived from sorted node ids, so no extra coordination
 round is needed.
 
@@ -155,3 +162,42 @@ TimeoutError: No quorum within 30.0s: saw 1 node(s), need 2.
 Run 'macfleet status' to check discovery, or pass
 peers=['<ip>:50051'] to connect manually.
 ```
+
+## Failure and compatibility contract
+
+Distributed intent never silently falls back to local execution. Pass
+`distributed=False` explicitly for a local run. `@macfleet.distributed` is
+removed as an execution path because it never synchronized gradients; use the
+explicit Pool context above.
+
+Setup checks model layout, engine, dataset size, epoch count and batch schedule.
+These checks do not prove two arbitrary Python programs have the same semantics.
+Use identical scripts, data ordering, engine versions and loss functions.
+Rank 0 supplies initial model and optimizer state. Training uses equal shards;
+capacity-weighted rescheduling is a separate low-level API.
+
+Peer loss, malformed gradients and non-finite gradients abort by default. Rejoin
+and restart all ranks from the same checkpoint after a failure; in-flight training
+does not elastically shrink or resume on rediscovery. The result hash compares
+parameters, not every buffer or arbitrary Python model attribute.
+
+`TrainingConfig.max_grad_norm` clips synchronized gradients. Automatic checkpoint
+intervals are unsupported and rejected; use `on_step` and `engine.state_dict()`.
+Unknown `Pool.train` keyword arguments are rejected instead of ignored.
+
+
+The global batch size must be divisible by the number of participating nodes.
+MacFleet rejects a non-divisible size instead of silently rounding it down.
+Pool listeners currently use IPv4. On recent macOS versions, allow the Python
+runtime or its launching application under **Privacy & Security → Local Network**.
+If `nc` can reach a peer but Python reports `No route to host`, check that permission
+before changing fleet tokens or retrying training. IPv6-only fleets are unsupported.
+
+
+Engine checkpoints now validate optimizer identity and configuration. Torch
+checkpoints include the parameter names and order for each optimizer group;
+MLX checkpoints include optimizer settings. Checkpoints from older MacFleet
+versions that lack this metadata cannot safely restore optimizer state and
+are rejected. For a deliberate weights-only migration, load the old weights
+with the framework's native model APIs, create a fresh optimizer, and save a
+new MacFleet checkpoint. This restarts optimizer history; it is not an exact resume.

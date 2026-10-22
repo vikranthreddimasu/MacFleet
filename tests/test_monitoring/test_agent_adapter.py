@@ -132,3 +132,18 @@ class TestSnapshotAll:
         """Without a live agent, Pool.dashboard_snapshot returns []."""
         with Pool(open=True) as pool:  # flag off by default
             assert pool.dashboard_snapshot() == []
+
+
+def test_remote_health_is_unknown_without_live_sensor_readings():
+    from types import SimpleNamespace
+
+    from macfleet.engines.base import HardwareProfile
+    from macfleet.pool.registry import ClusterRegistry, NodeRecord
+
+    registry = ClusterRegistry("self")
+    registry.register(NodeRecord("peer", "peer", "127.0.0.1", 50051,
+                                 HardwareProfile("peer", "peer", 8, 8, 100, True, "Apple M1")))
+    peers = build_node_health_for_peers(SimpleNamespace(node_id="self", registry=registry))
+    assert len(peers) == 1
+    assert peers[0].status == HealthStatus.UNKNOWN
+    assert peers[0].thermal is None and peers[0].memory is None

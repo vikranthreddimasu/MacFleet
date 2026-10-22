@@ -31,11 +31,12 @@ its rate limiter.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from macfleet.comm.collectives import CollectiveGroup
+from macfleet.comm.collectives import CollectiveGroup, _gather
 from macfleet.comm.transport import (
     HardwareExchange,
     PeerAuthError,
@@ -143,6 +144,13 @@ async def form_mesh(
         PeerAuthError: a peer presented the wrong fleet token (fail fast).
         MeshFormationError: peers did not connect before the deadline.
     """
+    if (
+        isinstance(rendezvous_timeout_sec, bool)
+        or not isinstance(rendezvous_timeout_sec, (int, float))
+        or not math.isfinite(rendezvous_timeout_sec)
+        or rendezvous_timeout_sec <= 0
+    ):
+        raise ValueError("rendezvous_timeout_sec must be positive and finite")
     by_id = {spec.node_id: spec for spec in nodes}
     if len(by_id) != len(nodes):
         raise ValueError("Duplicate node_ids in mesh spec")
@@ -184,26 +192,31 @@ async def form_mesh(
         peer_address = best_peer_address(local_topology, spec.topology())
         while True:
             try:
-                await transport.connect(spec.node_id, peer_address, spec.data_port)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(
+                    transport.connect(spec.node_id, peer_address, spec.data_port), timeout=remaining,
+                )
                 return
             except PeerAuthError:
                 # Wrong token can't be fixed by retrying — and each retry
                 # counts against the peer's rate limiter.
                 raise
-            except (ConnectionError, OSError, asyncio.TimeoutError):
+            except (ConnectionError, OSError, asyncio.TimeoutError) as exc:
                 if time.monotonic() >= deadline:
                     raise MeshFormationError(
                         f"Could not connect to peer {spec.node_id} at "
                         f"{peer_address}:{spec.data_port} within "
                         f"{rendezvous_timeout_sec:.0f}s. Check that the peer is "
                         f"running the same training script, and that "
-                        f"'macfleet status' shows it as alive."
-                    ) from None
+                        f"'macfleet status' shows it as alive. Last error: {type(exc).__name__}: {exc}"
+                    ) from exc
                 await asyncio.sleep(_CONNECT_RETRY_INTERVAL_SEC)
 
     try:
         if outbound:
-            await asyncio.gather(*(_connect_with_retry(s) for s in outbound))
+            await _gather(*(_connect_with_retry(s) for s in outbound))
 
         # Wait for inbound connections from lower-id peers. The transport
         # registers each connection under the peer_id it authenticated as.

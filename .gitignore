@@ -28,6 +28,12 @@ checkpoints/
 
 # Environment
 .env
+.venv/
+.audit-*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
 *.pem
 *.key
 site/

@@ -3,7 +3,7 @@
 Callables must be registered with `@macfleet.task` before dispatch — names are sent on the wire, not pickles.
 
 
-For general-purpose compute across the fleet, register callables with
+For general-purpose compute, register callables with
 `@macfleet.task`. This is the secure alternative to cloudpickle-over-
 the-wire: the wire carries only the task NAME, and workers look that
 name up in a local registry.
@@ -14,11 +14,11 @@ name up in a local registry.
 import macfleet
 
 @macfleet.task
-def resize(image_path: str, target_w: int) -> dict:
+def resize(image_path: str, target_w: int = 512) -> dict:
     from PIL import Image
-    img = Image.open(image_path)
-    img.thumbnail((target_w, target_w))
-    return {"width": img.width, "height": img.height}
+    with Image.open(image_path) as img:
+        img.thumbnail((target_w, target_w))
+        return {"width": img.width, "height": img.height}
 
 with macfleet.Pool() as pool:
     result = pool.submit(resize, "/tmp/a.jpg", target_w=512)
@@ -26,12 +26,13 @@ with macfleet.Pool() as pool:
 ```
 
 `pool.submit` and `pool.map` detect the `@task` decorator and route the
-call through the registry. Args/kwargs are serialized via msgpack.
+call through the local registry and execute in local threads. For remote work,
+use explicit `TaskDispatcher`/`TaskWorker` transports; that wire uses msgpack.
+A distributed Pool rejects these local-only convenience methods.
 
 ## Timeouts and local parallelism
 
-`timeout` is enforced for registered tasks in both single-Mac and
-fleet-backed execution:
+`timeout` bounds the caller's wait for registered tasks:
 
 ```python
 with macfleet.Pool() as pool:
@@ -43,6 +44,11 @@ If a task misses its timeout, `Pool.submit`/`Pool.map` raise
 `TimeoutError` with the task id and timeout value. For a single-Mac
 pool, registered `pool.map` calls run in a local thread pool and preserve
 input order while honoring `max_workers`.
+
+Remote `TaskWorker` instances also bound admitted work by `max_workers`.
+When every slot is occupied, incoming requests wait instead of accumulating
+in an unbounded executor queue. A timed-out callable keeps its slot until
+it actually finishes; the timeout message warns that it may still be running.
 
 ## Why not just `pool.submit(lambda x: ..., x)`?
 
@@ -89,13 +95,10 @@ with macfleet.Pool() as pool:
     result = pool.submit(train, TrainArgs(epochs=3, lr=0.01, model_name="bert"))
 ```
 
-The schema gets applied on both sides:
-
-- **Coordinator**: validates the args you pass before dispatch (fails
-  fast on the caller's machine).
-- **Worker**: validates the args received on the wire before
-  invoking the function (defense in depth against a malicious or
-  buggy coordinator).
+Schema instances are serialized by the caller. The worker validates received
+arguments before invoking the function; local Pool execution uses the same
+validation path. A schema task accepts one argument dictionary or keyword
+fields, and rejects mixed or extra positional arguments.
 
 ## Gotchas
 
@@ -158,3 +161,8 @@ from macfleet.compute.registry import get_default_registry
 print(get_default_registry().names())
 # ['my_app.tasks.resize', 'my_app.tasks.train', ...]
 ```
+
+A timeout cannot kill a running Python thread. Work may continue and produce side
+effects after the caller stops waiting. Do not retry non-idempotent tasks without
+checking the worker. Dispatcher deadlines include queue/transit time and release
+pending bookkeeping even if a connected worker never replies.

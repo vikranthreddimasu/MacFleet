@@ -36,8 +36,9 @@ class TaskDispatcher:
 
     def __init__(self, transport: PeerTransport, worker_peer_ids: list[str]):
         self._transport = transport
-        self._workers = list(worker_peer_ids)
+        self._workers = list(dict.fromkeys(worker_peer_ids))
         self._pending: dict[str, TaskFuture] = {}
+        self._deadlines: dict[str, asyncio.TimerHandle] = {}
         # task_id -> worker_id, so a disconnect only fails THAT worker's
         # outstanding tasks rather than every pending future.
         self._task_to_worker: dict[str, str] = {}
@@ -79,33 +80,23 @@ class TaskDispatcher:
         self._worker_listeners.clear()
         self._fail_pending("dispatcher stopped")
 
-    def _fail_pending(self, reason: str) -> None:
-        """Resolve every pending TaskFuture with a failure result.
+    def _finish(self, result: TaskResult) -> None:
+        future = self._pending.pop(result.task_id, None)
+        self._task_to_worker.pop(result.task_id, None)
+        timer = self._deadlines.pop(result.task_id, None)
+        if timer is not None:
+            timer.cancel()
+        if future is not None and not future.done:
+            future.set_result(result)
 
-        Without this, callers awaiting future.result() block until their
-        own per-call timeout fires (or forever if no timeout was passed).
-        """
-        if not self._pending:
-            return
-        from macfleet.compute.models import TaskResult
-        for task_id, future in list(self._pending.items()):
-            if not future.done:
-                future.set_result(
-                    TaskResult(task_id=task_id, ok=False, error=reason)
-                )
-        self._pending.clear()
-        self._task_to_worker.clear()
-        self._worker_listeners.clear()
+    def _fail_pending(self, reason: str) -> None:
+        for task_id in list(self._pending):
+            self._finish(TaskResult(task_id=task_id, ok=False, error=reason))
 
     def _fail_pending_for_worker(self, worker_id: str, reason: str) -> None:
-        """Fail just the tasks routed to a dead worker; leave others alone."""
-        from macfleet.compute.models import TaskResult
-        dead_ids = [tid for tid, w in self._task_to_worker.items() if w == worker_id]
-        for tid in dead_ids:
-            future = self._pending.pop(tid, None)
-            self._task_to_worker.pop(tid, None)
-            if future is not None and not future.done:
-                future.set_result(TaskResult(task_id=tid, ok=False, error=reason))
+        for task_id, assigned in list(self._task_to_worker.items()):
+            if assigned == worker_id:
+                self._finish(TaskResult(task_id=task_id, ok=False, error=reason))
 
     async def submit(
         self,
@@ -133,7 +124,6 @@ class TaskDispatcher:
 
         worker_id = self._pick_live_worker()
         if worker_id is None:
-            from macfleet.compute.models import TaskResult
             future.set_result(TaskResult(
                 task_id=spec.task_id, ok=False,
                 error="no live workers (all known workers are disconnected)",
@@ -144,14 +134,21 @@ class TaskDispatcher:
         # failure can be cleaned up by callers if needed.
         self._pending[spec.task_id] = future
         self._task_to_worker[spec.task_id] = worker_id
+        self._deadlines[spec.task_id] = asyncio.get_running_loop().call_later(
+            spec.timeout_sec, self._finish,
+            TaskResult(task_id=spec.task_id, ok=False, error=(
+                f"Task timed out: worker {worker_id} did not return {spec.task_id} within {spec.timeout_sec}s. "
+                "Execution may still be running; check the worker before retrying."
+            )),
+        )
         try:
             await self._transport.send(worker_id, payload, msg_type=MessageType.TASK)
         except (ConnectionError, OSError) as e:
-            self._pending.pop(spec.task_id, None)
-            self._task_to_worker.pop(spec.task_id, None)
-            from macfleet.compute.models import TaskResult
-            future.set_result(TaskResult(task_id=spec.task_id, ok=False, error=str(e)))
+            self._finish(TaskResult(task_id=spec.task_id, ok=False, error=str(e)))
             return future
+        except BaseException:
+            self._finish(TaskResult(task_id=spec.task_id, ok=False, error="submission cancelled or failed"))
+            raise
         logger.debug("Dispatched task %s to %s", spec.task_id[:8], worker_id)
         return future
 
@@ -204,7 +201,7 @@ class TaskDispatcher:
         while self._running:
             try:
                 msg = await conn.recv_message(
-                    timeout=self._transport.config.recv_timeout_sec,
+                    timeout=None,  # Task deadlines own liveness; an idle worker is not a failed worker.
                 )
                 if msg.msg_type == MessageType.RESULT:
                     try:
@@ -212,24 +209,16 @@ class TaskDispatcher:
                     except ValueError as e:
                         logger.warning("Ignoring malformed RESULT from %s: %s", worker_id, e)
                         continue
-                    future = self._pending.pop(result.task_id, None)
-                    self._task_to_worker.pop(result.task_id, None)
-                    if future:
-                        future.set_result(result)
-                        logger.debug(
-                            "Result for task %s from %s (ok=%s)",
-                            result.task_id[:8], worker_id, result.ok,
-                        )
-                    else:
-                        logger.warning(
-                            "Received result for unknown task %s",
-                            result.task_id[:8],
-                        )
+                    if self._task_to_worker.get(result.task_id) != worker_id:
+                        logger.warning("Ignoring unassigned task result %s from %s", result.task_id, worker_id)
+                        continue
+                    self._finish(result)
             except asyncio.TimeoutError:
-                continue
+                self._fail_pending_for_worker(worker_id, f"worker {worker_id} connection timed out")
+                return
             except asyncio.CancelledError:
                 return
-            except (ConnectionError, OSError) as e:
+            except (ConnectionError, OSError, EOFError, asyncio.IncompleteReadError, ValueError) as e:
                 logger.warning("Lost connection to worker %s: %s", worker_id, e)
                 self._fail_pending_for_worker(worker_id, f"worker {worker_id} disconnected: {e}")
                 return

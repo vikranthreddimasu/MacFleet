@@ -88,7 +88,6 @@ class TestDetectInterfaces:
         monkeypatch.setattr(network.subprocess, "run", denied)
 
         assert not network._is_wifi_interface("en0")
-        assert network._ip_to_interface("192.168.1.10") is None
         assert network._parse_ifconfig() == []
 
     def test_detect_returns_list(self):
@@ -267,3 +266,17 @@ class _ProbeWriter:
         if self.wait_closed_delay is None:
             await asyncio.Future()
         await asyncio.sleep(self.wait_closed_delay)
+
+
+def test_best_link_ignores_ipv6_when_listener_is_ipv4():
+    wifi = NetworkLink("en0", LinkType.WIFI, "192.168.4.69")
+    ipv6 = NetworkLink("en0", LinkType.WIFI, "fe80::1")
+    assert NetworkTopology([wifi, ipv6]).best_link == wifi
+    assert NetworkTopology([ipv6]).best_link is None
+
+
+def test_detection_enumerates_all_interfaces(monkeypatch):
+    links = [NetworkLink("en0", LinkType.WIFI, "192.168.4.69"),
+             NetworkLink("bridge0", LinkType.THUNDERBOLT, "169.254.1.2")]
+    monkeypatch.setattr(network, "_parse_ifconfig", lambda: links)
+    assert detect_interfaces() == links

@@ -1,15 +1,22 @@
 # Changelog
 
-## Unreleased
-
-- Documentation and DX polish (ongoing).
-
-
 All notable changes to MacFleet. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Reliability and simplification
+
+- Keep Torch and MLX out of the pool and NumPy import paths; probe optional
+  hardware runtimes in bounded subprocesses.
+- Share Torch batch handling and MLX dataset validation between local and
+  distributed training. Input-only Torch datasets now use every sample.
+- Replace fleet tokens atomically and validate the permissions of opened files.
+- Bound worker admission, authorize before scheduling user code, and retain
+  capacity for timed-out threads until they exit.
+- Verify authenticated discovery, fleet isolation, and public Torch/MLX training
+  across independent processes, including matching final parameter hashes.
 
 ### Security (v3 handshake — all nodes in a secure fleet must upgrade together)
 

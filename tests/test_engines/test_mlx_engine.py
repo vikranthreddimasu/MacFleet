@@ -300,3 +300,52 @@ class TestMLXCheckpointing:
         np.testing.assert_allclose(
             engine2.get_flat_parameters(), params1, rtol=1e-5
         )
+
+
+def test_checkpoint_resumes_fresh_adam_exactly():
+    import mlx.core as mx
+
+    def loss(model, x):
+        return mx.sum(model(x) ** 2)
+
+    first = MLXEngine()
+    first.load_model(nn.Linear(2, 1), optim.Adam(learning_rate=0.01), loss_fn=loss)
+    batch = mx.ones((2, 2))
+    first.forward(batch)
+    first.step()
+    checkpoint = first.state_dict()
+    resumed = MLXEngine()
+    resumed.load_model(nn.Linear(2, 1), optim.Adam(learning_rate=0.01), loss_fn=loss)
+    resumed.load_state_dict(checkpoint)
+    for engine in (first, resumed):
+        engine.zero_grad()
+        engine.forward(batch)
+        engine.step()
+    np.testing.assert_array_equal(first.get_flat_parameters(), resumed.get_flat_parameters())
+
+
+def test_incomplete_checkpoint_rejected_before_model_mutation():
+    import io
+
+    engine = MLXEngine()
+    engine.load_model(nn.Linear(2, 1))
+    original = engine.get_flat_parameters()
+    buffer = io.BytesIO()
+    np.savez(buffer, bias=np.zeros(1, dtype=np.float32))
+    with pytest.raises(ValueError, match="do not match"):
+        engine.load_state_dict(buffer.getvalue())
+    np.testing.assert_array_equal(engine.get_flat_parameters(), original)
+
+
+def test_checkpoint_rejects_different_adam_settings_before_mutation():
+    import mlx.optimizers as optim
+
+    source = MLXEngine()
+    source.load_model(nn.Linear(2, 1), optim.Adam(.01, betas=[.9, .999]))
+    target = MLXEngine()
+    target.load_model(nn.Linear(2, 1), optim.Adam(.01, betas=[.5, .9]))
+    before = target.get_flat_parameters().copy()
+    assert source.model_signature() != target.model_signature()
+    with pytest.raises(ValueError, match="optimizer configuration"):
+        target.load_state_dict(source.state_dict())
+    np.testing.assert_array_equal(target.get_flat_parameters(), before)

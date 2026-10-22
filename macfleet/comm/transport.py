@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import socket
 import struct
 import time
@@ -78,6 +79,16 @@ class TransportConfig:
     ethernet_buffer_bytes: int = 2_097_152  # 2 MB
     thunderbolt_buffer_bytes: int = 4_194_304  # 4 MB
     default_buffer_bytes: int = 1_048_576  # 1 MB
+
+    def __post_init__(self) -> None:
+        for name in ("recv_timeout_sec", "connect_timeout_sec"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        for name in ("wifi_buffer_bytes", "ethernet_buffer_bytes", "thunderbolt_buffer_bytes", "default_buffer_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
 
     def buffer_size_for_link(self, link_type: LinkType) -> int:
         """Return optimal buffer size for the given link type."""
@@ -241,11 +252,15 @@ class PeerConnection:
         """Send a WireMessage (header + payload with CRC32)."""
         data = msg.pack()
         async with self._send_lock:
-            self.writer.write(data)
-            await self.writer.drain()
+            try:
+                self.writer.write(data)
+                await self.writer.drain()
+            except BaseException:
+                self.writer.close()
+                raise
             self.bytes_sent += len(data)
 
-    async def recv_message(self, timeout: float = 120.0) -> WireMessage:
+    async def recv_message(self, timeout: Optional[float] = 120.0) -> WireMessage:
         """Receive a WireMessage with CRC32 verification."""
         async with self._recv_lock:
             try:
@@ -253,15 +268,10 @@ class PeerConnection:
                     WireMessage.read_from_stream(self.reader),
                     timeout=timeout,
                 )
-            except asyncio.TimeoutError:
-                # A cancelled readexactly may have consumed a partial frame,
-                # leaving the StreamReader mid-message. Invalidate the
-                # connection rather than reusing a corrupt stream.
+            except BaseException:
+                # Cancellation, EOF, or an invalid frame may leave the stream
+                # mid-message. Never let the next operation reuse it.
                 self.writer.close()
-                try:
-                    await self.writer.wait_closed()
-                except (OSError, asyncio.TimeoutError):
-                    pass
                 raise
             self.bytes_received += HEADER_SIZE + len(msg.payload)
             return msg
@@ -292,8 +302,8 @@ class PeerConnection:
         """Close this connection gracefully."""
         try:
             self.writer.close()
-            await self.writer.wait_closed()
-        except (BrokenPipeError, ConnectionResetError, OSError):
+            await asyncio.wait_for(self.writer.wait_closed(), timeout=5.0)
+        except (OSError, asyncio.TimeoutError):
             pass
 
 
@@ -349,6 +359,7 @@ class PeerTransport:
         self._connections: dict[str, PeerConnection] = {}
         self._server: Optional[asyncio.Server] = None
         self._lock = asyncio.Lock()
+        self._client_tasks: set[asyncio.Task] = set()
         self._on_connect: Optional[Callable] = None
         self._rate_limiter = AuthRateLimiter()
         self._server_ssl_ctx = None
@@ -374,15 +385,18 @@ class PeerTransport:
     @property
     def peer_ids(self) -> list[str]:
         """IDs of all connected peers."""
-        return list(self._connections.keys())
+        return [pid for pid in self._connections if self.get_connection(pid) is not None]
 
     @property
     def connection_count(self) -> int:
-        return len(self._connections)
+        return len(self.peer_ids)
 
     def get_connection(self, peer_id: str) -> Optional[PeerConnection]:
         """Get connection to a specific peer, or None."""
-        return self._connections.get(peer_id)
+        conn = self._connections.get(peer_id)
+        if conn is None or conn.writer.is_closing() or conn.reader.at_eof():
+            return None
+        return conn
 
     async def start_server(
         self,
@@ -397,7 +411,10 @@ class PeerTransport:
             port: Bind port.
             on_connect: Optional callback(peer_id, PeerConnection).
         """
+        if self._server is not None:
+            raise RuntimeError("Transport server is already running")
         self._on_connect = on_connect
+        self._stopping = False
 
         async def handle_client(
             reader: asyncio.StreamReader,
@@ -702,16 +719,56 @@ class PeerTransport:
             if self._on_connect:
                 self._on_connect(peer_id, conn)
 
+        async def tracked_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            try:
+                await handle_client(reader, writer)
+            except BaseException:
+                writer.close()
+                raise
+            finally:
+                self._client_tasks.discard(task)
+
+        def accept_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            if self._stopping:
+                writer.close()
+                return
+            task = asyncio.create_task(tracked_client(reader, writer))
+            self._client_tasks.add(task)
+
+            def finished(done: asyncio.Task) -> None:
+                self._client_tasks.discard(done)
+                if done.cancelled():
+                    writer.close()  # Cancellation may precede the coroutine's first instruction.
+                elif done.exception() is not None:
+                    logger.error("Incoming connection handler failed", exc_info=done.exception())
+
+            task.add_done_callback(finished)
+
         self._server = await asyncio.start_server(
-            handle_client, host, port, ssl=self._server_ssl_ctx,
+            accept_client, host, port, ssl=self._server_ssl_ctx,
+            ssl_handshake_timeout=self.config.connect_timeout_sec if self._server_ssl_ctx else None,
+            ssl_shutdown_timeout=5.0 if self._server_ssl_ctx else None,
         )
 
     async def stop_server(self) -> None:
         """Stop the server and close all connections."""
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        self._stopping = True
+        server, self._server = self._server, None
+        if server is not None:
+            server.close()
+        tasks = list(self._client_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        async with self._lock:
+            conns = list(self._connections.values())
+            self._connections.clear()
+        for conn in conns:
+            await conn.close()
+        if server is not None:
+            await server.wait_closed()
 
     async def connect(
         self,
@@ -747,204 +804,214 @@ class PeerTransport:
             writer=writer,
             link_type=link_type,
         )
-        self._tune_socket(writer, link_type)
+        try:
+            self._tune_socket(writer, link_type)
 
-        fleet_key = self._security.fleet_key
+            fleet_key = self._security.fleet_key
 
-        if fleet_key:
-            # v2.3 handshake (v3): prove token knowledge in the FIRST message,
-            # bound to the server's TLS certificate. Payload:
-            #   node_id || challenge_a(32) || hello_proof(32)
-            # The server reveals nothing until the proof verifies.
-            channel_binding = tls_channel_binding_from_writer(writer)
-            if self._security.tls and not channel_binding:
-                # Fail closed: secure mode mandates TLS; a missing ssl_object
-                # means the channel is not what we think it is.
-                await conn.close()
-                _audit_transport_auth(
-                    "transport.auth_failed",
-                    role="client",
-                    local_id=self.local_id,
-                    peer_id=peer_id,
-                    peer_host=host,
-                    reason="missing_tls_channel",
+            if fleet_key:
+                # v2.3 handshake (v3): prove token knowledge in the FIRST message,
+                # bound to the server's TLS certificate. Payload:
+                #   node_id || challenge_a(32) || hello_proof(32)
+                # The server reveals nothing until the proof verifies.
+                channel_binding = tls_channel_binding_from_writer(writer)
+                if self._security.tls and not channel_binding:
+                    # Fail closed: secure mode mandates TLS; a missing ssl_object
+                    # means the channel is not what we think it is.
+                    await conn.close()
+                    _audit_transport_auth(
+                        "transport.auth_failed",
+                        role="client",
+                        local_id=self.local_id,
+                        peer_id=peer_id,
+                        peer_host=host,
+                        reason="missing_tls_channel",
+                    )
+                    raise ConnectionError(
+                        f"Auth handshake: expected a TLS channel to {peer_id} but "
+                        f"none was negotiated"
+                    )
+
+                challenge_a = generate_challenge()
+                hello_proof = compute_client_hello_proof(
+                    fleet_key, self.local_id, challenge_a, channel_binding,
                 )
-                raise ConnectionError(
-                    f"Auth handshake: expected a TLS channel to {peer_id} but "
-                    f"none was negotiated"
+                handshake_payload = (
+                    self.local_id.encode("utf-8") + challenge_a + hello_proof
                 )
 
-            challenge_a = generate_challenge()
-            hello_proof = compute_client_hello_proof(
-                fleet_key, self.local_id, challenge_a, channel_binding,
-            )
-            handshake_payload = (
-                self.local_id.encode("utf-8") + challenge_a + hello_proof
-            )
+                handshake = WireMessage(
+                    stream_id=0,
+                    msg_type=MessageType.CONTROL,
+                    flags=MessageFlags.HANDSHAKE_V2,
+                    sequence=0,
+                    payload=handshake_payload,
+                )
+                await conn.send_message(handshake)
 
-            handshake = WireMessage(
-                stream_id=0,
-                msg_type=MessageType.CONTROL,
-                flags=MessageFlags.HANDSHAKE_V2,
-                sequence=0,
-                payload=handshake_payload,
-            )
-            await conn.send_message(handshake)
+                # Read ack. The server ACK is:
+                #   base: peer_id + response_a(32) + challenge_b(32)
+                #   then: hw_block = wire_version(1) + hw_len(2) + hw_json + hmac(32)
+                # A server that finds our hello proof invalid closes WITHOUT
+                # replying (it must not act as an HMAC oracle), so EOF here
+                # almost always means a token mismatch.
+                try:
+                    ack = await asyncio.wait_for(
+                        conn.recv_message(),
+                        timeout=self.config.connect_timeout_sec,
+                    )
+                except (asyncio.IncompleteReadError, ConnectionResetError, EOFError) as e:
+                    await conn.close()
+                    _audit_transport_auth(
+                        "transport.auth_failed",
+                        role="client",
+                        local_id=self.local_id,
+                        peer_id=peer_id,
+                        peer_host=host,
+                        reason="server_rejected_hello",
+                        error_type=type(e).__name__,
+                    )
+                    raise PeerAuthError(
+                        f"Auth handshake failed: peer {peer_id} rejected our hello "
+                        f"— this node likely does not have the correct token "
+                        f"(secure servers stay silent to unauthenticated peers)"
+                    ) from e
+                ack_payload = ack.payload
+                if len(ack_payload) < CHALLENGE_SIZE * 2 + 1:
+                    await conn.close()
+                    _audit_transport_auth(
+                        "transport.auth_failed",
+                        role="client",
+                        local_id=self.local_id,
+                        peer_id=peer_id,
+                        peer_host=host,
+                        reason="server_response_too_short",
+                    )
+                    raise ConnectionError("Auth handshake: server response too short")
 
-            # Read ack. The server ACK is:
-            #   base: peer_id + response_a(32) + challenge_b(32)
-            #   then: hw_block = wire_version(1) + hw_len(2) + hw_json + hmac(32)
-            # A server that finds our hello proof invalid closes WITHOUT
-            # replying (it must not act as an HMAC oracle), so EOF here
-            # almost always means a token mismatch.
-            try:
+                if not (ack.flags & MessageFlags.HANDSHAKE_V2):
+                    await conn.close()
+                    _audit_transport_auth(
+                        "transport.auth_failed",
+                        role="client",
+                        local_id=self.local_id,
+                        peer_id=peer_id,
+                        peer_host=host,
+                        reason="server_missing_v2_flag",
+                    )
+                    raise PeerAuthError(
+                        f"Auth handshake failed: peer {peer_id} did not complete "
+                        f"the authenticated handshake (pre-2.3 version or open "
+                        f"fleet — secure fleets need every node on the same "
+                        f"MacFleet version)"
+                    )
+
+                # Peel the HW suffix first, then verify response_a. A HW-suffix
+                # HMAC failure is symptomatically identical to a wrong-token
+                # failure (same fleet_key, same challenge), so surface the same
+                # diagnostic; the underlying error is chained for debugging.
+                try:
+                    base_ack, peer_hw = _peel_hw_suffix(
+                        fleet_key, peer_id, ack_payload, challenge_a,
+                    )
+                except HandshakeHwValidationError as e:
+                    await conn.close()
+                    _audit_transport_auth(
+                        "transport.auth_failed",
+                        role="client",
+                        local_id=self.local_id,
+                        peer_id=peer_id,
+                        peer_host=host,
+                        reason="server_hw_invalid",
+                    )
+                    raise PeerAuthError(
+                        f"Auth handshake failed: peer {peer_id} does not have the correct token"
+                    ) from e
+                if len(base_ack) < CHALLENGE_SIZE * 2 + 1:
+                    await conn.close()
+                    _audit_transport_auth(
+                        "transport.auth_failed",
+                        role="client",
+                        local_id=self.local_id,
+                        peer_id=peer_id,
+                        peer_host=host,
+                        reason="ack_base_too_short",
+                    )
+                    raise ConnectionError(
+                        "Auth handshake v2: ACK base section too short after HW peel"
+                    )
+                if base_ack[:-(CHALLENGE_SIZE * 2)] != peer_id.encode("utf-8"):
+                    raise PeerAuthError(f"Handshake identity mismatch: expected peer {peer_id!r}")
+                response_a = base_ack[-(CHALLENGE_SIZE * 2):-CHALLENGE_SIZE]
+                challenge_b = base_ack[-CHALLENGE_SIZE:]
+                conn.peer_hw = peer_hw
+
+                # Verify server proved it knows the token over THIS TLS channel.
+                # A MITM that terminated TLS on both legs shows us a different
+                # cert than the real server signed against → mismatch → reject.
+                if not verify_response(
+                    fleet_key, challenge_a, response_a,
+                    label=HS_LABEL_SERVER_RESP,
+                    channel_binding=channel_binding,
+                ):
+                    await conn.close()
+                    _audit_transport_auth(
+                        "transport.auth_failed",
+                        role="client",
+                        local_id=self.local_id,
+                        peer_id=peer_id,
+                        peer_host=host,
+                        reason="invalid_server_challenge_response",
+                    )
+                    raise PeerAuthError(
+                        f"Auth handshake failed: peer {peer_id} does not have the correct token"
+                    )
+
+                # Respond to server's challenge (prove we know the token too),
+                # with a HW suffix bound to the server's challenge_b.
+                response_b = compute_response(
+                    fleet_key, challenge_b,
+                    label=HS_LABEL_CLIENT_RESP,
+                    channel_binding=channel_binding,
+                )
+                resp_payload = response_b + _pack_hw_suffix(
+                    fleet_key, self.local_id, self._local_hw, challenge_b,
+                )
+                resp_msg = WireMessage(
+                    stream_id=0,
+                    msg_type=MessageType.CONTROL,
+                    flags=MessageFlags.HANDSHAKE_V2,
+                    sequence=0,
+                    payload=resp_payload,
+                )
+                await conn.send_message(resp_msg)
+            else:
+                # Open handshake (backward compatible)
+                handshake = WireMessage(
+                    stream_id=0,
+                    msg_type=MessageType.CONTROL,
+                    flags=MessageFlags.NONE,
+                    sequence=0,
+                    payload=self.local_id.encode("utf-8"),
+                )
+                await conn.send_message(handshake)
+
                 ack = await asyncio.wait_for(
-                    conn.recv_message(),
-                    timeout=self.config.connect_timeout_sec,
+                    conn.recv_message(), timeout=self.config.connect_timeout_sec,
                 )
-            except (asyncio.IncompleteReadError, ConnectionResetError, EOFError) as e:
-                await conn.close()
-                _audit_transport_auth(
-                    "transport.auth_failed",
-                    role="client",
-                    local_id=self.local_id,
-                    peer_id=peer_id,
-                    peer_host=host,
-                    reason="server_rejected_hello",
-                    error_type=type(e).__name__,
-                )
-                raise PeerAuthError(
-                    f"Auth handshake failed: peer {peer_id} rejected our hello "
-                    f"— this node likely does not have the correct token "
-                    f"(secure servers stay silent to unauthenticated peers)"
-                ) from e
-            ack_payload = ack.payload
-            if len(ack_payload) < CHALLENGE_SIZE * 2 + 1:
-                await conn.close()
-                _audit_transport_auth(
-                    "transport.auth_failed",
-                    role="client",
-                    local_id=self.local_id,
-                    peer_id=peer_id,
-                    peer_host=host,
-                    reason="server_response_too_short",
-                )
-                raise ConnectionError("Auth handshake: server response too short")
+                if ack.msg_type != MessageType.CONTROL or ack.payload != peer_id.encode("utf-8"):
+                    raise ConnectionError(f"Handshake identity mismatch: expected peer {peer_id!r}")
 
-            if not (ack.flags & MessageFlags.HANDSHAKE_V2):
-                await conn.close()
-                _audit_transport_auth(
-                    "transport.auth_failed",
-                    role="client",
-                    local_id=self.local_id,
-                    peer_id=peer_id,
-                    peer_host=host,
-                    reason="server_missing_v2_flag",
-                )
-                raise PeerAuthError(
-                    f"Auth handshake failed: peer {peer_id} did not complete "
-                    f"the authenticated handshake (pre-2.3 version or open "
-                    f"fleet — secure fleets need every node on the same "
-                    f"MacFleet version)"
-                )
+            async with self._lock:
+                old_conn = self._connections.get(peer_id)
+                self._connections[peer_id] = conn
+            if old_conn is not None and old_conn is not conn:
+                await old_conn.close()
 
-            # Peel the HW suffix first, then verify response_a. A HW-suffix
-            # HMAC failure is symptomatically identical to a wrong-token
-            # failure (same fleet_key, same challenge), so surface the same
-            # diagnostic; the underlying error is chained for debugging.
-            try:
-                base_ack, peer_hw = _peel_hw_suffix(
-                    fleet_key, peer_id, ack_payload, challenge_a,
-                )
-            except HandshakeHwValidationError as e:
-                await conn.close()
-                _audit_transport_auth(
-                    "transport.auth_failed",
-                    role="client",
-                    local_id=self.local_id,
-                    peer_id=peer_id,
-                    peer_host=host,
-                    reason="server_hw_invalid",
-                )
-                raise PeerAuthError(
-                    f"Auth handshake failed: peer {peer_id} does not have the correct token"
-                ) from e
-            if len(base_ack) < CHALLENGE_SIZE * 2 + 1:
-                await conn.close()
-                _audit_transport_auth(
-                    "transport.auth_failed",
-                    role="client",
-                    local_id=self.local_id,
-                    peer_id=peer_id,
-                    peer_host=host,
-                    reason="ack_base_too_short",
-                )
-                raise ConnectionError(
-                    "Auth handshake v2: ACK base section too short after HW peel"
-                )
-            response_a = base_ack[-(CHALLENGE_SIZE * 2):-CHALLENGE_SIZE]
-            challenge_b = base_ack[-CHALLENGE_SIZE:]
-            conn.peer_hw = peer_hw
-
-            # Verify server proved it knows the token over THIS TLS channel.
-            # A MITM that terminated TLS on both legs shows us a different
-            # cert than the real server signed against → mismatch → reject.
-            if not verify_response(
-                fleet_key, challenge_a, response_a,
-                label=HS_LABEL_SERVER_RESP,
-                channel_binding=channel_binding,
-            ):
-                await conn.close()
-                _audit_transport_auth(
-                    "transport.auth_failed",
-                    role="client",
-                    local_id=self.local_id,
-                    peer_id=peer_id,
-                    peer_host=host,
-                    reason="invalid_server_challenge_response",
-                )
-                raise PeerAuthError(
-                    f"Auth handshake failed: peer {peer_id} does not have the correct token"
-                )
-
-            # Respond to server's challenge (prove we know the token too),
-            # with a HW suffix bound to the server's challenge_b.
-            response_b = compute_response(
-                fleet_key, challenge_b,
-                label=HS_LABEL_CLIENT_RESP,
-                channel_binding=channel_binding,
-            )
-            resp_payload = response_b + _pack_hw_suffix(
-                fleet_key, self.local_id, self._local_hw, challenge_b,
-            )
-            resp_msg = WireMessage(
-                stream_id=0,
-                msg_type=MessageType.CONTROL,
-                flags=MessageFlags.HANDSHAKE_V2,
-                sequence=0,
-                payload=resp_payload,
-            )
-            await conn.send_message(resp_msg)
-        else:
-            # Open handshake (backward compatible)
-            handshake = WireMessage(
-                stream_id=0,
-                msg_type=MessageType.CONTROL,
-                flags=MessageFlags.NONE,
-                sequence=0,
-                payload=self.local_id.encode("utf-8"),
-            )
-            await conn.send_message(handshake)
-
-            await asyncio.wait_for(
-                conn.recv_message(),
-                timeout=self.config.connect_timeout_sec,
-            )
-
-        async with self._lock:
-            self._connections[peer_id] = conn
-
-        return conn
+            return conn
+        except BaseException:
+            await conn.close()
+            raise
 
     async def disconnect(self, peer_id: str) -> None:
         """Disconnect from a specific peer."""
@@ -955,11 +1022,6 @@ class PeerTransport:
 
     async def disconnect_all(self) -> None:
         """Disconnect from all peers and stop server."""
-        async with self._lock:
-            conns = list(self._connections.values())
-            self._connections.clear()
-        for conn in conns:
-            await conn.close()
         await self.stop_server()
 
     async def send(

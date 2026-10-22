@@ -9,7 +9,7 @@ MacFleet pools multiple Apple Silicon Macs into a single distributed ML training
 - **Version**: 2.2.1
 - **Language**: Python 3.11+ (3.13 supported)
 - **Platform**: macOS only (Apple Silicon)
-- **Tests**: 962, run with `make test` or `python -m pytest tests/ -v`
+- **Tests**: run the complete suite with `make test` or `python -m pytest tests/ -v`
 - **Package**: `pip install macfleet`
 
 ## Critical Architecture Rule
@@ -192,7 +192,7 @@ Per-direction locks (`_send_lock`, `_recv_lock`) allow safe concurrent allreduce
 ### Running tests
 
 ```bash
-make test                                        # all 447 tests
+make test                                      # complete suite
 python -m pytest tests/test_engines/ -v          # just engine tests
 python -m pytest tests/ -k "allreduce" -v        # tests matching keyword
 python -m pytest tests/test_engines/test_mlx_engine.py -v  # single file
@@ -202,7 +202,7 @@ MLX tests auto-skip if MLX is not installed (`pytest.importorskip`).
 
 ## Known Constraints
 
-- **MLX backward pass**: MLX uses functional `nn.value_and_grad()`, not imperative `loss.backward()`. The MLXEngine stores the batch in `forward()` and recomputes with gradients in `backward()`.
+- **MLX backward pass**: `forward()` computes loss and gradients together with `nn.value_and_grad()`. `backward()` validates that gradients exist; it does not recompute the model.
 - **Compression pipeline split**: `macfleet/compression/pipeline.py` (torch tensors, v1) vs `macfleet/compression/adaptive.py` (numpy arrays, v2). DataParallel uses the numpy-native adaptive compressor.
 - **Distributed Pool.train() is SPMD**: every Mac must run the SAME training script. Each Pool joins the fleet, waits for quorum, then `train()` forms a mesh over the data ports (`macfleet/training/mesh.py`), broadcasts rank 0's weights, and allreduces gradients every step. Ranks come from sorted node_id order (NOT compute_score — score views can transiently disagree across nodes, ids cannot). Equal shards with drop_last keep per-epoch step counts identical on every rank; mismatched step counts would strand the final allreduce.
 - **asyncio everywhere**: Transport, collectives, and heartbeat are all async. Tests use `pytest-asyncio` with `asyncio_mode = "auto"`.

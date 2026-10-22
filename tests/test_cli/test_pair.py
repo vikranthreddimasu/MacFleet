@@ -222,6 +222,7 @@ class TestPairFromEnrollment:
         assert result.exit_code == 0, result.output
         assert "Paired" in result.output
         assert "studio" in result.output
+        assert "macfleet join --fleet-id lab" in result.output
         assert token_path.read_text().strip() == "enrolled-token-long-enough"
 
     def test_host_code_confirmation_happens_before_enrollment_request(

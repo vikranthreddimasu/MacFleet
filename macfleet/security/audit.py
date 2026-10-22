@@ -8,6 +8,7 @@ anything off the machine.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
@@ -103,11 +104,13 @@ def audit_event(event: str, **fields: Any) -> None:
 
     try:
         if not _ensure_private_audit_dir():
+            logging.getLogger(__name__).warning("Security audit directory is unavailable: %s", AUDIT_DIR)
             return
         path = Path(AUDIT_FILE)
         try:
             st = os.lstat(path)
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                logging.getLogger(__name__).warning("Refusing unsafe security audit path: %s", AUDIT_FILE)
                 return
         except FileNotFoundError:
             pass
@@ -124,11 +127,9 @@ def audit_event(event: str, **fields: Any) -> None:
         current = stat.S_IMODE(path.stat().st_mode)
         if current & 0o077:
             os.chmod(path, 0o600)
-    except (OSError, TypeError, ValueError):
-        # Deliberately swallow. Audit logging must never make the primary
-        # security or training action fail, including for an unexpected field
-        # that JSON cannot serialize.
-        return
+    except (OSError, TypeError, ValueError) as exc:
+        # Report loss of observability without exposing event fields or masking enforcement.
+        logging.getLogger(__name__).warning("Security audit write failed (%s): %s", type(exc).__name__, AUDIT_FILE)
 
 
 def audit_log_path() -> str:

@@ -481,3 +481,10 @@ class TestTaskRegistry:
 
         with pytest.raises(exception, match=message):
             registry.register(fn, **kwargs)
+
+
+def test_schema_task_never_discards_positional_arguments():
+    spec = TaskSpec(task_id="audit-shape", task_name=fake_train.task_name,
+                    args=[{"epochs": 2}, "discarded"], kwargs={"epochs": 3})
+    with pytest.raises(ValueError, match="cannot be mixed"):
+        spec.validated_args(spec.resolve())

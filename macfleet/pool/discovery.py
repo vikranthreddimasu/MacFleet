@@ -6,6 +6,7 @@ Ported from v1 comm/discovery.py with extended properties for pool metadata:
 """
 
 import asyncio
+import logging
 import math
 import socket
 import threading
@@ -201,33 +202,27 @@ class PoolServiceListener(ServiceListener):
         self._on_remove = on_remove
         self._on_update = on_update
 
-    def add_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
+    def _resolve_service(self, zc: Zeroconf, service_type: str, name: str, callback: Optional[Callable]) -> None:
+        def deliver(info: Optional[ServiceInfo]) -> None:
+            if info and callback:
+                node = self._parse_service_info(info)
+                if node:
+                    callback(node)
+
         loop = getattr(zc, "loop", None)
         if loop is not None and loop.is_running():
-            # When AsyncZeroconf attaches to a running event loop (e.g. inside
-            # an async Pool), the synchronous get_service_info() submits a
-            # coroutine via run_coroutine_threadsafe and then blocks on
-            # .result(timeout) from the ServiceBrowser thread.  If the loop is
-            # busy the future times out and raises EventLoopBlocked, silently
-            # dropping the peer.  Use the async variant instead and let the
-            # loop process it without blocking the browser thread.
-            on_add = self._on_add
-            parse = self._parse_service_info
+            async def resolve() -> None:
+                try:
+                    deliver(await zc.async_get_service_info(service_type, name))
+                except Exception:
+                    logging.getLogger(__name__).exception("Discovery lookup failed for %s", name)
 
-            async def _async_add() -> None:
-                node_info = await zc.async_get_service_info(service_type, name)
-                if node_info and on_add:
-                    node = parse(node_info)
-                    if node:
-                        on_add(node)
+            asyncio.run_coroutine_threadsafe(resolve(), loop)
+        else:
+            deliver(zc.get_service_info(service_type, name))
 
-            asyncio.run_coroutine_threadsafe(_async_add(), loop)
-            return
-        info = zc.get_service_info(service_type, name)
-        if info and self._on_add:
-            node = self._parse_service_info(info)
-            if node:
-                self._on_add(node)
+    def add_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
+        self._resolve_service(zc, service_type, name, self._on_add)
 
     def remove_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
         if self._on_remove:
@@ -237,25 +232,7 @@ class PoolServiceListener(ServiceListener):
             self._on_remove(node_id)
 
     def update_service(self, zc: Zeroconf, service_type: str, name: str) -> None:
-        loop = getattr(zc, "loop", None)
-        if loop is not None and loop.is_running():
-            on_update = self._on_update
-            parse = self._parse_service_info
-
-            async def _async_update() -> None:
-                node_info = await zc.async_get_service_info(service_type, name)
-                if node_info and on_update:
-                    node = parse(node_info)
-                    if node:
-                        on_update(node)
-
-            asyncio.run_coroutine_threadsafe(_async_update(), loop)
-            return
-        info = zc.get_service_info(service_type, name)
-        if info and self._on_update:
-            node = self._parse_service_info(info)
-            if node:
-                self._on_update(node)
+        self._resolve_service(zc, service_type, name, self._on_update)
 
     def _parse_service_info(self, info: ServiceInfo) -> Optional[DiscoveredNode]:
         try:

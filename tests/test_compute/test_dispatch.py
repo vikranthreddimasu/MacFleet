@@ -496,3 +496,32 @@ class TestDispatcherEdgeCases:
             await worker.stop()
 
         asyncio.run(run())
+
+async def test_silent_worker_expires_without_caller_timeout():
+    coordinator, worker, _ = await _setup_pair()
+    dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+    try:
+        await dispatcher.start()
+        future = await dispatcher.submit(times_two, 21, timeout=0.03)
+        with pytest.raises(RemoteTaskError, match="timed out"):
+            await asyncio.wait_for(future.result(), 1)
+        assert dispatcher.pending_count == 0
+        assert dispatcher._deadlines == {}
+        assert dispatcher._task_to_worker == {}
+    finally:
+        await dispatcher.stop()
+        await _teardown(coordinator, worker)
+
+
+async def test_cancelled_submission_does_not_leak_pending_task():
+    from unittest.mock import AsyncMock
+
+    transport = PeerTransport(local_id="coordinator")
+    transport.get_connection = lambda peer: object()
+    transport.send = AsyncMock(side_effect=asyncio.CancelledError)
+    dispatcher = TaskDispatcher(transport, ["worker"])
+    dispatcher._running = True
+    with pytest.raises(asyncio.CancelledError):
+        await dispatcher.submit(times_two, 1)
+    assert dispatcher.pending_count == 0
+    assert not dispatcher._deadlines

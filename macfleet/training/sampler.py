@@ -31,10 +31,7 @@ def _normalize_weights(weights: list[float], num_replicas: int) -> list[float]:
         for weight in weights
     ):
         raise ValueError("weights must be finite, positive numbers")
-    total = sum(weights)
-    if total <= 0:
-        raise ValueError("weights must contain at least one positive value")
-    return [float(weight) / total for weight in weights]
+    return _normalize_capacities(weights, name="weights", integers_only=False)
 
 
 class WeightedDistributedSampler(Sampler[int]):

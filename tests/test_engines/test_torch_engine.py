@@ -184,7 +184,8 @@ class TestTorchEngineState:
         state_bytes = engine.state_dict()
 
         # Reset model
-        engine.load_model(_TinyModel(), torch.optim.SGD(model.parameters(), lr=0.01))
+        restored_model = _TinyModel()
+        engine.load_model(restored_model, torch.optim.SGD(restored_model.parameters(), lr=0.01))
 
         # Restore
         engine.load_state_dict(state_bytes)
@@ -208,3 +209,54 @@ class TestTorchEngineState:
         model = _TinyModel()
         engine.load_model(model)
         assert engine.estimated_model_memory_gb() > 0
+
+
+def test_parameter_updates_validate_before_mutation():
+    model = nn.Linear(2, 2)
+    engine = TorchEngine(device="cpu")
+    engine.load_model(model)
+    original = engine.get_flat_parameters()
+    for invalid in [np.ones(original.size + 1, dtype=np.float32), np.full_like(original, np.nan)]:
+        with pytest.raises(ValueError):
+            engine.apply_flat_parameters(invalid)
+        np.testing.assert_array_equal(engine.get_flat_parameters(), original)
+
+
+def test_frozen_parameters_are_included_in_initial_broadcast():
+    model = nn.Linear(2, 2)
+    model.weight.requires_grad_(False)
+    engine = TorchEngine(device="cpu")
+    engine.load_model(model)
+    assert engine.get_flat_parameters().size == 6
+    engine.apply_flat_parameters(np.ones(6, dtype=np.float32))
+    assert torch.equal(model.weight, torch.ones_like(model.weight))
+
+
+def test_half_precision_gradient_update_preserves_parameter_dtype():
+    model = nn.Linear(2, 1).half()
+    engine = TorchEngine(device="cpu")
+    engine.load_model(model)
+    engine.apply_flat_gradients(np.ones(3, dtype=np.float32))
+    assert model.weight.grad.dtype == torch.float16
+
+
+def test_optimizer_order_mismatch_rejects_checkpoint_before_mutation():
+    model = torch.nn.Linear(1, 1)
+    engine = TorchEngine(device="cpu")
+    engine.load_model(model, torch.optim.SGD([model.weight, model.bias], lr=.1, momentum=.9))
+    checkpoint = engine.state_dict()
+    other = torch.nn.Linear(1, 1)
+    restored = TorchEngine(device="cpu")
+    restored.load_model(other, torch.optim.SGD([other.bias, other.weight], lr=.1, momentum=.9))
+    before = restored.get_flat_parameters().copy()
+    assert restored.model_signature() != engine.model_signature()
+    with pytest.raises(ValueError, match="optimizer parameter order"):
+        restored.load_state_dict(checkpoint)
+    np.testing.assert_array_equal(restored.get_flat_parameters(), before)
+
+
+def test_optimizer_for_another_model_is_rejected():
+    model = torch.nn.Linear(1, 1)
+    other = torch.nn.Linear(1, 1)
+    with pytest.raises(ValueError, match="outside the loaded model"):
+        TorchEngine(device="cpu").load_model(model, torch.optim.SGD(other.parameters(), lr=.1))

@@ -47,9 +47,9 @@ When you set a token (which happens automatically on first
 _mf-<first-8-hex-of-sha256(fleet_key)>._tcp.local.
 ```
 
-Other fleets on the same LAN can't see your nodes. They can see *that*
-a scoped fleet exists (the hash is visible), but can't enumerate its
-members without the token.
+MacFleet browsers discover only their fleet's service type. mDNS is public:
+an observer can inspect advertised service types, addresses, and TXT records.
+The fleet token controls authenticated membership, not discovery privacy.
 
 ## Authentication
 
@@ -158,11 +158,10 @@ slow attackers get dropped quickly.
 
 ## Token file permissions
 
-`~/.macfleet/fleet-token` is chmod 0o600 after `O_CREAT`. On every read,
-`_check_token_file_mode` **refuses to load** the token if the mode leaks
-any bits to group or other — fail closed so a world-readable credential
-cannot silently enroll this machine into a fleet. Fix with
-`chmod 600 ~/.macfleet/fleet-token`.
+`~/.macfleet/fleet-token` is written to a private 0600 temporary file, synced,
+and atomically replaced. A failed write preserves the previous token. Reads
+check the opened file's type and permissions and reject group/other access.
+Fix permissive credentials with `chmod 600 ~/.macfleet/fleet-token`.
 
 The containing `~/.macfleet` directory is repaired to mode 0o700 before
 MacFleet writes a token. The token path must be a regular file: MacFleet
@@ -214,6 +213,11 @@ legacy local ProcessPool/cloudpickle fallback requires
 to the local audit log. Tasks can also declare `remote=False`, and
 workers enforce `TaskAuthorizationPolicy` allowlists, denylists, and
 role checks before invocation.
+
+Workers admit at most `max_workers` executions at a time and apply backpressure
+to incoming task frames. A timeout cannot stop a Python thread: its execution
+slot remains occupied until the callable exits. Register only trusted tasks,
+and check a timed-out task before retrying work with side effects.
 
 ## Audit log
 

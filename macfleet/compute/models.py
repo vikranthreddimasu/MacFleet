@@ -263,12 +263,11 @@ class TaskSpec:
         """
         if entry.schema is None:
             return self.args, self.kwargs
-        if len(self.args) == 1 and isinstance(self.args[0], dict):
-            model = entry.schema(**self.args[0])
-            return [model], self.kwargs
-        # Schema declared but non-standard shape → validate as kwargs
-        model = entry.schema(**self.kwargs)
-        return [model], {}
+        if len(self.args) == 1 and isinstance(self.args[0], dict) and not self.kwargs:
+            return [entry.schema(**self.args[0])], {}
+        if not self.args:
+            return [entry.schema(**self.kwargs)], {}
+        raise ValueError("Schema tasks require one argument dict or keyword fields; arguments cannot be mixed")
 
 
 @dataclass

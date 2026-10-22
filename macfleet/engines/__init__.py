@@ -8,6 +8,9 @@ does not require either framework. `from macfleet.engines import TorchEngine`
 only succeeds when `pip install macfleet[torch]` (or [all]) was run.
 """
 
+from importlib.util import find_spec
+from typing import TYPE_CHECKING
+
 from macfleet.engines.base import (
     Engine,
     EngineCapabilities,
@@ -26,18 +29,20 @@ __all__ = [
     "TrainingMetrics",
 ]
 
-# PyTorch is optional — install via `pip install macfleet[torch]`
-try:
+if TYPE_CHECKING:
+    from macfleet.engines.mlx_engine import MLXEngine  # noqa: F401
     from macfleet.engines.torch_engine import TorchEngine  # noqa: F401
 
+if find_spec("torch") is not None:
     __all__.append("TorchEngine")
-except ImportError:
-    pass
+__all__.append("MLXEngine")
 
-# MLX is optional — only available on Apple Silicon with mlx installed
-try:
-    from macfleet.engines.mlx_engine import MLXEngine  # noqa: F401
 
-    __all__.append("MLXEngine")
-except ImportError:
-    pass
+def __getattr__(name: str):
+    if name == "TorchEngine" and name in __all__:
+        from macfleet.engines.torch_engine import TorchEngine
+        return TorchEngine
+    if name == "MLXEngine":
+        from macfleet.engines.mlx_engine import MLXEngine
+        return MLXEngine
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
