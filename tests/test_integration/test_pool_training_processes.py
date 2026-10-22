@@ -3,13 +3,18 @@
 import asyncio
 import faulthandler
 import importlib.util
+import json
 import multiprocessing
+import os
 import queue
 import secrets
+import shutil
 import subprocess
 import sys
 import time
 import traceback
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +22,33 @@ _PHASES = (
     "spawned", "initializing runtime", "pool enter", "train 0 begin", "train 0 end",
     "train 1 begin", "train 1 end", "pool leave", "complete", "failed",
 )
+
+
+def _darwin_user_directories():
+    # Darwin's unistd.h constants are not included in Python's confstr_names.
+    return tuple(Path(os.confstr(code)).resolve() for code in (65536, 65537, 65538))
+
+
+@contextmanager
+def _isolated_darwin_directories():
+    if sys.platform != "darwin":
+        yield {}
+        return
+
+    # A fresh interpreter avoids the parent's already-cached dirhelper paths.
+    environment = os.environ.copy()
+    environment.pop("DIRHELPER_USER_DIR_SUFFIX", None)
+    roots = json.loads(subprocess.check_output(
+        [sys.executable, "-c", "import json, os; print(json.dumps([os.confstr(c) for c in (65536, 65537, 65538)]))"],
+        env=environment, text=True, timeout=10,
+    ))
+    suffix = f"macfleet-test-{secrets.token_hex(16)}"
+    with ExitStack() as cleanup:
+        directories = [Path(root) / suffix for root in roots]
+        for directory in directories:
+            directory.mkdir(mode=0o700)
+            cleanup.callback(shutil.rmtree, directory)
+        yield {"DIRHELPER_USER_DIR_SUFFIX": suffix, "TMPDIR": str(directories[1])}
 
 
 def _dump_async_tasks(index):
@@ -32,7 +64,7 @@ def _dump_async_tasks(index):
     sys.stdout.flush()
 
 
-def _train_worker(index, engine, world_size, token, results, phases=None):
+def _train_worker(index, engine, world_size, token, results, phases=None, directory_suffix=None, parent_dirs=()):
     import numpy as np
 
     import macfleet.sdk.pool as sdk_pool
@@ -46,6 +78,11 @@ def _train_worker(index, engine, world_size, token, results, phases=None):
     faulthandler.dump_traceback_later(40, repeat=True)
     try:
         phase("initializing runtime")
+        if sys.platform == "darwin":
+            directories = _darwin_user_directories()
+            assert directory_suffix is not None
+            assert all(directory.name == directory_suffix for directory in directories), directories
+            assert not set(directories).intersection(parent_dirs), (directories, parent_dirs)
         x = np.random.default_rng(42).normal(size=(192, 4)).astype(np.float32)
         y = (x[:, 0] > 0).astype(np.int32)
         if engine == "torch":
@@ -58,6 +95,7 @@ def _train_worker(index, engine, world_size, token, results, phases=None):
             import mlx.core as mx
             import mlx.nn as nn
 
+            assert mx.default_device() == mx.gpu
             print(
                 f"Training child {index}: MLX {mx.__version__}, "
                 f"default device {mx.default_device()}, Metal available {mx.metal.is_available()}, "
@@ -113,13 +151,28 @@ def test_pool_training_across_processes(engine, world_size):
     results = ctx.Queue()
     phases = ctx.Array("i", world_size, lock=False)
     token = secrets.token_hex(32)
-    processes = [
-        ctx.Process(target=_train_worker, args=(i, engine, world_size, token, results, phases))
-        for i in range(world_size)
-    ]
+    parent_dirs = _darwin_user_directories() if sys.platform == "darwin" else ()
+    directories = ExitStack()
+    processes = []
+    suffixes = set()
     try:
-        for process in processes:
-            process.start()
+        for index in range(world_size):
+            environment = directories.enter_context(_isolated_darwin_directories())
+            suffix = environment.get("DIRHELPER_USER_DIR_SUFFIX")
+            if suffix is not None:
+                assert suffix not in suffixes
+                suffixes.add(suffix)
+            process = ctx.Process(
+                target=_train_worker,
+                args=(index, engine, world_size, token, results, phases, suffix, parent_dirs),
+            )
+            # CoreFoundation can cache these paths during interpreter startup.
+            # Each simulated Mac must inherit its own cache before spawn/exec.
+            with pytest.MonkeyPatch.context() as launch_environment:
+                for name, value in environment.items():
+                    launch_environment.setenv(name, value)
+                process.start()
+            processes.append(process)
         try:
             runs = [results.get(timeout=60) for _ in processes]
         except queue.Empty:
@@ -161,3 +214,4 @@ def test_pool_training_across_processes(engine, world_size):
                 process.join(timeout=2)
         results.close()
         results.join_thread()
+        directories.close()
