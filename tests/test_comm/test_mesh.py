@@ -227,3 +227,38 @@ class TestSecureMesh:
                 bind_host="127.0.0.1",
                 rendezvous_timeout_sec=1.0,
             )
+
+
+@pytest.mark.parametrize("abort", ["peer", "cancel"])
+async def test_finish_failure_still_closes_local_resources(monkeypatch, abort):
+    specs = _make_specs(2)
+    security = SecurityConfig(token="mesh-finish-cleanup-test")
+    meshes = await asyncio.gather(*(
+        form_mesh(spec.node_id, specs, security=security, config=CONFIG, bind_host="127.0.0.1")
+        for spec in specs
+    ))
+    retired = asyncio.Event()
+    original_stop = meshes[0].transport.stop_accepting
+
+    def stop_accepting():
+        original_stop()
+        retired.set()
+
+    monkeypatch.setattr(meshes[0].transport, "stop_accepting", stop_accepting)
+    finish = asyncio.create_task(meshes[0].finish())
+    try:
+        await retired.wait()
+        if abort == "peer":
+            await meshes[1].close()
+            with pytest.raises((asyncio.IncompleteReadError, ConnectionError)):
+                await asyncio.wait_for(finish, timeout=2)
+        else:
+            finish.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(finish, timeout=2)
+        assert meshes[0].transport._server is None
+        assert meshes[0].transport.get_connection(specs[1].node_id) is None
+    finally:
+        finish.cancel()
+        await asyncio.gather(finish, return_exceptions=True)
+        await asyncio.gather(*(mesh.close() for mesh in meshes))
