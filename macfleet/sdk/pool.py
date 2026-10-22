@@ -266,7 +266,7 @@ async def _distributed_train_torch(
             engine.get_flat_parameters().tobytes()
         ).hexdigest()
 
-        return {
+        result = {
             "loss": history[-1] if history else 0.0,
             "loss_history": history,
             "epochs": epochs,
@@ -281,8 +281,11 @@ async def _distributed_train_torch(
             "last_sync_error": dp.last_sync_error,
             "params_sha256": params_sha,
         }
-    finally:
+    except BaseException:
         await mesh.close()
+        raise
+    await mesh.finish()
+    return result
 
 
 async def _distributed_train_mlx(
@@ -386,7 +389,7 @@ async def _distributed_train_mlx(
             engine.get_flat_parameters().tobytes()
         ).hexdigest()
 
-        return {
+        result = {
             "loss": history[-1] if history else 0.0,
             "loss_history": history,
             "epochs": epochs,
@@ -401,8 +404,11 @@ async def _distributed_train_mlx(
             "last_sync_error": dp.last_sync_error,
             "params_sha256": params_sha,
         }
-    finally:
+    except BaseException:
         await mesh.close()
+        raise
+    await mesh.finish()
+    return result
 
 
 class Pool:
