@@ -386,7 +386,9 @@ class PeerTransport:
         self._connections: dict[str, PeerConnection] = {}
         self._server: Optional[asyncio.Server] = None
         self._lock = asyncio.Lock()
+        self._shutdown_lock = asyncio.Lock()
         self._client_tasks: set[asyncio.Task] = set()
+        self._connect_tasks: set[asyncio.Task] = set()
         self._on_connect: Optional[Callable] = None
         self._rate_limiter = AuthRateLimiter()
         self._server_ssl_ctx = None
@@ -438,6 +440,8 @@ class PeerTransport:
             port: Bind port.
             on_connect: Optional callback(peer_id, PeerConnection).
         """
+        if self._shutdown_lock.locked():
+            raise RuntimeError("Transport is shutting down")
         if self._server is not None:
             raise RuntimeError("Transport server is already running")
         self._on_connect = on_connect
@@ -783,21 +787,22 @@ class PeerTransport:
 
     async def stop_server(self) -> None:
         """Stop the server and close all connections."""
-        self._stopping = True
-        server, self._server = self._server, None
-        if server is not None:
-            server.close()
-        tasks = list(self._client_tasks)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        async with self._lock:
-            conns = list(self._connections.values())
-            self._connections.clear()
-        for conn in conns:
-            await conn.close()
-        if server is not None:
-            await server.wait_closed()
+        async with self._shutdown_lock:
+            self._stopping = True
+            server, self._server = self._server, None
+            if server is not None:
+                server.close()
+            tasks = list(self._client_tasks | self._connect_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            async with self._lock:
+                conns = list(self._connections.values())
+                self._connections.clear()
+            for conn in conns:
+                await conn.close()
+            if server is not None:
+                await server.wait_closed()
 
     async def connect(
         self,
@@ -820,6 +825,24 @@ class PeerTransport:
         Raises:
             ConnectionError: If authentication fails.
         """
+        if self._shutdown_lock.locked():
+            raise ConnectionError("Transport is shutting down")
+        # Own the handshake task so shutdown can cancel sockets that have not
+        # reached _connections yet, without cancelling the caller's other work.
+        task = asyncio.create_task(self._connect(peer_id, host, port, link_type))
+        self._connect_tasks.add(task)
+        try:
+            return await task
+        finally:
+            self._connect_tasks.discard(task)
+
+    async def _connect(
+        self,
+        peer_id: str,
+        host: str,
+        port: int,
+        link_type: LinkType,
+    ) -> PeerConnection:
         ssl_ctx = create_client_ssl_context() if self._security.tls else None
 
         reader, writer = await asyncio.wait_for(

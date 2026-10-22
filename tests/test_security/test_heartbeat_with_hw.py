@@ -626,3 +626,77 @@ async def test_reverse_probes_are_bounded_coalesced_and_cancelled_on_stop(manual
     await asyncio.wait_for(bob.stop(), 1)
     assert not bob._peer_probes
     assert all(task.done() for task in tasks)
+
+
+@pytest.mark.parametrize("membership_change", ["unchanged", "removed", "replaced"])
+async def test_late_authenticated_heartbeat_cannot_update_changed_membership(membership_change):
+    from macfleet.pool.discovery import DiscoveredNode
+    from macfleet.pool.heartbeat import GossipHeartbeat, NodeStatus
+    from macfleet.pool.registry import ClusterRegistry
+
+    agent = _start_agent("heartbeat-lifecycle-token")
+    agent._security.tls = False  # Exercise signed APONG over a controlled loopback server.
+    agent._registry = ClusterRegistry(agent.node_id)
+    agent._heartbeat = GossipHeartbeat(
+        agent.node_id, security=agent._security,
+        on_peer_hw=agent._on_peer_hw_received,
+        on_recovered=agent._on_peer_recovered,
+    )
+    ping_received = asyncio.Event()
+    reply = asyncio.Event()
+    endpoint_done = asyncio.Event()
+    old_hw = HardwareExchange(gpu_cores=32, data_port=55052).to_json_bytes()
+
+    async def endpoint(reader, writer):
+        try:
+            request = await reader.readline()
+            request_nonce = bytes.fromhex(request.decode().split(" ")[2])
+            ping_received.set()
+            await reply.wait()
+            nonce = secrets.token_bytes(16)
+            signature = sign_heartbeat_response(
+                agent._security.fleet_key, "peer", nonce, request_nonce, hw_json=old_hw,
+            )
+            writer.write(f"APONG peer {nonce.hex()} {signature.hex()} {old_hw.hex()}\n".encode())
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            endpoint_done.set()
+
+    server = await asyncio.start_server(endpoint, "127.0.0.1", 0)
+    discovered = DiscoveredNode(
+        hostname="peer", node_id="peer", ip_address="127.0.0.1",
+        port=server.sockets[0].getsockname()[1], data_port=50052,
+        gpu_cores=0, ram_gb=0, chip_name="unknown", link_types="", pool_version="2.3",
+    )
+    agent._on_peer_discovered(discovered)
+    gossip = asyncio.create_task(agent._heartbeat._gossip_round())
+    try:
+        await asyncio.wait_for(ping_received.wait(), 1)
+        if membership_change == "unchanged":
+            expected_status = NodeStatus.ALIVE
+            expected_port = 55052
+        elif membership_change == "removed":
+            agent._on_peer_removed("peer")
+            expected_status = NodeStatus.LEFT
+            expected_port = discovered.data_port
+        else:
+            agent._on_peer_discovered(replace(discovered, port=60051, data_port=60052))
+            expected_status = NodeStatus.SUSPECTED
+            expected_port = 60052
+        reply.set()
+        await asyncio.wait_for(gossip, 1)
+        record = agent.registry.get_node("peer")
+        assert record.status == expected_status
+        assert record.data_port == expected_port
+        assert record.hardware.gpu_cores == (32 if membership_change == "unchanged" else 0)
+        if membership_change == "removed":
+            assert agent._heartbeat.peers["peer"].status == NodeStatus.LEFT
+    finally:
+        reply.set()
+        gossip.cancel()
+        await asyncio.gather(gossip, return_exceptions=True)
+        await asyncio.wait_for(endpoint_done.wait(), 1)
+        server.close()
+        await server.wait_closed()

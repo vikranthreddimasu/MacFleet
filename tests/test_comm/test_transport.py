@@ -286,6 +286,84 @@ async def test_shutdown_cancels_unfinished_handshake():
         await writer.wait_closed()
 
 
+@pytest.mark.parametrize("cancel_shutdown", [False, True])
+async def test_shutdown_cancels_outbound_handshake_before_it_can_register(monkeypatch, cancel_shutdown):
+    from macfleet.comm.protocol import MessageFlags, MessageType, WireMessage
+    from macfleet.comm.transport import PeerConnection
+
+    hello_received = asyncio.Event()
+    send_ack = asyncio.Event()
+    peer_closed = asyncio.Event()
+    closing = asyncio.Event()
+    finish_close = asyncio.Event()
+    close = PeerConnection.close
+
+    async def blocked_close(conn):
+        conn.writer.close()
+        closing.set()
+        await finish_close.wait()
+        await close(conn)
+
+    monkeypatch.setattr(PeerConnection, "close", blocked_close)
+
+    async def delayed_peer(reader, writer):
+        try:
+            await WireMessage.read_from_stream(reader)
+            hello_received.set()
+            await send_ack.wait()
+            writer.write(WireMessage(
+                0, MessageType.CONTROL, MessageFlags.NONE, 0, b"server",
+            ).pack())
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            peer_closed.set()
+
+    server = await asyncio.start_server(delayed_peer, "127.0.0.1", 0)
+    client = PeerTransport(local_id="client")
+    connecting = asyncio.create_task(client.connect(
+        "server", "127.0.0.1", server.sockets[0].getsockname()[1],
+    ))
+    shutdown = None
+    try:
+        await asyncio.wait_for(hello_received.wait(), 1)
+        shutdown = asyncio.create_task(client.disconnect_all())
+        await asyncio.wait_for(closing.wait(), 1)
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await client.start_server("127.0.0.1", 0)
+        with pytest.raises(ConnectionError, match="shutting down"):
+            await client.connect("server", "127.0.0.1", server.sockets[0].getsockname()[1])
+        if cancel_shutdown:
+            shutdown.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await shutdown
+        else:
+            finish_close.set()
+            await asyncio.wait_for(shutdown, 1)
+        send_ack.set()
+        result, = await asyncio.wait_for(
+            asyncio.gather(connecting, return_exceptions=True), 1,
+        )
+        assert isinstance(result, asyncio.CancelledError)
+        assert client.connection_count == 0
+        assert not client._connect_tasks
+        await asyncio.wait_for(peer_closed.wait(), 1)
+    finally:
+        finish_close.set()
+        send_ack.set()
+        if shutdown is not None:
+            shutdown.cancel()
+            await asyncio.gather(shutdown, return_exceptions=True)
+        connecting.cancel()
+        await asyncio.gather(connecting, return_exceptions=True)
+        await client.disconnect_all()
+        await asyncio.wait_for(peer_closed.wait(), 1)
+        server.close()
+        await server.wait_closed()
+
+
 async def test_wrong_peer_identity_rejected_and_socket_closed():
     server = PeerTransport(local_id="actual")
     client = PeerTransport(local_id="client")
@@ -311,6 +389,12 @@ async def test_reconnect_closes_replaced_client_socket():
         assert client.get_connection("server") is new
         await client.send("server", b"reconnected")
         assert await server.recv("client") == b"reconnected"
+        # A completed shutdown still permits an explicit new client session.
+        await client.disconnect_all()
+        restarted = await client.connect("server", "127.0.0.1", port)
+        assert client.get_connection("server") is restarted
+        await client.send("server", b"restarted")
+        assert await server.recv("client") == b"restarted"
     finally:
         await client.disconnect_all()
         await server.disconnect_all()
