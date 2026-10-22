@@ -646,3 +646,61 @@ async def test_equal_count_different_layout_is_rejected_on_all_ranks():
         assert all(isinstance(result, RuntimeError) and "layout" in str(result) for result in results)
     finally:
         await _teardown_mesh(transports)
+
+
+async def test_weighted_batch_loop_stays_synchronized_and_advances_epochs():
+    from torch.utils.data import DataLoader
+
+    from macfleet.training.loop import TrainingConfig, training_loop
+    from macfleet.training.sampler import DistributedBatchSampler
+
+    transports = await _setup_mesh(2)
+    try:
+        groups = _make_groups(transports)
+        engines = [_make_model_and_engine(seed=rank)[1] for rank in range(2)]
+        dataset = torch.arange(412, dtype=torch.float32).reshape(103, 4) / 1000
+        samplers = [
+            DistributedBatchSampler(dataset, 10, 2, rank, weights=[0.38, 0.62])
+            for rank in range(2)
+        ]
+        results = await asyncio.wait_for(asyncio.gather(*(
+            training_loop(
+                engine, DataParallel(engine, groups[rank]),
+                DataLoader(dataset, batch_sampler=samplers[rank]), TrainingConfig(epochs=2),
+            )
+            for rank, engine in enumerate(engines)
+        )), timeout=5)
+        assert [result.total_steps for result in results] == [22, 22]
+        assert [sampler.sampler.epoch for sampler in samplers] == [1, 1]
+        np.testing.assert_array_equal(engines[0].get_flat_parameters(), engines[1].get_flat_parameters())
+    finally:
+        await _teardown_mesh(transports)
+
+
+@pytest.mark.parametrize("mismatch", ["batch_count", "epochs", "max_grad_norm", "unsized"])
+async def test_training_loop_rejects_configuration_mismatch_on_every_rank(mismatch):
+    from macfleet.training.loop import TrainingConfig, training_loop
+
+    transports = await _setup_mesh(2)
+    try:
+        groups = _make_groups(transports)
+        engines = [_make_model_and_engine(seed=0)[1] for _ in groups]
+        before = engines[0].get_flat_parameters().copy()
+        results = await asyncio.wait_for(asyncio.gather(*(
+            training_loop(
+                engine, DataParallel(engine, groups[rank]),
+                iter([torch.ones(2, 4)]) if mismatch == "unsized" and rank == 1 else
+                [torch.ones(2, 4)] * (2 + (rank if mismatch == "batch_count" else 0)),
+                TrainingConfig(
+                    epochs=1 + (rank if mismatch == "epochs" else 0),
+                    max_grad_norm=rank * 0.5 if mismatch == "max_grad_norm" else 0.0,
+                ),
+            )
+            for rank, engine in enumerate(engines)
+        ), return_exceptions=True), timeout=5)
+        for result, engine in zip(results, engines):
+            assert isinstance(result, RuntimeError)
+            assert "Training configuration mismatch" in str(result)
+            np.testing.assert_array_equal(engine.get_flat_parameters(), before)
+    finally:
+        await _teardown_mesh(transports)

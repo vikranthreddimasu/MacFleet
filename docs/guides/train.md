@@ -201,3 +201,18 @@ versions that lack this metadata cannot safely restore optimizer state and
 are rejected. For a deliberate weights-only migration, load the old weights
 with the framework's native model APIs, create a fresh optimizer, and save a
 new MacFleet checkpoint. This restarts optimizer history; it is not an exact resume.
+
+
+The low-level `DistributedBatchSampler` divides each global batch by the same
+weights on every rank, with at least one sample per rank. It rounds allocations
+so their sum equals the global batch size. With `drop_last=True`, it drops the
+last incomplete global batch. Otherwise, a final batch smaller than the number
+of ranks repeats samples from that batch so every rank can participate.
+
+The composable `training_loop` checks batch counts, epoch counts and gradient
+clipping settings across ranks before training, and advances either the batch
+sampler or ordinary sampler each epoch.
+Distributed loaders must expose their length. Use identical weights, seed and
+data ordering on every rank. `DataParallel` averages gradients equally across
+ranks; with unequal batch sizes, callers must scale their loss gradients if they
+need a mean weighted by sample count. `Pool.train` uses equal per-rank batches.

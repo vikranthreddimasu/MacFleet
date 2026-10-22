@@ -103,14 +103,15 @@ class WeightedDistributedSampler(Sampler[int]):
                 counts[rank] += 1
         return counts
 
-    def __iter__(self) -> Iterator[int]:
+    def _indices(self) -> list[int]:
         if self.shuffle:
             g = torch.Generator()
             g.manual_seed(self.seed + self.epoch)
-            indices = torch.randperm(self._dataset_size, generator=g).tolist()
-        else:
-            indices = list(range(self._dataset_size))
+            return torch.randperm(self._dataset_size, generator=g).tolist()
+        return list(range(self._dataset_size))
 
+    def __iter__(self) -> Iterator[int]:
+        indices = self._indices()
         start = sum(self._sample_counts[: self.rank])
         end = start + self._sample_counts[self.rank]
         return iter(indices[start:end])
@@ -131,9 +132,10 @@ class WeightedDistributedSampler(Sampler[int]):
 class DistributedBatchSampler(Sampler[list[int]]):
     """Batch sampler that yields weighted batch sizes per rank.
 
-    Instead of a fixed batch size per node, allocates batch samples
-    based on node weights so each forward pass processes the
-    appropriate amount of data.
+    Splits each global batch by weight with at least one sample per rank,
+    keeping every rank on the same collective schedule. A final batch smaller
+    than the fleet is padded unless drop_last=True. All ranks must use the
+    same weights, dataset order, global batch size, seed and epoch.
     """
 
     def __init__(
@@ -163,25 +165,42 @@ class DistributedBatchSampler(Sampler[list[int]]):
             drop_last=drop_last,
         )
 
-        # Reuse the sampler's validated, normalized weights so allocation
-        # decisions cannot diverge between samples and batches.
-        self.batch_size = max(1, int(batch_size * self.sampler.weights[rank]))
+        self.global_batch_size = batch_size
+        self.batch_size = self._batch_counts(batch_size)[rank]
         self.drop_last = drop_last
 
+    def _batch_counts(self, size: int) -> list[int]:
+        ideal = [size * weight for weight in self.sampler.weights]
+        counts = [max(1, int(count)) for count in ideal]
+        # Keep the closest weighted allocation without starving a collective.
+        while sum(counts) > size:
+            rank = max(
+                (rank for rank, count in enumerate(counts) if count > 1),
+                key=lambda rank: counts[rank] - ideal[rank],
+            )
+            counts[rank] -= 1
+        for _ in range(size - sum(counts)):
+            rank = max(range(len(counts)), key=lambda rank: ideal[rank] - counts[rank])
+            counts[rank] += 1
+        return counts
+
     def __iter__(self) -> Iterator[list[int]]:
-        batch: list[int] = []
-        for idx in self.sampler:
-            batch.append(idx)
-            if len(batch) == self.batch_size:
-                yield batch
-                batch = []
-        if batch and not self.drop_last:
-            yield batch
+        indices = self.sampler._indices()
+        for start in range(0, len(indices), self.global_batch_size):
+            batch = indices[start:start + self.global_batch_size]
+            if self.drop_last and len(batch) < self.global_batch_size:
+                break
+            if len(batch) < self.sampler.num_replicas:
+                batch += [batch[i % len(batch)] for i in range(self.sampler.num_replicas - len(batch))]
+            counts = self._batch_counts(len(batch))
+            offset = sum(counts[:self.sampler.rank])
+            yield batch[offset:offset + counts[self.sampler.rank]]
 
     def __len__(self) -> int:
+        size = self.sampler._dataset_size
         if self.drop_last:
-            return len(self.sampler) // self.batch_size
-        return (len(self.sampler) + self.batch_size - 1) // self.batch_size
+            return size // self.global_batch_size
+        return (size + self.global_batch_size - 1) // self.global_batch_size
 
     def set_epoch(self, epoch: int) -> None:
         self.sampler.set_epoch(epoch)

@@ -123,8 +123,26 @@ async def training_loop(
 
     # Broadcast initial parameters so all nodes start identically
     await dp.setup()
+    if dp.world_size > 1:
+        try:
+            batches_per_epoch = len(dataloader)
+        except TypeError:
+            batches_per_epoch = -1
+        await dp.check_consistent(
+            np.array([config.epochs, batches_per_epoch, config.max_grad_norm], dtype=np.float64),
+            "Training configuration mismatch",
+        )
+        if batches_per_epoch < 0:
+            raise TrainingConfigError(
+                "Distributed training requires a sized dataloader to check each rank's batch count"
+            )
 
     for epoch in range(config.epochs):
+        sampler = getattr(dataloader, "batch_sampler", None)
+        if not hasattr(sampler, "set_epoch"):
+            sampler = getattr(dataloader, "sampler", None)
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
         epoch_start = time.monotonic()
         epoch_losses = []
         epoch_sync_times = []
@@ -185,10 +203,6 @@ async def training_loop(
 
         if config.on_epoch:
             config.on_epoch(epoch, epoch_result)
-
-        # Update sampler epoch if it exists (for shuffle reproducibility)
-        if hasattr(dataloader, "sampler") and hasattr(dataloader.sampler, "set_epoch"):
-            dataloader.sampler.set_epoch(epoch + 1)
 
     total_time = time.monotonic() - total_start
     return TrainingResult(

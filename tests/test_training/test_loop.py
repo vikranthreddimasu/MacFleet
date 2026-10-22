@@ -43,7 +43,7 @@ async def test_gradient_clipping_applies_before_optimizer_step():
     engine = Mock()
     engine.forward.return_value = 1.0
     engine.get_flat_gradients.return_value = np.array([3., 4.], dtype=np.float32)
-    dp = Mock(setup=AsyncMock(), sync_gradients=AsyncMock(return_value=0.01))
+    dp = Mock(world_size=1, setup=AsyncMock(), sync_gradients=AsyncMock(return_value=0.01))
     await training_loop(engine, dp, [1], TrainingConfig(epochs=1, max_grad_norm=1))
     np.testing.assert_allclose(engine.apply_flat_gradients.call_args.args[0], [0.6, 0.8])
     calls = [call[0] for call in engine.mock_calls]
@@ -54,3 +54,15 @@ async def test_gradient_clipping_applies_before_optimizer_step():
 def test_unimplemented_checkpoint_setting_is_rejected():
     with pytest.raises(TrainingConfigError, match="not implemented"):
         TrainingConfig(checkpoint_every_n_steps=1)
+
+
+async def test_distributed_loop_rejects_unsized_loader_before_training():
+    from unittest.mock import AsyncMock, Mock
+
+    from macfleet.training.loop import training_loop
+
+    engine = Mock()
+    dp = Mock(world_size=2, setup=AsyncMock(), check_consistent=AsyncMock())
+    with pytest.raises(TrainingConfigError, match="sized dataloader"):
+        await training_loop(engine, dp, iter([1]), TrainingConfig(epochs=1))
+    engine.forward.assert_not_called()
