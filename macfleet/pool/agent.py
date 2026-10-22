@@ -27,7 +27,11 @@ from macfleet.comm.transport import HardwareExchange
 from macfleet.compute.worker import TaskWorker
 from macfleet.engines.base import HardwareProfile
 from macfleet.monitoring.thermal import get_thermal_state
-from macfleet.pool.discovery import DiscoveredNode, ServiceRegistry
+from macfleet.pool.discovery import (
+    MAX_MDNS_INSTANCE_NAME_BYTES,
+    DiscoveredNode,
+    ServiceRegistry,
+)
 from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig, NodeStatus
 from macfleet.pool.network import LinkType, get_network_topology
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
@@ -173,10 +177,18 @@ def _check_mlx_available() -> bool:
     return _probe_framework("import mlx.core")
 
 
+def _generate_node_id(hostname: str) -> str:
+    """Keep the readable prefix and complete random suffix within an mDNS label."""
+    suffix = f"-{secrets_mod.token_hex(4)}"
+    prefix_bytes = hostname.encode("utf-8")[:MAX_MDNS_INSTANCE_NAME_BYTES - len(suffix)]
+    # Slicing can split a multibyte character; discard only that partial tail.
+    return prefix_bytes.decode("utf-8", errors="ignore") + suffix
+
+
 def profile_hardware() -> HardwareProfile:
     """Profile the local Mac's hardware capabilities."""
     hostname = socket.gethostname()
-    node_id = f"{hostname}-{secrets_mod.token_hex(4)}"
+    node_id = _generate_node_id(hostname)
 
     return HardwareProfile(
         hostname=hostname,
@@ -333,13 +345,8 @@ class PoolAgent:
         # 1. Profile hardware
         self.hardware = profile_hardware()
         if self._name_override:
-            # Replace both hostname AND node_id so the mDNS service name
-            # stays under the RFC 6763 63-byte limit. Some CI / cloud hosts
-            # have hostnames like
-            # "sat12-bq147-a49fb4f3-b5ae-471f-aa6f-0eed0a917324-167552B41E56.local"
-            # which would blow past zeroconf's name validation.
             self.hardware.hostname = self._name_override
-            self.hardware.node_id = f"{self._name_override}-{secrets_mod.token_hex(4)}"
+            self.hardware.node_id = _generate_node_id(self._name_override)
 
         console.print(f"[bold blue]MacFleet[/bold blue] agent starting on {self.hardware.hostname}")
         console.print(f"  Chip: {self.hardware.chip_name}")

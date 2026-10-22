@@ -1,5 +1,6 @@
 """The public Pool API must form a secure fleet and train across processes."""
 
+import faulthandler
 import importlib.util
 import multiprocessing
 import secrets
@@ -13,6 +14,7 @@ def _train_worker(index, engine, world_size, token, results):
 
     from macfleet.sdk.pool import Pool
 
+    faulthandler.dump_traceback_later(40, repeat=True)
     try:
         x = np.random.default_rng(42).normal(size=(192, 4)).astype(np.float32)
         y = (x[:, 0] > 0).astype(np.int32)
@@ -45,6 +47,8 @@ def _train_worker(index, engine, world_size, token, results):
     except BaseException:
         results.put({"error": traceback.format_exc()})
         raise
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 @pytest.mark.parametrize("engine", ["torch", "mlx"])

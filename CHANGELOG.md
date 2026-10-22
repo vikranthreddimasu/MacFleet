@@ -16,6 +16,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   listeners to replacement connections without accepting stale results.
 - Cancel outbound handshakes during transport shutdown and ignore heartbeat
   results for removed or replaced peer endpoints.
+- Keep generated node identities within mDNS limits for long hostnames and
+  Unicode names while retaining the random identity suffix.
 - Exercise repeated public-API training across two and three processes for both
   Torch and MLX, including identical final model hashes and safe failure paths.
 

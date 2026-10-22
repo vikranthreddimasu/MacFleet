@@ -190,6 +190,10 @@ def test_interrupted_quorum_stops_agent_and_allows_rejoin(monkeypatch):
 
     import macfleet.sdk.pool as pool_module
 
+    monkeypatch.setattr(
+        "socket.gethostname",
+        lambda: "sat12-bq167-9ce84703-42a0-45a4-bdd1-bfc6d47b1ef7-728220639B35.local",
+    )
     pool = pool_module.Pool(
         token=secrets.token_hex(32), port=0, data_port=0,
         enable_pool_distributed=True, quorum_size=2, quorum_timeout_sec=5,
