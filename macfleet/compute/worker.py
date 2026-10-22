@@ -85,8 +85,8 @@ class TaskWorker:
             except asyncio.CancelledError:
                 pass
         # Drain in-flight task wrappers so their results get sent before
-        # we tear down the transport. Each wrapper is bounded by its own
-        # timeout_sec, so this can't hang forever in steady state.
+        # we tear down the transport. Execution and result delivery are each
+        # bounded by timeout_sec, even when the coordinator stops reading.
         if self._inflight:
             await asyncio.gather(*self._inflight, return_exceptions=True)
             self._inflight.clear()
@@ -193,11 +193,12 @@ class TaskWorker:
                 payload = result.pack()
 
             try:
-                await self._transport.send(
-                    self._coordinator,
-                    payload,
-                    msg_type=MessageType.RESULT,
+                await asyncio.wait_for(
+                    self._transport.send(self._coordinator, payload, msg_type=MessageType.RESULT),
+                    timeout=spec.timeout_sec,
                 )
+            except asyncio.TimeoutError:
+                logger.error("Result delivery for task %s timed out after %ss", spec.task_id[:8], spec.timeout_sec)
             except (ConnectionError, OSError, EOFError, asyncio.IncompleteReadError, ValueError) as e:
                 logger.error(
                     "Failed to send result for task %s: %s",

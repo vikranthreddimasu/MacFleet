@@ -80,3 +80,38 @@ async def test_unauthorized_work_never_enters_executor():
         assert "not allowed to run remotely" in result.error
     finally:
         await worker.stop()
+
+
+async def test_worker_shutdown_bounds_blocked_result_delivery():
+    @task(name="tests.worker_capacity.completed")
+    def completed():
+        return 42
+
+    incoming = asyncio.Queue()
+    sending = asyncio.Event()
+    send_cancelled = asyncio.Event()
+
+    async def receive(**kwargs):
+        return await incoming.get()
+
+    async def blocked_send(*args, **kwargs):
+        sending.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            send_cancelled.set()
+
+    transport = SimpleNamespace(get_connection=lambda peer: SimpleNamespace(recv_message=receive), send=blocked_send)
+    worker = TaskWorker(transport, "coordinator", max_workers=1)
+    await worker.start()
+    try:
+        incoming.put_nowait(SimpleNamespace(
+            msg_type=MessageType.TASK, payload=TaskSpec.from_call(completed, timeout=0.02).pack(),
+        ))
+        await asyncio.wait_for(sending.wait(), 1)
+        await asyncio.wait_for(worker.stop(), 0.5)
+        assert send_cancelled.is_set()
+        assert not worker._inflight
+        assert worker._executor is None
+    finally:
+        await worker.stop()

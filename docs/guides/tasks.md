@@ -49,6 +49,9 @@ Remote `TaskWorker` instances also bound admitted work by `max_workers`.
 When every slot is occupied, incoming requests wait instead of accumulating
 in an unbounded executor queue. A timed-out callable keeps its slot until
 it actually finishes; the timeout message warns that it may still be running.
+Submission writes share the dispatcher deadline. Workers allow at most one
+additional task-timeout interval to send a result, so shutdown cannot wait
+indefinitely for a coordinator that has stopped reading.
 
 ## Why not just `pool.submit(lambda x: ..., x)`?
 

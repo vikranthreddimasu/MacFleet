@@ -134,15 +134,21 @@ class TaskDispatcher:
         # failure can be cleaned up by callers if needed.
         self._pending[spec.task_id] = future
         self._task_to_worker[spec.task_id] = worker_id
+        timeout_result = TaskResult(task_id=spec.task_id, ok=False, error=(
+            f"Task timed out: worker {worker_id} did not return {spec.task_id} within {spec.timeout_sec}s. "
+            "Execution may still be running; check the worker before retrying."
+        ))
         self._deadlines[spec.task_id] = asyncio.get_running_loop().call_later(
-            spec.timeout_sec, self._finish,
-            TaskResult(task_id=spec.task_id, ok=False, error=(
-                f"Task timed out: worker {worker_id} did not return {spec.task_id} within {spec.timeout_sec}s. "
-                "Execution may still be running; check the worker before retrying."
-            )),
+            spec.timeout_sec, self._finish, timeout_result,
         )
         try:
-            await self._transport.send(worker_id, payload, msg_type=MessageType.TASK)
+            await asyncio.wait_for(
+                self._transport.send(worker_id, payload, msg_type=MessageType.TASK),
+                timeout=spec.timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            self._finish(timeout_result)
+            return future
         except (ConnectionError, OSError) as e:
             self._finish(TaskResult(task_id=spec.task_id, ok=False, error=str(e)))
             return future
