@@ -51,7 +51,7 @@ jobs:
 
   torch-mps:
     name: torch-mps (macos-arm64, py${{ matrix.python }})
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
@@ -71,7 +71,7 @@ jobs:
 
   mlx:
     name: mlx (macos-arm64, py${{ matrix.python }})
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +94,7 @@ jobs:
 
   integration:
     name: integration (macos-arm64, py3.12)
-    runs-on: macos-14
+    runs-on: macos-15
     needs: [framework-agnostic]
     steps:
       - uses: actions/checkout@v4
