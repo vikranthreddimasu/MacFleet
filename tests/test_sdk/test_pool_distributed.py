@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+import secrets
+
 import pytest
 
 
@@ -73,7 +75,7 @@ class TestPoolDistributedFlag:
 
         pool = Pool(
             name="pool-test-1",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -103,7 +105,7 @@ class TestPoolDistributedFlag:
 
         with Pool(
             name="pool-test-2",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -119,15 +121,18 @@ class TestPoolDistributedFlag:
 
         pool = Pool(
             name="pool-test-3",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
             quorum_size=2,  # need 2, will only see 1
             quorum_timeout_sec=1.0,  # fail fast
         )
-        with pytest.raises(TimeoutError) as excinfo:
-            pool.join()
+        try:
+            with pytest.raises(TimeoutError) as excinfo:
+                pool.join()
+        finally:
+            pool.leave()
         # Remediation text should mention `macfleet status` and manual peers
         assert "macfleet status" in str(excinfo.value)
         assert "peers=" in str(excinfo.value)
@@ -139,7 +144,7 @@ class TestPoolDistributedFlag:
 
         pool = Pool(
             name="pool-test-4",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -159,7 +164,7 @@ class TestPoolDistributedFlag:
 
         with Pool(
             name="pool-test-5",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
