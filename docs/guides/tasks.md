@@ -53,6 +53,13 @@ Submission writes share the dispatcher deadline. Workers allow at most one
 additional task-timeout interval to send a result, so shutdown cannot wait
 indefinitely for a coordinator that has stopped reading.
 
+Restarting a stopped worker raises `RuntimeError` while any previous callable
+is still executing. Wait for those calls to finish before restarting; their
+threads still count toward the concurrency limit. After a worker transport
+connection is replaced, the dispatcher attaches a result listener when the
+next task is submitted. Pending calls on the old connection fail explicitly;
+they are not retried automatically because they may already have run.
+
 ## Why not just `pool.submit(lambda x: ..., x)`?
 
 Undecorated functions are rejected by default:

@@ -512,12 +512,17 @@ class Pool:
             self._joined = True
             return
 
-        self._start_agent()
+        try:
+            self._start_agent()
+        except BaseException:
+            # __exit__ is not called when __enter__/join fails or is interrupted.
+            self.leave()
+            raise
         self._joined = True
 
     def leave(self) -> None:
         """Gracefully leave the pool."""
-        if not self._joined:
+        if not self._joined and self._agent is None and self._loop is None:
             return
 
         if self._agent is not None and self._loop is not None:
@@ -529,8 +534,7 @@ class Pool:
             except Exception as e:
                 fut.cancel()
                 logger.warning("Pool.leave: agent stop raised %s", e)
-            self._agent = None
-
+        self._agent = None
         self._teardown_loop()
         self._joined = False
 

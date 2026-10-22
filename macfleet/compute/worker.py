@@ -61,38 +61,43 @@ class TaskWorker:
         # can't collect them mid-run (asyncio create_task is fire-and-forget
         # with only a weak reference inside the event loop).
         self._inflight: set[asyncio.Task] = set()
+        self._executions: set[asyncio.Future] = set()
+        self._lifecycle_lock = asyncio.Lock()
         self._running = False
 
     async def start(self) -> None:
         """Start listening for tasks from the coordinator."""
-        if self._running:
-            raise RuntimeError("TaskWorker is already running")
-        self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
-        self._running = True
-        self._listener_task = asyncio.create_task(self._listen_tasks(asyncio.Semaphore(self._max_workers)))
-        logger.info(
-            "TaskWorker started (max_workers=%d, coordinator=%s)",
-            self._max_workers, self._coordinator,
-        )
+        async with self._lifecycle_lock:
+            if self._running:
+                raise RuntimeError("TaskWorker is already running")
+            if any(not execution.done() for execution in self._executions):
+                raise RuntimeError("Previous worker tasks are still executing; wait before restarting")
+            self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+            self._running = True
+            self._listener_task = asyncio.create_task(self._listen_tasks(asyncio.Semaphore(self._max_workers)))
+            logger.info(
+                "TaskWorker started (max_workers=%d, coordinator=%s)",
+                self._max_workers, self._coordinator,
+            )
 
     async def stop(self) -> None:
         """Stop the worker and shut down the thread pool."""
-        self._running = False
-        if self._listener_task and not self._listener_task.done():
-            self._listener_task.cancel()
+        async with self._lifecycle_lock:
+            self._running = False
             try:
-                await self._listener_task
-            except asyncio.CancelledError:
-                pass
-        # Drain in-flight task wrappers so their results get sent before
-        # we tear down the transport. Execution and result delivery are each
-        # bounded by timeout_sec, even when the coordinator stops reading.
-        if self._inflight:
-            await asyncio.gather(*self._inflight, return_exceptions=True)
-            self._inflight.clear()
-        if self._executor:
-            self._executor.shutdown(wait=False, cancel_futures=True)
-            self._executor = None
+                if self._listener_task is not None:
+                    self._listener_task.cancel()
+                    await asyncio.gather(self._listener_task, return_exceptions=True)
+                # Drain results; each execution and send is bounded by timeout_sec.
+                await asyncio.gather(*self._inflight, return_exceptions=True)
+            finally:
+                inflight = tuple(self._inflight)
+                for task in inflight:
+                    task.cancel()
+                if self._executor:
+                    self._executor.shutdown(wait=False, cancel_futures=True)
+                    self._executor = None
+                await asyncio.gather(*inflight, return_exceptions=True)
 
     async def _listen_tasks(self, slots: asyncio.Semaphore) -> None:
         """Listen for TASK messages from the coordinator."""
@@ -138,6 +143,8 @@ class TaskWorker:
                 self._policy.authorize(spec, entry)
                 args, kwargs = spec.validated_args(entry)
                 execution = loop.run_in_executor(self._executor, partial(entry.fn, *args, **kwargs))
+                self._executions.add(execution)
+                execution.add_done_callback(self._executions.discard)
                 value = await asyncio.wait_for(
                     asyncio.shield(execution),
                     timeout=spec.timeout_sec,

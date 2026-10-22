@@ -115,6 +115,9 @@ class TorchEngine:
         self._model = model.to(self._device)
         self._optimizer = optimizer
         self._optimizer_layout()
+        if self._optimizer is not None and self._optimizer.state:
+            # PyTorch remaps moments to each parameter's device while preserving scalar step counters.
+            self._optimizer.load_state_dict(self._optimizer.state_dict())
         self._trainable_params = self._collect_trainable_params()
 
     def _collect_trainable_params(self) -> list[nn.Parameter]:
@@ -144,6 +147,16 @@ class TorchEngine:
         """Optimizer step."""
         if self._optimizer is None:
             raise RuntimeError("No optimizer loaded; call load_model(model, optimizer) before step()")
+        gradients = [
+            param.grad for group in self._optimizer.param_groups for param in group["params"]
+            if param.grad is not None
+        ]
+        finite = [
+            torch.isfinite(grad.coalesce().values() if grad.is_sparse else grad).all()
+            for grad in gradients
+        ]
+        if finite and not bool(torch.stack(finite).all()):
+            raise ValueError("Non-finite gradients; optimizer step aborted")
         self._optimizer.step()
 
     def zero_grad(self) -> None:

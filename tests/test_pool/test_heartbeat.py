@@ -1,5 +1,7 @@
 """Tests for gossip heartbeat failure detection."""
 
+import asyncio
+import time
 
 from macfleet.pool.heartbeat import (
     GossipHeartbeat,
@@ -89,3 +91,34 @@ async def test_failed_peer_is_probed_and_recovers():
     await heartbeat._gossip_round()
     assert recovered == ["peer"]
     assert heartbeat.peers["peer"].status == NodeStatus.ALIVE
+
+
+async def test_failure_from_replaced_peer_does_not_fail_new_endpoint():
+    failed = []
+    heartbeat = GossipHeartbeat("self", on_failed=failed.append)
+    heartbeat.add_peer("peer", "127.0.0.1", 12345)
+    old_peer = heartbeat.peers["peer"]
+    old_peer.status = NodeStatus.SUSPECTED
+    old_peer.last_seen = time.monotonic() - heartbeat.config.failure_timeout_sec - 1
+    ping_started = asyncio.Event()
+    finish_ping = asyncio.Event()
+
+    async def slow_failure(peer):
+        ping_started.set()
+        await finish_ping.wait()
+        return False
+
+    heartbeat._ping_peer = slow_failure
+    gossip = asyncio.create_task(heartbeat._gossip_round())
+    try:
+        await asyncio.wait_for(ping_started.wait(), 1)
+        heartbeat.add_peer("peer", "127.0.0.1", 23456)
+        finish_ping.set()
+        await asyncio.wait_for(gossip, 1)
+        assert failed == []
+        assert heartbeat.peers["peer"].status == NodeStatus.ALIVE
+        assert heartbeat.peers["peer"].missed_rounds == 0
+    finally:
+        finish_ping.set()
+        gossip.cancel()
+        await asyncio.gather(gossip, return_exceptions=True)

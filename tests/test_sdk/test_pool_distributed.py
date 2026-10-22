@@ -181,3 +181,46 @@ class TestPoolDistributedFlag:
                 "is_coordinator",
             ]:
                 assert field in n, f"Pool.nodes missing {field!r}: {n}"
+
+
+def test_interrupted_quorum_stops_agent_and_allows_rejoin(monkeypatch):
+    import asyncio
+    import time
+    from types import SimpleNamespace
+
+    import macfleet.sdk.pool as pool_module
+
+    monkeypatch.setattr(
+        "socket.gethostname",
+        lambda: "sat12-bq167-9ce84703-42a0-45a4-bdd1-bfc6d47b1ef7-728220639B35.local",
+    )
+    pool = pool_module.Pool(
+        token=secrets.token_hex(32), port=0, data_port=0,
+        enable_pool_distributed=True, quorum_size=2, quorum_timeout_sec=5,
+    )
+    running = {}
+
+    def interrupt_wait(_):
+        running.update(agent=pool._agent, loop=pool._loop, thread=pool._loop_thread)
+        raise KeyboardInterrupt
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(pool_module, "time", SimpleNamespace(monotonic=time.monotonic, sleep=interrupt_wait))
+            with pytest.raises(KeyboardInterrupt):
+                pool.join()
+        assert pool._agent is None
+        assert pool._loop is None
+        assert pool._loop_thread is None
+        assert not running["agent"]._running
+        assert running["loop"].is_closed()
+        assert not running["thread"].is_alive()
+        pool.quorum_size = 1
+        pool.join()
+        assert pool.is_distributed
+    finally:
+        # Clean up the pre-fix orphan so a failing regression cannot leak a fleet.
+        if not pool._joined and pool._agent is not None and pool._loop is not None:
+            asyncio.run_coroutine_threadsafe(pool._agent.stop(), pool._loop).result(timeout=5)
+            pool._teardown_loop()
+        pool.leave()

@@ -90,7 +90,8 @@ jobs:
         run: |
           python -m pytest tests/test_engines/test_mlx_engine.py \
             tests/test_sdk/test_sdk_mlx.py \
-            tests/test_integration/test_pool_training_processes.py -v
+            tests/test_integration/test_pool_training_processes.py \
+            tests/test_integration/test_training_safety.py -v
 
   integration:
     name: integration (macos-arm64, py3.12)

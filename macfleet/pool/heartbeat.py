@@ -190,6 +190,10 @@ class GossipHeartbeat:
 
         for peer in targets:
             alive = await self._ping_peer(peer)
+            # Discovery may remove or replace this endpoint while its ping is
+            # in flight. That old result says nothing about the new membership.
+            if self._peers.get(peer.node_id) is not peer or peer.status == NodeStatus.LEFT:
+                continue
             if alive:
                 self.record_heartbeat(peer.node_id)
             else:
@@ -287,6 +291,8 @@ class GossipHeartbeat:
                         fleet_key, resp_node_id, resp_nonce, nonce, resp_sig,
                         hw_json=resp_hw,
                     ):
+                        return False
+                    if self._peers.get(peer.node_id) is not peer or peer.status == NodeStatus.LEFT:
                         return False
                     if self._on_peer_hw is not None:
                         try:
