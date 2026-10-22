@@ -247,7 +247,7 @@ class MLXEngine:
         flat_grads = _flatten_params(self._grads)
         arrays = []
         for _, grad_array in flat_grads:
-            arrays.append(np.array(grad_array, dtype=np.float32).flatten())
+            arrays.append(np.array(grad_array.astype(mx.float32)).flatten())
 
         if not arrays:
             return np.array([], dtype=np.float32)
@@ -295,7 +295,7 @@ class MLXEngine:
         flat_params = _flatten_params(self._model.parameters())
         arrays = []
         for _, param_array in flat_params:
-            arrays.append(np.array(param_array, dtype=np.float32).flatten())
+            arrays.append(np.array(param_array.astype(mx.float32)).flatten())
 
         if not arrays:
             return np.array([], dtype=np.float32)
@@ -332,17 +332,23 @@ class MLXEngine:
         under an "__opt__." prefix so resuming preserves the optimizer
         instead of cold-starting its moment estimates.
         """
-        state = {"__optimizer_config__": np.array(self._optimizer_signature())}
-        for name, arr in _flatten_params(self._model.parameters()):
-            state[name] = np.array(arr)
-
+        flat = _flatten_params(self._model.parameters())
         if self._optimizer is not None:
             from mlx.utils import tree_flatten
 
             flat_state: list[tuple[str, Any]] = []
             tree_flatten(self._optimizer.state, destination=flat_state)
-            for name, arr in flat_state:
-                state[f"__opt__.{name}"] = np.array(arr)
+            flat.extend((f"__opt__.{name}", arr) for name, arr in flat_state)
+        state = {"__optimizer_config__": np.array(self._optimizer_signature())}
+        bfloat16_names = []
+        for name, arr in flat:
+            if isinstance(arr, mx.array) and arr.dtype == mx.bfloat16:
+                # NumPy cannot represent bfloat16; preserve its bits and dtype separately.
+                arr = arr.view(mx.uint16)
+                bfloat16_names.append(name)
+            state[name] = np.array(arr)
+        if bfloat16_names:
+            state["__bfloat16__"] = np.array(bfloat16_names)
         buffer = io.BytesIO()
         np.savez(buffer, **state)  # type: ignore[arg-type]  # numpy 2.x stubs expose allow_pickle:bool; **state is safe here
         return buffer.getvalue()
@@ -354,9 +360,31 @@ class MLXEngine:
         params = self._model.parameters()
         flat = _flatten_params(params)
         with np.load(io.BytesIO(data), allow_pickle=False) as state:
+            bfloat16_names: set[str] = set()
+            if "__bfloat16__" in state:
+                dtype_names = state["__bfloat16__"]
+                if dtype_names.ndim != 1 or dtype_names.dtype.kind != "U":
+                    raise ValueError("Invalid checkpoint bfloat16 metadata")
+                bfloat16_names = set(dtype_names.tolist())
+                if not bfloat16_names <= set(state.files) - {"__bfloat16__", "__optimizer_config__"}:
+                    raise ValueError("Checkpoint bfloat16 metadata references missing arrays")
+
+            def restore(name: str) -> Any:
+                saved = state[name]
+                if name in bfloat16_names:
+                    if saved.dtype != np.uint16:
+                        raise ValueError(f"Invalid checkpoint bfloat16 storage for {name}")
+                    restored = mx.array(saved).view(mx.bfloat16)
+                else:
+                    restored = mx.array(saved)
+                if not bool(mx.isfinite(restored).all()):
+                    raise ValueError(f"Checkpoint contains non-finite values for {name}")
+                return restored
+
             names = {name for name, _ in flat}
             saved_names = {name for name in state.files
-                           if not name.startswith("__opt__.") and name != "__optimizer_config__"}
+                           if not name.startswith("__opt__.")
+                           and name not in {"__optimizer_config__", "__bfloat16__"}}
             if names != saved_names:
                 raise ValueError("Checkpoint model parameters do not match the loaded model")
             new_flat = []
@@ -364,9 +392,9 @@ class MLXEngine:
                 saved = state[name]
                 if saved.shape != arr.shape:
                     raise ValueError(f"Checkpoint shape mismatch for {name}: {saved.shape} != {arr.shape}")
-                new_flat.append((name, mx.array(saved)))
+                new_flat.append((name, restore(name)))
             opt_flat = [
-                (name.removeprefix("__opt__."), mx.array(state[name]))
+                (name.removeprefix("__opt__."), restore(name))
                 for name in state.files if name.startswith("__opt__.")
             ]
             if self._optimizer is not None and opt_flat:

@@ -302,26 +302,123 @@ class TestMLXCheckpointing:
         )
 
 
-def test_checkpoint_resumes_fresh_adam_exactly():
+@pytest.mark.parametrize("dtype", [mlx.float32, mlx.bfloat16])
+def test_checkpoint_resumes_fresh_adam_exactly(dtype):
     import mlx.core as mx
 
     def loss(model, x):
         return mx.sum(model(x) ** 2)
 
     first = MLXEngine()
-    first.load_model(nn.Linear(2, 1), optim.Adam(learning_rate=0.01), loss_fn=loss)
-    batch = mx.ones((2, 2))
+    model = nn.Linear(2, 1)
+    model.set_dtype(dtype)
+    first.load_model(model, optim.Adam(learning_rate=0.01), loss_fn=loss)
+    batch = mx.ones((2, 2), dtype=dtype)
     first.forward(batch)
     first.step()
     checkpoint = first.state_dict()
     resumed = MLXEngine()
     resumed.load_model(nn.Linear(2, 1), optim.Adam(learning_rate=0.01), loss_fn=loss)
     resumed.load_state_dict(checkpoint)
+    for (_, original), (_, restored) in zip(
+        _flatten_params(first.model.parameters()) + _flatten_params(first._optimizer.state),
+        _flatten_params(resumed.model.parameters()) + _flatten_params(resumed._optimizer.state),
+        strict=True,
+    ):
+        assert restored.dtype == original.dtype
+        assert bool(mx.array_equal(restored, original))
     for engine in (first, resumed):
         engine.zero_grad()
         engine.forward(batch)
         engine.step()
     np.testing.assert_array_equal(first.get_flat_parameters(), resumed.get_flat_parameters())
+
+
+async def test_bfloat16_distributed_setup_and_gradient_sync():
+    import asyncio
+
+    from macfleet.comm.collectives import CollectiveGroup
+    from macfleet.comm.transport import PeerTransport
+    from macfleet.training.data_parallel import DataParallel
+
+    engines = []
+    for seed in (41, 42):
+        mlx.random.seed(seed)
+        model = nn.Linear(2, 1)
+        model.set_dtype(mlx.bfloat16)
+        engine = MLXEngine()
+        engine.load_model(model, optim.Adam(.01), loss_fn=lambda m, x: mlx.sum(m(x) ** 2))
+        engines.append(engine)
+    assert not np.array_equal(engines[0].get_flat_parameters(), engines[1].get_flat_parameters())
+    transports = [PeerTransport(local_id=f"bf16-{rank}") for rank in range(2)]
+    connected = asyncio.Event()
+    try:
+        await transports[1].start_server("127.0.0.1", 0, on_connect=lambda *_: connected.set())
+        port = transports[1]._server.sockets[0].getsockname()[1]
+        await transports[0].connect("bf16-1", "127.0.0.1", port)
+        await asyncio.wait_for(connected.wait(), 5)
+        parallel = [
+            DataParallel(engine, CollectiveGroup(
+                rank=rank, world_size=2, transport=transports[rank], rank_to_peer={1 - rank: f"bf16-{1 - rank}"},
+            )) for rank, engine in enumerate(engines)
+        ]
+        await asyncio.wait_for(asyncio.gather(*(dp.setup() for dp in parallel)), 10)
+        np.testing.assert_array_equal(engines[0].get_flat_parameters(), engines[1].get_flat_parameters())
+        for rank, engine in enumerate(engines):
+            loss = engine.forward(mlx.full((2, 2), rank + 1, dtype=mlx.bfloat16))
+            engine.backward(loss)
+        await asyncio.wait_for(asyncio.gather(*(dp.sync_gradients() for dp in parallel)), 10)
+        np.testing.assert_array_equal(engines[0].get_flat_gradients(), engines[1].get_flat_gradients())
+        for engine in engines:
+            engine.step()
+            assert all(arr.dtype == mlx.bfloat16 for _, arr in _flatten_params(engine.model.parameters()))
+        np.testing.assert_array_equal(engines[0].get_flat_parameters(), engines[1].get_flat_parameters())
+    finally:
+        await asyncio.gather(*(transport.disconnect_all() for transport in transports))
+
+
+@pytest.mark.parametrize("metadata", [np.array("weight"), np.array(["missing"]), np.array(["weight"])])
+def test_checkpoint_rejects_invalid_bfloat16_metadata_before_mutation(metadata):
+    import io
+
+    engine = MLXEngine()
+    engine.load_model(nn.Linear(2, 1))
+    before = engine.get_flat_parameters()
+    buffer = io.BytesIO()
+    np.savez(buffer, **{
+        name: np.zeros(arr.shape, dtype=np.float32) for name, arr in _flatten_params(engine.model.parameters())
+    }, __bfloat16__=metadata)
+    with pytest.raises(ValueError, match="bfloat16"):
+        engine.load_state_dict(buffer.getvalue())
+    np.testing.assert_array_equal(engine.get_flat_parameters(), before)
+
+
+@pytest.mark.parametrize("dtype", [mlx.float32, mlx.bfloat16])
+@pytest.mark.parametrize("name", ["weight", "__opt__.weight.m"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_checkpoint_rejects_nonfinite_model_and_moments_before_mutation(dtype, name, value):
+    import io
+
+    source = MLXEngine()
+    model = nn.Linear(2, 1)
+    model.set_dtype(dtype)
+    source.load_model(model, optim.Adam(.01), loss_fn=lambda m, x: mlx.sum(m(x) ** 2))
+    source.forward(mlx.ones((2, 2), dtype=dtype))
+    source.step()
+    with np.load(io.BytesIO(source.state_dict()), allow_pickle=False) as saved:
+        state = dict(saved)
+    replacement = mlx.full(state[name].shape, value, dtype=dtype)
+    state[name] = np.array(replacement.view(mlx.uint16) if dtype == mlx.bfloat16 else replacement)
+    buffer = io.BytesIO()
+    np.savez(buffer, **state)
+    target = MLXEngine()
+    target.load_model(nn.Linear(2, 1), optim.Adam(.01))
+    before_params = target.get_flat_parameters()
+    before_optimizer = target._optimizer.state
+    with pytest.raises(ValueError, match="non-finite"):
+        target.load_state_dict(buffer.getvalue())
+    np.testing.assert_array_equal(target.get_flat_parameters(), before_params)
+    assert target._optimizer.state is before_optimizer
 
 
 def test_incomplete_checkpoint_rejected_before_model_mutation():
