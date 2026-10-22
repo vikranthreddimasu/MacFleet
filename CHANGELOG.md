@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Reliability and simplification
 
+- Retire all training mesh listeners before starting another session, preventing
+  fast ranks from connecting to a previous session during teardown.
+- Isolate simulated Macs' Metal compiler caches in process tests and retain
+  native timeout diagnostics for blocked GPU calls.
+
 - Clean up interrupted pool joins before propagating the error, allowing the
   same Pool instance to join again without leaving background agents behind.
 - Move initialized Torch optimizer state with the model onto MPS, and reject

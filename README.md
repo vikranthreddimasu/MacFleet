@@ -192,6 +192,9 @@ make lint       # ruff + mypy
 make help       # list dev targets
 ```
 
+See [distributed test isolation and timeout diagnostics](docs/development/testing.md)
+for the process-test requirements and regression coverage.
+
 ## License
 
 MIT
