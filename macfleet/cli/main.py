@@ -1555,8 +1555,8 @@ Written by `macfleet quickstart`. Run it:
     python {filename}
 
 If you've paired a second Mac via `macfleet join --bootstrap` + `macfleet pair`,
-set `enable_pool_distributed=True` below and run THIS SAME SCRIPT on both Macs
-to spread training across them (each Mac becomes one rank; gradients are
+stop `macfleet join` on both Macs, set `enable_pool_distributed=True` below,
+and run THIS SAME SCRIPT on both Macs (each Mac becomes one rank; gradients are
 averaged every step).
 """
 
@@ -1588,6 +1588,7 @@ def main() -> None:
         engine="torch",
         # Flip to True after pairing a second Mac (see docs/getting-started/pairing.md)
         enable_pool_distributed=False,
+        quorum_size=2,  # Wait for both Macs before distributed training.
     ) as pool:
         print(f"Pool world size: {{pool.world_size}}")
         result = pool.train(
