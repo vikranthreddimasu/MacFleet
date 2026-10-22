@@ -125,6 +125,27 @@ class HardwareExchange:
     mps_available: bool = False
     mlx_available: bool = False
     data_port: int = 0
+    heartbeat_port: int = 0
+
+    def __post_init__(self) -> None:
+        for name, maximum in (("wire_version", 255), ("gpu_cores", 1024),
+                              ("data_port", 65535), ("heartbeat_port", 65535)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+                raise ValueError(f"{name} must be an integer between 0 and {maximum}")
+        for name in ("ram_gb", "memory_bandwidth_gbps"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or value < 0 or not math.isfinite(value)):
+                raise ValueError(f"{name} must be non-negative and finite")
+        if not math.isfinite(self.gpu_cores * 10.0 + self.memory_bandwidth_gbps * 2.0 + self.ram_gb):
+            raise ValueError("Hardware compute score must be finite")
+        for name in ("has_ane", "mps_available", "mlx_available"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
+        if (not isinstance(self.chip_name, str) or not self.chip_name or not self.chip_name.isprintable()
+                or len(self.chip_name.encode("utf-8")) > 128):
+            raise ValueError("chip_name must be printable text between 1 and 128 bytes")
 
     def to_json_bytes(self) -> bytes:
         """Stable JSON encoding (sort_keys so HMAC is deterministic)."""
@@ -145,7 +166,7 @@ class HardwareExchange:
             known = {f for f in cls.__dataclass_fields__}
             filtered = {k: v for k, v in payload.items() if k in known}
             return cls(**filtered)
-        except (ValueError, TypeError, UnicodeDecodeError) as e:
+        except (ValueError, TypeError, OverflowError) as e:
             raise HandshakeHwValidationError(f"HW payload deserialization failed: {e}") from e
 
 

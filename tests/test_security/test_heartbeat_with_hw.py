@@ -12,15 +12,21 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
+from dataclasses import replace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from macfleet.comm.transport import HardwareExchange
 from macfleet.pool.agent import PoolAgent
+from macfleet.pool.network import NetworkTopology
 from macfleet.security.auth import (
     HW_HANDSHAKE_MAX_JSON_BYTES,
     SecurityConfig,
+    create_client_ssl_context,
+    sign_heartbeat_response,
     sign_heartbeat_with_hw,
     verify_heartbeat_with_hw,
 )
@@ -490,3 +496,133 @@ class TestAddManualPeerCapabilityExchange:
 # Pytest-asyncio auto mode handles async tests via pyproject asyncio_mode setting.
 # No explicit `@pytest.mark.asyncio` needed.
 _ = pytest  # silence unused-import warning if pytest not referenced elsewhere
+
+
+@pytest.fixture
+async def manual_agents(monkeypatch):
+    """Run real TLS heartbeat servers with mDNS entirely disabled."""
+    token = secrets.token_hex(32)
+    profile = _start_agent(token).hardware
+    monkeypatch.setattr("macfleet.pool.agent.profile_hardware", lambda: replace(profile))
+    monkeypatch.setattr("macfleet.pool.agent.get_network_topology", NetworkTopology)
+    agents = []
+
+    async def start(name, peers=None):
+        agent = PoolAgent(name=name, port=0, data_port=0, token=token, peers=peers)
+        monkeypatch.setattr(agent._discovery, "async_register_node", AsyncMock())
+        monkeypatch.setattr(agent._discovery, "start_discovery", Mock())
+        agents.append(agent)
+        await agent.start()
+        return agent
+
+    yield start
+    for agent in reversed(agents):
+        await agent.stop()
+
+
+async def test_one_manual_peer_forms_mutual_membership_without_mdns(manual_agents):
+    bob = await manual_agents("bob")
+    alice = await manual_agents("alice", [f"127.0.0.1:{bob.port}"])
+    async with asyncio.timeout(2):
+        while alice.registry.world_size != 2 or bob.registry.world_size != 2:
+            await asyncio.sleep(0.01)
+    for receiver, peer in ((alice, bob), (bob, alice)):
+        record = receiver.registry.get_node(peer.node_id)
+        assert record.ip_address == "127.0.0.1"
+        assert record.port == peer.port
+        assert record.data_port == peer.data_port
+        assert record.port != record.data_port
+        assert record.is_alive
+        assert record.hardware.gpu_cores == peer.hardware.gpu_cores
+
+
+@pytest.mark.parametrize("invalid_reply", ["identity", "replayed_nonce", "invalid_hardware", "nan_hardware"])
+async def test_reverse_probe_requires_fresh_matching_identity(manual_agents, invalid_reply):
+    bob = await manual_agents("bob")
+    original_nonce = secrets.token_bytes(16)
+    received = asyncio.Event()
+    reply = asyncio.Event()
+    probes = []
+
+    async def endpoint(reader, writer):
+        try:
+            request = await reader.readline()
+            request_nonce = bytes.fromhex(request.decode().split(" ")[2])
+            probes.append(request_nonce)
+            received.set()
+            await reply.wait()
+            node_id = "different-peer" if invalid_reply == "identity" else "claimed-peer"
+            signed_nonce = original_nonce if invalid_reply == "replayed_nonce" else request_nonce
+            response_nonce = secrets.token_bytes(16)
+            hardware = None
+            if invalid_reply == "invalid_hardware":
+                hardware = b'{"gpu_cores":"oops"}'
+            elif invalid_reply == "nan_hardware":
+                hardware = b'{"ram_gb":NaN}'
+            signature = sign_heartbeat_response(
+                bob._security.fleet_key, node_id, response_nonce, signed_nonce, hw_json=hardware,
+            )
+            suffix = f" {hardware.hex()}" if hardware is not None else ""
+            writer.write(f"APONG {node_id} {response_nonce.hex()} {signature.hex()}{suffix}\n".encode())
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(endpoint, "127.0.0.1", 0, ssl=bob._heartbeat_ssl_ctx)
+    port = server.sockets[0].getsockname()[1]
+    hardware = json.dumps({"heartbeat_port": port, "data_port": 50052}).encode()
+    signature = sign_heartbeat_with_hw(bob._security.fleet_key, "claimed-peer", original_nonce, hardware)
+    captured_ping = f"APING claimed-peer {original_nonce.hex()} {signature.hex()} {hardware.hex()}\n".encode()
+
+    async def replay_ping():
+        reader, writer = await asyncio.open_connection("127.0.0.1", bob.port, ssl=create_client_ssl_context())
+        try:
+            writer.write(captured_ping)
+            await writer.drain()
+            assert (await reader.readline()).startswith(b"APONG")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    try:
+        await asyncio.gather(replay_ping(), replay_ping())
+        await asyncio.wait_for(received.wait(), 1)
+        assert bob.registry.get_node("claimed-peer") is None
+        assert len(probes) == 1
+        assert probes[0] != original_nonce
+        reply.set()
+        async with asyncio.timeout(2):
+            while bob._peer_probes:
+                await asyncio.sleep(0.01)
+        assert bob.registry.world_size == 1
+        assert bob.registry.get_node("different-peer") is None
+        assert bob.registry.get_node("claimed-peer") is None
+    finally:
+        reply.set()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("start_probes", [True, False])
+async def test_reverse_probes_are_bounded_coalesced_and_cancelled_on_stop(manual_agents, monkeypatch, start_probes):
+    bob = await manual_agents("bob")
+
+    async def blocked_probe(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    probe = AsyncMock(side_effect=blocked_probe)
+    monkeypatch.setattr(bob, "_add_manual_peer", probe)
+    hardware = HardwareExchange(heartbeat_port=50051, data_port=50052)
+    for index in range(40):
+        for _ in range(2):
+            bob._queue_peer_probe(f"peer-{index}", "127.0.0.1", hardware)
+    assert len(bob._peer_probes) == 32
+    tasks = list(bob._peer_probes.values())
+    if start_probes:
+        async with asyncio.timeout(1):
+            while probe.await_count != 32:
+                await asyncio.sleep(0)
+    await asyncio.wait_for(bob.stop(), 1)
+    assert not bob._peer_probes
+    assert all(task.done() for task in tasks)

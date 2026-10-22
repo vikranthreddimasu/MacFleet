@@ -7,6 +7,7 @@ and A7 (wire_version byte in the payload).
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -36,11 +37,37 @@ class TestHardwareExchangeDataclass:
         hw = HardwareExchange()
         assert hw.wire_version == HW_HANDSHAKE_WIRE_VERSION
 
+    def test_legacy_hardware_defaults_to_no_reverse_discovery(self):
+        assert HardwareExchange.from_json_bytes(b'{"data_port":50052}').heartbeat_port == 0
+
+    @pytest.mark.parametrize("port", [-1, 65536, True, 1.5, "50051", None])
+    def test_rejects_invalid_heartbeat_port(self, port):
+        with pytest.raises(HandshakeHwValidationError, match="heartbeat_port"):
+            HardwareExchange.from_json_bytes(json.dumps({"heartbeat_port": port}).encode())
+
+    @pytest.mark.parametrize("field,value", [
+        ("wire_version", True), ("wire_version", -1), ("wire_version", 256),
+        ("gpu_cores", "oops"), ("gpu_cores", True), ("gpu_cores", -1), ("gpu_cores", 1025),
+        ("ram_gb", "16"), ("ram_gb", True), ("ram_gb", -1), ("ram_gb", float("nan")),
+        ("memory_bandwidth_gbps", float("inf")), ("memory_bandwidth_gbps", -1),
+        ("memory_bandwidth_gbps", 10 ** 400),
+        ("data_port", True), ("data_port", -1), ("data_port", 65536),
+        ("has_ane", 1), ("mps_available", "true"), ("mlx_available", None),
+        ("chip_name", 12), ("chip_name", ""), ("chip_name", "a\nb"), ("chip_name", "a" * 129),
+    ])
+    def test_rejects_malformed_hardware_fields(self, field, value):
+        with pytest.raises(HandshakeHwValidationError):
+            HardwareExchange.from_json_bytes(json.dumps({field: value}).encode())
+
+    def test_rejects_overflowing_compute_score(self):
+        with pytest.raises(HandshakeHwValidationError):
+            HardwareExchange.from_json_bytes(b'{"memory_bandwidth_gbps":1e308}')
+
     def test_roundtrip_json(self):
         hw = HardwareExchange(
             gpu_cores=40, ram_gb=192.0, memory_bandwidth_gbps=800.0,
             chip_name="Apple M4 Ultra", has_ane=True,
-            mps_available=True, mlx_available=True, data_port=50052,
+            mps_available=True, mlx_available=True, data_port=50052, heartbeat_port=50051,
         )
         data = hw.to_json_bytes()
         hw2 = HardwareExchange.from_json_bytes(data)

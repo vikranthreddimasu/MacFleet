@@ -44,6 +44,22 @@ Defaults:
 - Uses: 1 Mac
 - Token destination: `~/.macfleet/fleet-token`
 
+## When automatic discovery is unavailable
+
+After pairing, leave `macfleet join` running on the first Mac and start the
+second with the first Mac's reachable IP address and heartbeat port:
+
+```bash
+macfleet join --peer 192.168.1.10:50051
+```
+
+Updated token-protected peers verify each other's listening endpoints with
+fresh authenticated replies, so this single address establishes membership
+on both Macs without mDNS. Both Macs need reachable TCP ports; this cannot
+bypass network client isolation. Automatic reciprocal discovery requires the
+updated secure protocol. Open-mode and older peers retain their existing
+manual discovery behavior.
+
 ## Pairing More Than One Mac
 
 Use `--enroll-uses` when you intentionally want one command to enroll

@@ -18,6 +18,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Verify authenticated discovery, fleet isolation, and public Torch/MLX training
   across independent processes, including matching final parameter hashes.
 
+- Bound task submission and result-delivery writes so backpressure cannot
+  strand a caller or worker shutdown.
+- Preserve bfloat16 MLX parameters and optimizer moments through NumPy exports
+  and checkpoints; reject non-finite checkpoint values before mutation.
+- Allocate weighted batches on a shared global schedule and reject mismatched
+  rank schedules or clipping settings before optimizer updates.
+- Reject oversized handshake headers before reading their bodies and validate
+  exchanged hardware values before using them in membership or scheduling.
+- Form reciprocal authenticated membership from a single manual peer address,
+  using a fresh reverse challenge when mDNS is unavailable.
+
 ### Security (v3 handshake — all nodes in a secure fleet must upgrade together)
 
 - **Closed the unauthenticated HMAC oracle.** A secure server used to
@@ -48,12 +59,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Setup UX
 
-- **First `macfleet join` auto-prints the pairing QR + URL** (and
-  copies the URL to the pasteboard) when it generates a fresh fleet
-  token — pairing a second Mac needs zero extra flags: Mac #1
-  `macfleet join`, Mac #2 `macfleet pair && macfleet join`.
-  `--bootstrap` still re-prints pairing info for an existing token.
-  Degrades to URL-only (with an install hint) when `qrcode` is absent.
+- **Short-lived enrollment codes.** `macfleet join --bootstrap` displays
+  a one-time enrollment command. Normal pairing does not print or copy the
+  permanent fleet token; legacy token URLs remain an explicit migration path.
 - **`macfleet doctor` gained a Security section**: fleet token
   configured, token length, token file permissions (0600).
 
