@@ -785,13 +785,21 @@ class PeerTransport:
             ssl_shutdown_timeout=5.0 if self._server_ssl_ctx else None,
         )
 
+    def stop_accepting(self) -> None:
+        """Retire the listener while keeping established peer connections usable.
+
+        Keep the server reference for stop_server() to drain later. In Python
+        3.13, awaiting wait_closed() here would wait for the still-live peers.
+        """
+        self._stopping = True
+        if self._server is not None:
+            self._server.close()
+
     async def stop_server(self) -> None:
         """Stop the server and close all connections."""
         async with self._shutdown_lock:
-            self._stopping = True
+            self.stop_accepting()
             server, self._server = self._server, None
-            if server is not None:
-                server.close()
             tasks = list(self._client_tasks | self._connect_tasks)
             for task in tasks:
                 task.cancel()
