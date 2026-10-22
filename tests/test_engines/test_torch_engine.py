@@ -260,3 +260,87 @@ def test_optimizer_for_another_model_is_rejected():
     other = torch.nn.Linear(1, 1)
     with pytest.raises(ValueError, match="outside the loaded model"):
         TorchEngine(device="cpu").load_model(model, torch.optim.SGD(other.parameters(), lr=.1))
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+@pytest.mark.parametrize("optimizer_type", [torch.optim.Adam, torch.optim.SGD])
+def test_loading_initialized_optimizer_preserves_training_on_target_device(device, optimizer_type):
+    import copy
+
+    from macfleet.engines.torch_engine import _mps_actually_works
+
+    if device == "mps" and (not torch.backends.mps.is_available() or not _mps_actually_works()):
+        pytest.skip("MPS device is unavailable")
+    torch.manual_seed(52)
+    model = nn.Linear(2, 1)
+    options = {"momentum": 0.9} if optimizer_type is torch.optim.SGD else {}
+    optimizer = optimizer_type([
+        {"params": [model.weight], "lr": 0.02},
+        {"params": [model.bias], "lr": 0.01},
+    ], **options)
+    batch = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    model(batch).square().mean().backward()
+    optimizer.step()
+    reference, reference_optimizer = copy.deepcopy((model, optimizer))
+
+    engine = TorchEngine(device=device)
+    engine.load_model(model, optimizer)
+    assert [group["lr"] for group in optimizer.param_groups] == [0.02, 0.01]
+    for parameter, state in optimizer.state.items():
+        for name, value in state.items():
+            if isinstance(value, torch.Tensor) and name != "step":
+                assert value.device == parameter.device
+    engine.zero_grad()
+    engine.backward(engine.forward(batch.to(device)).square().mean())
+    engine.step()
+    reference_optimizer.zero_grad()
+    reference(batch).square().mean().backward()
+    reference_optimizer.step()
+    for actual, expected in zip(model.parameters(), reference.parameters()):
+        torch.testing.assert_close(actual.cpu(), expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("invalid", ["nan", "inf"])
+def test_nonfinite_gradients_leave_model_and_optimizer_unchanged(invalid):
+    import copy
+
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    engine = TorchEngine(device="cpu")
+    engine.load_model(model, optimizer)
+    batch = torch.ones(1, 1)
+    engine.backward(engine.forward(batch).square().mean())
+    engine.step()
+    with torch.no_grad():
+        model.weight.zero_()
+    engine.zero_grad()
+    weight = model.weight[0, 0]
+    loss = (weight.square().sqrt() if invalid == "nan" else weight.sqrt()) + model.bias.sum()
+    engine.backward(loss)
+    before = engine.get_flat_parameters().copy()
+    state_before = copy.deepcopy(optimizer.state_dict())
+
+    with pytest.raises(ValueError, match="Non-finite gradients"):
+        engine.step()
+    np.testing.assert_array_equal(engine.get_flat_parameters(), before)
+    state_after = optimizer.state_dict()
+    assert state_after["param_groups"] == state_before["param_groups"]
+    for parameter, state in state_before["state"].items():
+        for name, value in state.items():
+            torch.testing.assert_close(state_after["state"][parameter][name], value, rtol=0, atol=0)
+
+    engine.zero_grad()
+    engine.backward(engine.forward(batch).square().mean())
+    engine.step()
+    assert np.isfinite(engine.get_flat_parameters()).all()
+    assert all(state["step"].item() == 2 for state in optimizer.state.values())
+
+
+def test_finite_sparse_gradients_still_train():
+    model = nn.Embedding(4, 2, sparse=True)
+    nn.init.zeros_(model.weight)
+    engine = TorchEngine(device="cpu")
+    engine.load_model(model, torch.optim.SGD(model.parameters(), lr=0.1))
+    engine.backward(engine.forward(torch.tensor([1, 1, 2])).sum())
+    engine.step()
+    torch.testing.assert_close(model.weight, torch.tensor([[0., 0.], [-.2, -.2], [-.1, -.1], [0., 0.]]))

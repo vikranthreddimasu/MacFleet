@@ -446,3 +446,45 @@ def test_checkpoint_rejects_different_adam_settings_before_mutation():
     with pytest.raises(ValueError, match="optimizer configuration"):
         target.load_state_dict(source.state_dict())
     np.testing.assert_array_equal(target.get_flat_parameters(), before)
+
+
+@pytest.mark.parametrize("invalid", ["nan", "inf"])
+def test_nonfinite_gradients_leave_model_and_optimizer_unchanged(invalid):
+    from mlx.utils import tree_flatten
+
+    def good_loss(model, inputs):
+        return mlx.mean(model(inputs) ** 2)
+
+    model = nn.Linear(1, 1)
+    optimizer = optim.Adam(learning_rate=0.01)
+    engine = MLXEngine()
+    engine.load_model(model, optimizer, loss_fn=good_loss)
+    batch = mlx.ones((1, 1))
+    engine.forward(batch)
+    engine.step()
+    model.weight = mlx.zeros_like(model.weight)
+
+    def bad_loss(model, inputs):
+        weight = model.weight[0, 0]
+        return mlx.sqrt(weight ** 2 if invalid == "nan" else weight) + mlx.sum(model.bias)
+
+    engine.load_model(model, optimizer, loss_fn=bad_loss)
+    engine.zero_grad()
+    loss = engine.forward(batch)
+    engine.backward(loss)
+    before = engine.get_flat_parameters().copy()
+    state_before = {name: np.array(value) for name, value in tree_flatten(optimizer.state)}
+    with pytest.raises(ValueError, match="Non-finite gradients"):
+        engine.step()
+    np.testing.assert_array_equal(engine.get_flat_parameters(), before)
+    state_after = dict(tree_flatten(optimizer.state))
+    assert state_before.keys() == state_after.keys()
+    for name, value in state_before.items():
+        np.testing.assert_array_equal(np.array(state_after[name]), value)
+
+    engine.load_model(model, optimizer, loss_fn=good_loss)
+    engine.zero_grad()
+    engine.forward(batch)
+    engine.step()
+    assert np.isfinite(engine.get_flat_parameters()).all()
+    assert int(optimizer.state["step"]) == 2

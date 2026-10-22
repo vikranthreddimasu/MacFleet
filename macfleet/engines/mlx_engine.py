@@ -219,6 +219,9 @@ class MLXEngine:
             raise RuntimeError("No optimizer loaded")
         if self._grads is None:
             raise RuntimeError("step() called without backward()")
+        finite = [mx.isfinite(grad).all() for _, grad in _flatten_params(self._grads)]
+        if finite and not bool(mx.stack(finite).all()):
+            raise ValueError("Non-finite gradients; optimizer step aborted")
 
         self._optimizer.update(self._model, self._grads)
         mx.eval(self._model.parameters(), self._optimizer.state)
