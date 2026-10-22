@@ -107,7 +107,8 @@ class WeightedDistributedSampler(Sampler[int]):
         if self.shuffle:
             g = torch.Generator()
             g.manual_seed(self.seed + self.epoch)
-            return torch.randperm(self._dataset_size, generator=g).tolist()
+            indices: list[int] = torch.randperm(self._dataset_size, generator=g).tolist()
+            return indices
         return list(range(self._dataset_size))
 
     def __iter__(self) -> Iterator[int]:
