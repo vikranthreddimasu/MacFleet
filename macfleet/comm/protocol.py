@@ -142,8 +142,8 @@ class WireMessage:
         )
 
     @classmethod
-    async def read_from_stream(cls, reader) -> "WireMessage":
-        """Read a single message from an asyncio StreamReader."""
+    async def read_from_stream(cls, reader, *, max_payload_size: int = MAX_PAYLOAD_SIZE) -> "WireMessage":
+        """Read a frame, enforcing the phase-specific limit before reading its body."""
         header_data = await reader.readexactly(HEADER_SIZE)
         stream_id, msg_type, flags, payload_size, sequence, checksum, reserved = struct.unpack(
             HEADER_FORMAT, header_data
@@ -156,9 +156,10 @@ class WireMessage:
             parsed_msg_type = MessageType(msg_type)
         except ValueError as exc:
             raise ValueError(f"Unknown wire message type: {msg_type}") from exc
-        if payload_size > MAX_PAYLOAD_SIZE:
+        payload_limit = min(max_payload_size, MAX_PAYLOAD_SIZE)
+        if payload_size > payload_limit:
             raise ValueError(
-                f"Payload size {payload_size} exceeds maximum {MAX_PAYLOAD_SIZE} "
+                f"Payload size {payload_size} exceeds maximum {payload_limit} "
                 f"— possible OOM attack or corrupt header"
             )
         payload = await reader.readexactly(payload_size)

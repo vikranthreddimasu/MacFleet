@@ -21,6 +21,7 @@ from typing import Any, Callable, Optional
 
 from macfleet.comm.protocol import (
     HEADER_SIZE,
+    MAX_PAYLOAD_SIZE,
     MessageFlags,
     MessageType,
     WireMessage,
@@ -50,6 +51,9 @@ from macfleet.security.auth import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Maximum ACK: node id, two challenges, and the bounded signed hardware suffix.
+_MAX_HANDSHAKE_PAYLOAD_SIZE = MAX_NODE_ID_BYTES + 3 * CHALLENGE_SIZE + HW_HANDSHAKE_MAX_JSON_BYTES + 5
 
 
 def _audit_transport_auth(event: str, **fields: Any) -> None:
@@ -260,12 +264,14 @@ class PeerConnection:
                 raise
             self.bytes_sent += len(data)
 
-    async def recv_message(self, timeout: Optional[float] = 120.0) -> WireMessage:
+    async def recv_message(
+        self, timeout: Optional[float] = 120.0, *, max_payload_size: int = MAX_PAYLOAD_SIZE,
+    ) -> WireMessage:
         """Receive a WireMessage with CRC32 verification."""
         async with self._recv_lock:
             try:
                 msg = await asyncio.wait_for(
-                    WireMessage.read_from_stream(self.reader),
+                    WireMessage.read_from_stream(self.reader, max_payload_size=max_payload_size),
                     timeout=timeout,
                 )
             except BaseException:
@@ -445,7 +451,7 @@ class PeerTransport:
 
                 # Read handshake: peer sends its ID (+ challenge if secure)
                 msg = await asyncio.wait_for(
-                    WireMessage.read_from_stream(reader),
+                    WireMessage.read_from_stream(reader, max_payload_size=MAX_NODE_ID_BYTES + 2 * CHALLENGE_SIZE),
                     timeout=self.config.connect_timeout_sec,
                 )
                 if msg.msg_type != MessageType.CONTROL:
@@ -583,7 +589,7 @@ class PeerTransport:
 
                     # Read peer's response to our challenge
                     msg2 = await asyncio.wait_for(
-                        WireMessage.read_from_stream(reader),
+                        WireMessage.read_from_stream(reader, max_payload_size=_MAX_HANDSHAKE_PAYLOAD_SIZE),
                         timeout=self.config.connect_timeout_sec,
                     )
                     try:
@@ -690,6 +696,8 @@ class PeerTransport:
                     await conn.send_message(ack)
 
             except Exception as e:
+                if isinstance(e, ValueError):
+                    self._rate_limiter.record_failure(peer_ip)
                 logger.debug("Handshake error from %s: %s", peer_ip, e)
                 _audit_transport_auth(
                     "transport.handshake_error",
@@ -857,7 +865,7 @@ class PeerTransport:
                 # almost always means a token mismatch.
                 try:
                     ack = await asyncio.wait_for(
-                        conn.recv_message(),
+                        conn.recv_message(max_payload_size=_MAX_HANDSHAKE_PAYLOAD_SIZE),
                         timeout=self.config.connect_timeout_sec,
                     )
                 except (asyncio.IncompleteReadError, ConnectionResetError, EOFError) as e:
@@ -997,7 +1005,7 @@ class PeerTransport:
                 await conn.send_message(handshake)
 
                 ack = await asyncio.wait_for(
-                    conn.recv_message(), timeout=self.config.connect_timeout_sec,
+                    conn.recv_message(max_payload_size=MAX_NODE_ID_BYTES), timeout=self.config.connect_timeout_sec,
                 )
                 if ack.msg_type != MessageType.CONTROL or ack.payload != peer_id.encode("utf-8"):
                     raise ConnectionError(f"Handshake identity mismatch: expected peer {peer_id!r}")

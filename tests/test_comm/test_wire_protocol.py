@@ -201,3 +201,20 @@ class TestMaxPayloadSize:
 
         with pytest.raises(ValueError, match="Unknown wire message type"):
             await WireMessage.read_from_stream(reader)
+
+
+async def test_phase_limit_rejects_header_before_reading_body():
+    reader = asyncio.StreamReader()
+    reader.feed_data(struct.pack(HEADER_FORMAT, 0, MessageType.CONTROL, 0, 65, 0, 0, 0))
+    with pytest.raises(ValueError, match="exceeds maximum 64"):
+        await asyncio.wait_for(WireMessage.read_from_stream(reader, max_payload_size=64), timeout=1)
+
+
+async def test_phase_limit_accepts_boundary_and_preserves_normal_frames():
+    payload = b"x" * 64
+    message = WireMessage(0, MessageType.CONTROL, MessageFlags.NONE, 0, payload)
+    reader = asyncio.StreamReader()
+    reader.feed_data(message.pack())
+    assert (await WireMessage.read_from_stream(reader, max_payload_size=64)).payload == payload
+    reader.feed_data(WireMessage(1, MessageType.GRADIENT, MessageFlags.NONE, 0, payload * 100).pack())
+    assert (await WireMessage.read_from_stream(reader)).payload == payload * 100
