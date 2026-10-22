@@ -92,6 +92,12 @@ jobs:
             tests/test_sdk/test_sdk_mlx.py \
             tests/test_integration/test_pool_training_processes.py \
             tests/test_integration/test_training_safety.py -v
+      - name: Trace repeated three-rank MLX training
+        run: |
+          for run in $(seq 1 20); do
+            echo "MLX three-rank reproduction $run"
+            python -m pytest 'tests/test_integration/test_pool_training_processes.py::test_pool_training_across_processes[3-mlx]' -v -s || exit "$?"
+          done
 
   integration:
     name: integration (macos-arm64, py3.12)
