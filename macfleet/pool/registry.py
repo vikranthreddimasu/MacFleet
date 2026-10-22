@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from macfleet.engines.base import HardwareProfile, ThermalPressure
@@ -167,20 +167,7 @@ class ClusterRegistry:
                 if new_data_port is not None and 0 < new_data_port < 65536
                 else old.data_port
             )
-            self._nodes[node_id] = NodeRecord(
-                node_id=old.node_id,
-                hostname=old.hostname,
-                ip_address=old.ip_address,
-                port=old.port,
-                data_port=chosen_data_port,
-                hardware=new_hw,
-                status=old.status,
-                joined_at=old.joined_at,
-                last_heartbeat=old.last_heartbeat,
-                throughput_samples_sec=old.throughput_samples_sec,
-                current_weight=old.current_weight,
-                network_links=old.network_links,
-            )
+            self._nodes[node_id] = replace(old, hardware=new_hw, data_port=chosen_data_port)
             self._elect_coordinator_locked()
 
     def get_node(self, node_id: str) -> Optional[NodeRecord]:

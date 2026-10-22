@@ -40,9 +40,8 @@ def _is_dialable_address(value: str) -> bool:
         return False
     if parsed.is_unspecified or parsed.is_multicast:
         return False
-    # macOS requires a scope id for IPv6 link-local addresses. We strip the
-    # zone suffix in network detection, so do not select or advertise them.
-    return not (parsed.version == 6 and parsed.is_link_local)
+    # Pool listeners currently bind IPv4; do not advertise unreachable IPv6 routes.
+    return parsed.version == 4
 
 
 def _telemetry_number(

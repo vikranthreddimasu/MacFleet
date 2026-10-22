@@ -21,7 +21,7 @@ import asyncio
 import math
 import struct
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import numpy as np
 
@@ -128,6 +128,18 @@ class CollectiveConfig:
             raise ValueError("recv_timeout_sec must be a positive finite number")
 
 
+async def _gather(*operations) -> list[Any]:
+    """Cancel and drain sibling IO before propagating an operation failure."""
+    tasks = [asyncio.create_task(operation) for operation in operations]
+    try:
+        return list(await asyncio.gather(*tasks))
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class CollectiveGroup:
     """A group of nodes participating in collective operations.
 
@@ -183,7 +195,10 @@ class CollectiveGroup:
         """Send a numpy array to the peer at the given rank."""
         peer_id = self._peer_for_rank(rank)
         payload = pack_array(array)
-        await self._transport.send(peer_id, payload, msg_type=MessageType.GRADIENT)
+        await asyncio.wait_for(
+            self._transport.send(peer_id, payload, msg_type=MessageType.GRADIENT),
+            timeout=self._config.recv_timeout_sec,
+        )
 
     async def _recv_array(self, rank: int) -> np.ndarray:
         """Receive a numpy array from the peer at the given rank."""
@@ -193,6 +208,18 @@ class CollectiveGroup:
             timeout=self._config.recv_timeout_sec,
         )
         return unpack_array(payload)
+
+    @staticmethod
+    def _validate_array(expected: np.ndarray, received: np.ndarray) -> None:
+        if expected.shape != received.shape or expected.dtype != received.dtype:
+            raise ValueError(
+                f"Collective array mismatch: expected {expected.shape}/{expected.dtype}, "
+                f"received {received.shape}/{received.dtype}. All ranks must use the same arrays."
+            )
+
+    def _validate_root(self, rank: int) -> None:
+        if isinstance(rank, bool) or not isinstance(rank, int) or not 0 <= rank < self.world_size:
+            raise ValueError(f"Collective root must be a rank in [0, {self.world_size}), got {rank!r}")
 
     # ------------------------------------------------------------------ #
     # AllReduce                                                          #
@@ -211,6 +238,9 @@ class CollectiveGroup:
         if op not in ("mean", "sum"):
             raise ValueError(f"Unknown reduction op: {op!r}. Valid ops: 'mean', 'sum'")
 
+        # Integer means must not truncate on the ring or overflow before division.
+        if op == "mean" and array.dtype.kind in "biu":
+            array = array.astype(np.float64)
         if self.world_size == 1:
             return array
 
@@ -234,7 +264,8 @@ class CollectiveGroup:
         async def _recv() -> np.ndarray:
             return await self._recv_array(peer_rank)
 
-        _, remote = await asyncio.gather(_send(), _recv())
+        _, remote = await _gather(_send(), _recv())
+        self._validate_array(array, remote)
 
         if op == "mean":
             return cast(np.ndarray, (array + remote) / 2.0)
@@ -284,7 +315,8 @@ class CollectiveGroup:
             async def _recv() -> np.ndarray:
                 return await self._recv_array(left_rank)
 
-            _, received = await asyncio.gather(_send(), _recv())
+            _, received = await _gather(_send(), _recv())
+            self._validate_array(chunks[recv_idx], received)
             chunks[recv_idx] = chunks[recv_idx] + received
 
         # Apply reduction
@@ -305,7 +337,8 @@ class CollectiveGroup:
             async def _recv() -> np.ndarray:
                 return await self._recv_array(left_rank)
 
-            _, received = await asyncio.gather(_send(), _recv())
+            _, received = await _gather(_send(), _recv())
+            self._validate_array(chunks[recv_idx], received)
             chunks[recv_idx] = received
 
         # Reassemble and restore shape
@@ -326,6 +359,7 @@ class CollectiveGroup:
         Returns:
             The broadcast array (identical on all nodes).
         """
+        self._validate_root(src)
         if self.world_size == 1:
             return array
 
@@ -335,7 +369,7 @@ class CollectiveGroup:
                 for r in range(self.world_size)
                 if r != src
             ]
-            await asyncio.gather(*sends)
+            await _gather(*sends)
             return array
         else:
             return await self._recv_array(src)
@@ -356,6 +390,7 @@ class CollectiveGroup:
         Returns:
             This rank's chunk of the array.
         """
+        self._validate_root(src)
         if self.world_size == 1:
             if array is None:
                 raise ValueError("src rank must provide array to scatter")
@@ -370,7 +405,7 @@ class CollectiveGroup:
                 for r in range(self.world_size)
                 if r != src
             ]
-            await asyncio.gather(*sends)
+            await _gather(*sends)
             return chunks[src]
         else:
             return await self._recv_array(src)
@@ -387,6 +422,7 @@ class CollectiveGroup:
         Returns:
             Stacked array on dst, None on other ranks.
         """
+        self._validate_root(dst)
         if self.world_size == 1:
             return np.expand_dims(array, 0)
 
@@ -395,7 +431,7 @@ class CollectiveGroup:
             chunks[dst] = array
 
             recv_ranks = [r for r in range(self.world_size) if r != dst]
-            results = await asyncio.gather(
+            results = await _gather(
                 *(self._recv_array(r) for r in recv_ranks)
             )
             for r, received in zip(recv_ranks, results):

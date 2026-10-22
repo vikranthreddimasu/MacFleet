@@ -20,63 +20,24 @@ import asyncio
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from functools import partial
+from typing import Optional
 
 from macfleet.comm.protocol import MessageType
 from macfleet.comm.transport import PeerTransport
 from macfleet.compute.authz import DEFAULT_TASK_POLICY, TaskAuthorizationError, TaskAuthorizationPolicy
-from macfleet.compute.models import TaskNotRegisteredError, TaskResult, TaskSpec
+from macfleet.compute.models import TaskResult, TaskSpec
 from macfleet.security.audit import audit_event
 
 logger = logging.getLogger(__name__)
 
 
-def _execute_task(spec: TaskSpec, policy: TaskAuthorizationPolicy) -> Any:
-    """Execute a registered task in a worker thread.
-
-    Looks up `task_name` in the process-local TaskRegistry — if the name
-    isn't registered, raises TaskNotRegisteredError. The worker process
-    MUST have imported the module that declares the task BEFORE accepting
-    TASK messages.
-    """
-    from pydantic import BaseModel
-
-    from macfleet.compute.registry import get_default_registry
-
-    entry = get_default_registry().get(spec.task_name)
-    if entry is None:
-        raise TaskNotRegisteredError(
-            spec.task_name, get_default_registry().names(),
-        )
-    policy.authorize(spec, entry)
-
-    # Apply schema validation if declared on the task
-    resolved_args: list = list(spec.args)
-    resolved_kwargs: dict = dict(spec.kwargs)
-    if entry.schema is not None:
-        if len(resolved_args) == 1 and isinstance(resolved_args[0], dict):
-            resolved_args = [entry.schema(**resolved_args[0])]
-        elif resolved_kwargs:
-            resolved_args = [entry.schema(**resolved_kwargs)]
-            resolved_kwargs = {}
-
-    result = entry.fn(*resolved_args, **resolved_kwargs)
-    # Return values are msgpack-native. Pydantic models get dumped for transport.
-    if isinstance(result, BaseModel):
-        return result.model_dump(mode="json")
-    return result
-
-
 class TaskWorker:
     """Receives tasks from coordinator, executes them, sends results.
 
-    v2.2 PR 7: switched from ProcessPoolExecutor to ThreadPoolExecutor.
-    The old process-pool isolation was a defense against arbitrary pickled
-    code crashing the worker process. Now that tasks are looked up by name
-    in a pre-registered TaskRegistry, the attack surface is gone — if a
-    registered task crashes, it's a bug in user code, not an RCE primitive.
-    Threads let the worker access in-process state (e.g. models loaded once
-    at startup) without re-forking for each call.
+    Only registered, authorized tasks enter the thread pool. Threads share
+    worker state and cannot be forcibly stopped; a timeout reports failure
+    but retains the execution slot until the underlying callable exits.
     """
 
     def __init__(
@@ -108,7 +69,7 @@ class TaskWorker:
             raise RuntimeError("TaskWorker is already running")
         self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
         self._running = True
-        self._listener_task = asyncio.create_task(self._listen_tasks())
+        self._listener_task = asyncio.create_task(self._listen_tasks(asyncio.Semaphore(self._max_workers)))
         logger.info(
             "TaskWorker started (max_workers=%d, coordinator=%s)",
             self._max_workers, self._coordinator,
@@ -124,8 +85,8 @@ class TaskWorker:
             except asyncio.CancelledError:
                 pass
         # Drain in-flight task wrappers so their results get sent before
-        # we tear down the transport. Each wrapper is bounded by its own
-        # timeout_sec, so this can't hang forever in steady state.
+        # we tear down the transport. Execution and result delivery are each
+        # bounded by timeout_sec, even when the coordinator stops reading.
         if self._inflight:
             await asyncio.gather(*self._inflight, return_exceptions=True)
             self._inflight.clear()
@@ -133,7 +94,7 @@ class TaskWorker:
             self._executor.shutdown(wait=False, cancel_futures=True)
             self._executor = None
 
-    async def _listen_tasks(self) -> None:
+    async def _listen_tasks(self, slots: asyncio.Semaphore) -> None:
         """Listen for TASK messages from the coordinator."""
         conn = self._transport.get_connection(self._coordinator)
         if conn is None:
@@ -143,7 +104,7 @@ class TaskWorker:
         while self._running:
             try:
                 msg = await conn.recv_message(
-                    timeout=self._transport.config.recv_timeout_sec,
+                    timeout=None,  # Task deadlines own liveness; an idle worker is not a failed worker.
                 )
                 if msg.msg_type == MessageType.TASK:
                     try:
@@ -151,90 +112,105 @@ class TaskWorker:
                     except ValueError as e:
                         logger.warning("Ignoring malformed TASK from %s: %s", self._coordinator, e)
                         continue
-                    inflight = asyncio.create_task(self._execute_and_reply(spec))
+                    await slots.acquire()
+                    inflight = asyncio.create_task(self._execute_and_reply(spec, slots))
                     self._inflight.add(inflight)
                     inflight.add_done_callback(self._inflight.discard)
             except asyncio.TimeoutError:
-                continue
+                logger.error("Coordinator connection timed out; reconnect before accepting more tasks")
+                return
             except asyncio.CancelledError:
                 return
-            except (ConnectionError, OSError) as e:
+            except (ConnectionError, OSError, EOFError, asyncio.IncompleteReadError, ValueError) as e:
                 logger.warning(
                     "Lost connection to coordinator %s: %s",
                     self._coordinator, e,
                 )
                 return
 
-    async def _execute_and_reply(self, spec: TaskSpec) -> None:
+    async def _execute_and_reply(self, spec: TaskSpec, slots: asyncio.Semaphore) -> None:
         """Execute a task in the thread pool and send the result back."""
         loop = asyncio.get_running_loop()
+        execution = None
         try:
-            value = await asyncio.wait_for(
-                loop.run_in_executor(
-                    self._executor,
-                    _execute_task,
-                    spec,
-                    self._policy,
-                ),
-                timeout=spec.timeout_sec,
-            )
-            result = TaskResult.success(spec.task_id, value)
-            audit_event(
-                "task.executed",
-                task_name=spec.task_name,
-                coordinator=self._coordinator,
-            )
-        except asyncio.TimeoutError:
-            result = TaskResult(
-                task_id=spec.task_id,
-                ok=False,
-                error=f"Task timed out after {spec.timeout_sec}s",
-            )
-        except TaskAuthorizationError as e:
-            audit_event(
-                "task.authorization_denied",
-                task_name=spec.task_name,
-                coordinator=self._coordinator,
-                reason=str(e),
-            )
-            result = TaskResult.failure(spec.task_id, e)
-        except Exception as e:
-            audit_event(
-                "task.failed",
-                task_name=spec.task_name,
-                coordinator=self._coordinator,
-                error_type=type(e).__name__,
-            )
-            result = TaskResult.failure(spec.task_id, e)
+            try:
+                entry = spec.resolve()
+                self._policy.authorize(spec, entry)
+                args, kwargs = spec.validated_args(entry)
+                execution = loop.run_in_executor(self._executor, partial(entry.fn, *args, **kwargs))
+                value = await asyncio.wait_for(
+                    asyncio.shield(execution),
+                    timeout=spec.timeout_sec,
+                )
+                result = TaskResult.success(spec.task_id, value)
+                audit_event(
+                    "task.executed",
+                    task_name=spec.task_name,
+                    coordinator=self._coordinator,
+                )
+            except asyncio.TimeoutError:
+                result = TaskResult(
+                    task_id=spec.task_id,
+                    ok=False,
+                    error=(f"Task timed out after {spec.timeout_sec}s. "
+                           "Execution may still be running; check the worker before retrying."),
+                )
+            except TaskAuthorizationError as e:
+                audit_event(
+                    "task.authorization_denied",
+                    task_name=spec.task_name,
+                    coordinator=self._coordinator,
+                    reason=str(e),
+                )
+                result = TaskResult.failure(spec.task_id, e)
+            except Exception as e:
+                audit_event(
+                    "task.failed",
+                    task_name=spec.task_name,
+                    coordinator=self._coordinator,
+                    error_type=type(e).__name__,
+                )
+                result = TaskResult.failure(spec.task_id, e)
 
-        try:
-            payload = result.pack()
-        except (TypeError, ValueError) as e:
-            logger.warning(
-                "Task %s produced an unserializable result: %s",
-                spec.task_id[:8], e,
-            )
-            audit_event(
-                "task.result_serialization_failed",
-                task_name=spec.task_name,
-                coordinator=self._coordinator,
-                error_type=type(e).__name__,
-            )
-            result = TaskResult(
-                task_id=spec.task_id,
-                ok=False,
-                error=f"Task result could not be serialized: {e}",
-            )
-            payload = result.pack()
+            try:
+                payload = result.pack()
+            except (TypeError, ValueError, OverflowError) as e:
+                logger.warning(
+                    "Task %s produced an unserializable result: %s",
+                    spec.task_id[:8], e,
+                )
+                audit_event(
+                    "task.result_serialization_failed",
+                    task_name=spec.task_name,
+                    coordinator=self._coordinator,
+                    error_type=type(e).__name__,
+                )
+                result = TaskResult(
+                    task_id=spec.task_id,
+                    ok=False,
+                    error=f"Task result could not be serialized: {e}",
+                )
+                payload = result.pack()
 
-        try:
-            await self._transport.send(
-                self._coordinator,
-                payload,
-                msg_type=MessageType.RESULT,
-            )
-        except (ConnectionError, OSError) as e:
-            logger.error(
-                "Failed to send result for task %s: %s",
-                spec.task_id[:8], e,
-            )
+            try:
+                await asyncio.wait_for(
+                    self._transport.send(self._coordinator, payload, msg_type=MessageType.RESULT),
+                    timeout=spec.timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                logger.error("Result delivery for task %s timed out after %ss", spec.task_id[:8], spec.timeout_sec)
+            except (ConnectionError, OSError, EOFError, asyncio.IncompleteReadError, ValueError) as e:
+                logger.error(
+                    "Failed to send result for task %s: %s",
+                    spec.task_id[:8], e,
+                )
+        finally:
+            if execution is None:
+                slots.release()
+            else:
+                def release_slot(done: asyncio.Future) -> None:
+                    slots.release()
+                    if not done.cancelled():
+                        done.exception()  # Observe failures that arrive after the caller's timeout.
+
+                execution.add_done_callback(release_slot)

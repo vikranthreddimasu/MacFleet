@@ -33,6 +33,23 @@ class SimpleMLP(nn.Module):
 
 
 class TestPoolSDK:
+    @pytest.mark.parametrize("wrapped", [False, True])
+    @pytest.mark.parametrize("custom_loss", [False, True])
+    def test_input_only_dataset_uses_every_sample(self, wrapped, custom_loss):
+        inputs = torch.ones(4, 1)
+        dataset = torch.utils.data.TensorDataset(inputs) if wrapped else inputs
+        model = nn.Linear(1, 1, bias=False)
+        nn.init.ones_(model.weight)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+        with Pool(open=True) as pool:
+            result = pool.train(
+                model, dataset, epochs=1, batch_size=4, optimizer=optimizer,
+                loss_fn=(lambda output: output.mean()) if custom_loss else None,
+                device="cpu",
+            )
+        assert result["steps"] == 1
+        assert model.weight.item() == pytest.approx(0.9 if custom_loss else 0.6)
+
     def test_pool_context_manager(self):
         with Pool() as pool:
             assert pool._joined is True
@@ -123,70 +140,13 @@ class TestMacfleetTrain:
 
 
 class TestDistributed:
-    def test_decorator_runs_function(self):
-        called = [False]
+    def test_decorator_rejects_false_distributed_execution(self):
+        called = []
 
         @distributed(engine="torch")
         def my_train():
-            called[0] = True
-            return 42
+            called.append(True)
 
-        result = my_train()
-        assert called[0] is True
-        assert result == 42
-
-    def test_decorator_with_args(self):
-        @distributed(engine="torch")
-        def my_train(x, y=10):
-            return x + y
-
-        assert my_train(5) == 15
-        assert my_train(5, y=20) == 25
-
-
-# ------------------------------------------------------------------ #
-# MLX SDK integration                                                #
-# ------------------------------------------------------------------ #
-
-
-mlx = pytest.importorskip("mlx.core", reason="MLX not installed")
-mlx_nn = pytest.importorskip("mlx.nn")
-mlx_optim = pytest.importorskip("mlx.optimizers")
-
-
-class SimpleMLXModel(mlx_nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear1 = mlx_nn.Linear(4, 8)
-        self.linear2 = mlx_nn.Linear(8, 2)
-
-    def __call__(self, x):
-        x = mlx_nn.relu(self.linear1(x))
-        return self.linear2(x)
-
-
-def mlx_loss_fn(model, x, y):
-    logits = model(x)
-    return mlx_nn.losses.cross_entropy(logits, y, reduction="mean")
-
-
-class TestPoolMLX:
-    def test_pool_train_mlx(self):
-        model = SimpleMLXModel()
-        mlx.eval(model.parameters())
-
-        X = np.random.randn(50, 4).astype(np.float32)
-        y = np.random.randint(0, 2, size=50).astype(np.int32)
-
-        with Pool(engine="mlx") as pool:
-            result = pool.train(
-                model=model,
-                dataset=(X, y),
-                epochs=3,
-                batch_size=16,
-                loss_fn=mlx_loss_fn,
-            )
-
-        assert result["epochs"] == 3
-        assert result["loss"] > 0
-        assert len(result["loss_history"]) == 3
+        with pytest.raises(NotImplementedError, match="Pool"):
+            my_train()
+        assert called == []

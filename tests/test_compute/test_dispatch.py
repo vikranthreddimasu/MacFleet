@@ -496,3 +496,58 @@ class TestDispatcherEdgeCases:
             await worker.stop()
 
         asyncio.run(run())
+
+async def test_silent_worker_expires_without_caller_timeout():
+    coordinator, worker, _ = await _setup_pair()
+    dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+    try:
+        await dispatcher.start()
+        future = await dispatcher.submit(times_two, 21, timeout=0.03)
+        with pytest.raises(RemoteTaskError, match="timed out"):
+            await asyncio.wait_for(future.result(), 1)
+        assert dispatcher.pending_count == 0
+        assert dispatcher._deadlines == {}
+        assert dispatcher._task_to_worker == {}
+    finally:
+        await dispatcher.stop()
+        await _teardown(coordinator, worker)
+
+
+async def test_cancelled_submission_does_not_leak_pending_task():
+    from unittest.mock import AsyncMock
+
+    transport = PeerTransport(local_id="coordinator")
+    transport.get_connection = lambda peer: object()
+    transport.send = AsyncMock(side_effect=asyncio.CancelledError)
+    dispatcher = TaskDispatcher(transport, ["worker"])
+    dispatcher._running = True
+    with pytest.raises(asyncio.CancelledError):
+        await dispatcher.submit(times_two, 1)
+    assert dispatcher.pending_count == 0
+    assert not dispatcher._deadlines
+
+
+async def test_submission_deadline_cancels_blocked_send_and_closes_stream():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from macfleet.comm.transport import PeerConnection
+
+    async def blocked_drain():
+        await asyncio.Event().wait()
+
+    writer = SimpleNamespace(write=Mock(), drain=blocked_drain, close=Mock(), is_closing=lambda: False)
+    transport = PeerTransport(local_id="coordinator")
+    transport._connections["worker"] = PeerConnection("worker", asyncio.StreamReader(), writer)
+    dispatcher = TaskDispatcher(transport, ["worker"])
+    dispatcher._running = True
+    try:
+        future = await asyncio.wait_for(dispatcher.submit(times_two, 21, timeout=0.02), 0.5)
+        with pytest.raises(RemoteTaskError, match="timed out"):
+            await future.result()
+        writer.close.assert_called_once()
+        assert dispatcher.pending_count == 0
+        assert not dispatcher._deadlines
+        assert not dispatcher._task_to_worker
+    finally:
+        await dispatcher.stop()

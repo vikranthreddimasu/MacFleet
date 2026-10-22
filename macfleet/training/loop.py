@@ -7,8 +7,6 @@ The loop is async-native so gradient sync (network I/O) can overlap
 with other work. Supports:
     - Weighted batch allocation (via sampler)
     - Gradient sync timing
-    - Periodic checkpointing
-    - Early stopping on loss plateau
     - Progress reporting via callbacks
 """
 
@@ -42,6 +40,10 @@ class TrainingConfig:
         _require_positive_int("epochs", self.epochs)
         _require_non_negative_int("log_every_n_steps", self.log_every_n_steps)
         _require_non_negative_int("checkpoint_every_n_steps", self.checkpoint_every_n_steps)
+        if self.checkpoint_every_n_steps:
+            raise TrainingConfigError(
+                "checkpoint_every_n_steps is not implemented. Save engine.state_dict() from on_step instead."
+            )
         if (
             not isinstance(self.max_grad_norm, (int, float))
             or isinstance(self.max_grad_norm, bool)
@@ -121,8 +123,26 @@ async def training_loop(
 
     # Broadcast initial parameters so all nodes start identically
     await dp.setup()
+    if dp.world_size > 1:
+        try:
+            batches_per_epoch = len(dataloader)
+        except TypeError:
+            batches_per_epoch = -1
+        await dp.check_consistent(
+            np.array([config.epochs, batches_per_epoch, config.max_grad_norm], dtype=np.float64),
+            "Training configuration mismatch",
+        )
+        if batches_per_epoch < 0:
+            raise TrainingConfigError(
+                "Distributed training requires a sized dataloader to check each rank's batch count"
+            )
 
     for epoch in range(config.epochs):
+        sampler = getattr(dataloader, "batch_sampler", None)
+        if not hasattr(sampler, "set_epoch"):
+            sampler = getattr(dataloader, "sampler", None)
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
         epoch_start = time.monotonic()
         epoch_losses = []
         epoch_sync_times = []
@@ -138,6 +158,14 @@ async def training_loop(
 
             # Gradient sync across all nodes
             sync_time = await dp.sync_gradients()
+
+            if config.max_grad_norm > 0:
+                gradients = engine.get_flat_gradients()
+                norm = float(np.linalg.norm(gradients.astype(np.float64)))
+                if not math.isfinite(norm):
+                    raise RuntimeError("Non-finite gradient norm; optimizer step aborted")
+                if norm > config.max_grad_norm:
+                    engine.apply_flat_gradients(gradients * (config.max_grad_norm / norm))
 
             # Optimizer step
             engine.step()
@@ -160,6 +188,9 @@ async def training_loop(
             if config.on_step and config.log_every_n_steps > 0 and global_step % config.log_every_n_steps == 0:
                 config.on_step(global_step, step_result)
 
+        if not epoch_losses:
+            raise RuntimeError(f"Training epoch {epoch} produced no batches; check the dataset and sampler")
+
         epoch_result = EpochResult(
             epoch=epoch,
             avg_loss=float(np.mean(epoch_losses)) if epoch_losses else 0.0,
@@ -172,10 +203,6 @@ async def training_loop(
 
         if config.on_epoch:
             config.on_epoch(epoch, epoch_result)
-
-        # Update sampler epoch if it exists (for shuffle reproducibility)
-        if hasattr(dataloader, "sampler") and hasattr(dataloader.sampler, "set_epoch"):
-            dataloader.sampler.set_epoch(epoch + 1)
 
     total_time = time.monotonic() - total_start
     return TrainingResult(

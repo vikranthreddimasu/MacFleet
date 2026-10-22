@@ -250,3 +250,85 @@ class TestPeerTransport:
         finally:
             await client.disconnect_all()
             await server.disconnect_all()
+
+async def test_partial_frame_cancellation_invalidates_connection():
+    from macfleet.comm.protocol import MessageFlags, MessageType, WireMessage
+
+    server = PeerTransport(local_id="server")
+    client = PeerTransport(local_id="client")
+    await server.start_server("127.0.0.1", 0)
+    try:
+        conn = await client.connect("server", "127.0.0.1", server._server.sockets[0].getsockname()[1])
+        remote = server.get_connection("client")
+        frame = WireMessage(1, MessageType.GRADIENT, MessageFlags.NONE, 0, b"payload").pack()
+        remote.writer.write(frame[:-2])
+        await remote.writer.drain()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(conn.recv_message(), 0.02)
+        assert conn.writer.is_closing()
+        assert client.get_connection("server") is None
+    finally:
+        await client.disconnect_all()
+        await server.disconnect_all()
+
+
+async def test_shutdown_cancels_unfinished_handshake():
+    server = PeerTransport(local_id="server")
+    await server.start_server("127.0.0.1", 0)
+    reader, writer = await asyncio.open_connection("127.0.0.1", server._server.sockets[0].getsockname()[1])
+    try:
+        await asyncio.sleep(0)
+        await asyncio.wait_for(server.disconnect_all(), 1)
+        assert await asyncio.wait_for(reader.read(), 1) == b""
+        assert not server._client_tasks
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def test_wrong_peer_identity_rejected_and_socket_closed():
+    server = PeerTransport(local_id="actual")
+    client = PeerTransport(local_id="client")
+    await server.start_server("127.0.0.1", 0)
+    try:
+        with pytest.raises(ConnectionError, match="identity mismatch"):
+            await client.connect("expected", "127.0.0.1", server._server.sockets[0].getsockname()[1])
+        assert client.connection_count == 0
+    finally:
+        await client.disconnect_all()
+        await server.disconnect_all()
+
+
+async def test_reconnect_closes_replaced_client_socket():
+    server = PeerTransport(local_id="server")
+    client = PeerTransport(local_id="client")
+    await server.start_server("127.0.0.1", 0)
+    port = server._server.sockets[0].getsockname()[1]
+    try:
+        old = await client.connect("server", "127.0.0.1", port)
+        new = await client.connect("server", "127.0.0.1", port)
+        assert old.writer.is_closing()
+        assert client.get_connection("server") is new
+        await client.send("server", b"reconnected")
+        assert await server.recv("client") == b"reconnected"
+    finally:
+        await client.disconnect_all()
+        await server.disconnect_all()
+
+
+async def test_secure_listener_expires_clients_that_never_begin_tls():
+    from macfleet.security.auth import SecurityConfig
+
+    server = PeerTransport(local_id="server", security=SecurityConfig(token="a" * 64),
+                           config=TransportConfig(connect_timeout_sec=0.1))
+    await server.start_server("127.0.0.1", 0)
+    reader, writer = await asyncio.open_connection("127.0.0.1", server._server.sockets[0].getsockname()[1])
+    try:
+        # TCP connect can finish before the server accepts the socket. Keep
+        # the listener open until its TLS deadline expires; otherwise this
+        # tests the kernel listen backlog rather than an owned TLS connection.
+        assert await asyncio.wait_for(reader.read(), 1) == b""
+        await asyncio.wait_for(server.disconnect_all(), 1)
+    finally:
+        writer.close()
+        await writer.wait_closed()

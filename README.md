@@ -33,8 +33,8 @@ team them up.
 - **Cloud is expensive** and the iteration loop is slow.
 
 MacFleet fills that gap. Any two Macs on the same WiFi can pool their
-GPUs. Security is baked in (HMAC + TLS). Adaptive compression keeps
-WiFi viable for gradient sync. The framework-agnostic core lets you
+GPUs. Security is baked in (HMAC + TLS). Training speed depends on the
+slowest Mac and network link. The framework-agnostic core lets you
 pick your engine (`torch` or `mlx`) per call.
 
 ## Install
@@ -82,9 +82,10 @@ macfleet join
 
 The enrollment code expires after 5 minutes and is single-use by default.
 
-**4. Set `enable_pool_distributed=True` and run the same script on both
-Macs** — training now spans both: the pool forms a gradient mesh, rank 0
-broadcasts initial weights, and every step's gradients are averaged
+**4. Stop `macfleet join` on both Macs, then set
+`enable_pool_distributed=True, quorum_size=2` and run the same training script
+on both Macs**. The pool forms a gradient mesh, rank 0 broadcasts model and
+optimizer state, and every step's gradients are averaged
 across the fleet. The result dict's `params_sha256` matches on both
 Macs when the fleet stayed in sync; `degraded`, `unsynced_steps`, and
 `validation_fallback_steps` tell you if any step fell back locally.
@@ -93,13 +94,13 @@ Macs when the fleet stayed in sync; `degraded`, `unsynced_steps`, and
 
 - **Dual engine** — PyTorch (MPS) and Apple MLX, same pool infrastructure
 - **Zero config** — mDNS discovery, no coordinator setup, no config files
-- **Safe task dispatch** — `@macfleet.task` registry + msgpack args
-  (no cloudpickle on the wire; local pickle fallback is explicit opt-in)
-- **Adaptive compression** — auto-selects TopK + FP16 based on link
-  speed (locally; sparse-on-wire arrives in v2.3, see TODOS.md
-  Issue 3)
-- **Heterogeneous scheduling** — faster Macs get bigger batches,
-  adjusts for thermal throttling
+- **Safe task dispatch** — explicit `TaskDispatcher`/`TaskWorker` transports
+  use named tasks and msgpack. `Pool.map` and `Pool.submit` are local-only.
+- **Synchronous training** — equal data shards and matching step counts
+- **Compression experiments** — `light`/`adaptive` quantize locally; wire
+  traffic remains dense. Distributed training rejects TopK modes.
+- **Scheduling primitives** — optional capacity/thermal allocation tools;
+  automatic rebalancing is not wired into `Pool.train`
 - **Secure by default** — auto-generated fleet tokens (scrypt-derived
   keys), client-first HMAC mutual auth (servers reveal nothing to
   unauthenticated peers), mandatory TLS with channel-bound handshakes
@@ -116,8 +117,9 @@ model.
 
 Short version:
 
-- **Fleet isolation** — nodes with different tokens can't see each
-  other on the network (mDNS service type is scoped by fleet hash)
+- **Fleet isolation** — discovery searches are scoped by fleet hash.
+  Advertisements remain visible on the LAN; authenticated heartbeats
+  establish secure membership.
 - **Mutual authentication** — HMAC-SHA256 challenge-response on every
   connection, plus signed hardware profile exchange (v2.2)
 - **Encryption** — TLS mandatory whenever auth is enabled
@@ -149,19 +151,16 @@ macfleet quickstart   Write a starter training script
 ## How it works
 
 MacFleet uses **data parallelism**: every Mac holds a full copy of the
-model, trains on a weighted portion of the data, and averages
+model, trains on an equal shard of the data, and averages
 gradients via Ring AllReduce after each step.
 
-The compression layer (TopK + FP16) is applied locally before the
-allreduce; v2.2 transmits dense gradients on the wire (sparse
-allreduce is on the v2.3 roadmap as Issue 3). The bandwidth savings
-table below describes the **target** ratios once sparse-on-wire ships:
+Two Macs exchange directly; three or more use Ring AllReduce. All ranks
+must run the same engine, model and training script. A failed sync aborts
+training by default. Fix the failed node and restart every rank from the
+same checkpoint; rediscovery does not resume an interrupted optimizer step.
 
-| Network       | Compression     | 100 MB gradients (v2.3 target) |
-|---------------|-----------------|--------------------------------|
-| Thunderbolt 4 | None            | 100 MB                         |
-| Ethernet      | TopK 10% + FP16 | ~5 MB                          |
-| WiFi          | TopK 1% + FP16  | ~500 KB                        |
+`compression="light"` and `"adaptive"` currently quantize locally without
+reducing wire bytes. Use `"none"` for full precision.
 
 ## Requirements
 
@@ -188,7 +187,7 @@ read the Markdown source in `docs/`:
 git clone https://github.com/vikranthreddimasu/MacFleet.git
 cd MacFleet
 pip install -e ".[dev,all]"
-make test       # 962 tests
+make test       # automated suite
 make lint       # ruff + mypy
 make help       # list dev targets
 ```

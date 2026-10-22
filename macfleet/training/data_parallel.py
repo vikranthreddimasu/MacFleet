@@ -15,6 +15,7 @@ Data parallel flow (each training step):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -59,10 +60,6 @@ class SyncDegradedError(RuntimeError):
 class DataParallelConfig:
     """Configuration for data parallel training."""
 
-    # Gradient sync
-    bucket_size_mb: float = 25.0  # group gradients into communication buckets
-    # Staleness tolerance for async gradient sync (0 = synchronous)
-    max_staleness: int = 0
     # Broadcast parameters from coordinator on start
     broadcast_params_on_start: bool = True
     # Compression (dense-wire-safe: "none", "light", "adaptive")
@@ -251,57 +248,37 @@ class DataParallel:
         if self.world_size > 1:
             await self._validate_model_consistency()
             if self.config.broadcast_params_on_start:
-                await self.broadcast_parameters()
+                # Synchronize frozen parameters, buffers and optimizer moments,
+                # not only the flattened trainable weights.
+                state = (
+                    np.frombuffer(self.engine.state_dict(), dtype=np.uint8)
+                    if self.rank == 0 else np.empty(0, np.uint8)
+                )
+                state = await self.group.broadcast(state, src=0)
+                if self.rank != 0:
+                    self.engine.load_state_dict(state.tobytes())
 
     async def _validate_model_consistency(self) -> None:
-        """Verify all nodes have the same model architecture.
+        """Share every rank's count, then reject mismatches on every rank.
 
-        Every rank runs the collectives (gather + allreduce) in the
-        same order so a peer raising on rank 0 can't deadlock the
-        ring. Rank 0 captures the per-rank breakdown for a richer
-        error message; all ranks check the cheaper allreduce-sum
-        afterwards. Either rank 0's gather-based error or every
-        rank's sum-mismatch error fires, never neither.
+        A failed collective is fatal: retrying a different operation on the
+        same byte stream can consume leftover messages from the failed one.
         """
-        local_count = len(self.engine.get_flat_parameters())
-        count_array = np.array([local_count], dtype=np.float64)
+        local_count = self.engine.get_flat_parameters().size
+        await self.check_consistent(np.array([local_count], dtype=np.int64), "Model architecture mismatch")
+        signature = np.frombuffer(hashlib.sha256(self.engine.model_signature().encode()).digest(), dtype=np.uint8)
+        await self.check_consistent(signature, "Model layout or engine mismatch")
 
-        # Step 1: gather counts to rank 0 (every rank participates).
-        # Bound with a short timeout so a hung peer can't block the
-        # whole validation. The richer per-rank breakdown is a "nice to
-        # have"; the cheaper allreduce-sum still catches the mismatch
-        # if gather can't finish in time.
-        try:
-            gathered = await asyncio.wait_for(
-                self.group.gather(count_array, dst=0), timeout=10.0,
-            )
-        except (asyncio.TimeoutError, Exception):
-            gathered = None
-
-        # Step 2: allreduce-sum (every rank participates BEFORE any raise).
-        summed = await self.group.allreduce(count_array, op="sum")
-        expected = local_count * self.world_size
-
-        # Step 3: rank 0 raises the rich error if gather caught a mismatch.
-        if self.rank == 0 and gathered is not None:
-            counts = [int(gathered[r][0]) for r in range(self.world_size)]
-            if len(set(counts)) > 1:
-                breakdown = ", ".join(
-                    f"rank{r}={c}" for r, c in enumerate(counts)
-                )
-                raise RuntimeError(
-                    f"Model architecture mismatch across ranks: {breakdown}. "
-                    "All nodes must load the same model."
-                )
-
-        # Step 4: every rank raises on sum mismatch (covers gather failure path).
-        if int(summed[0]) != expected:
-            raise RuntimeError(
-                f"Model architecture mismatch: this node (rank {self.rank}) has "
-                f"{local_count} parameters, but the fleet total is {int(summed[0])} "
-                f"(expected {expected} for {self.world_size} identical nodes). "
-                f"All nodes must load the same model."
-            )
+    async def check_consistent(self, values: np.ndarray, label: str) -> None:
+        """Reject inconsistent rank metadata before entering the training loop."""
+        if self.world_size == 1:
+            return
+        gathered = await self.group.gather(values, dst=0)
+        all_values = await self.group.broadcast(
+            gathered if gathered is not None else np.empty(0, dtype=values.dtype), src=0,
+        )
+        if np.any(all_values != values):
+            raise RuntimeError(f"{label} across ranks. Run the same model and training configuration on every Mac.")
 
     async def sync_gradients(self) -> float:
         """AllReduce gradients across all nodes.
@@ -327,26 +304,19 @@ class DataParallel:
         # Extract gradients as flat numpy array
         flat_grads = self.engine.get_flat_gradients()
 
-        # Guard: empty gradients (no trainable params or all grads are None)
         if flat_grads.size == 0:
-            logger.warning("Empty gradient array — skipping sync (no trainable params?)")
-            self._step_count += 1
-            return 0.0
+            raise SyncDegradedError(
+                "No trainable gradients on this rank. Check requires_grad and "
+                "load the same trainable model on every Mac before restarting training."
+            )
 
-        # Guard: NaN/Inf in local gradients before sending to peers.
-        # A single node's NaN loss contaminates the entire fleet via allreduce.
         if not np.isfinite(flat_grads).all():
-            logger.error(
-                "Local gradients contain NaN/Inf (likely from NaN loss). "
-                "Zeroing gradients for this step to avoid poisoning the fleet."
+            self._handle_sync_degradation(
+                reason="local_gradients_nan_or_inf",
+                audit_name="training.gradient_validation_failed",
+                validation=True,
             )
-            self._validation_fallback_steps += 1
-            self._last_sync_error = "local_gradients_nan_or_inf"
-            audit_event(
-                "training.gradient_validation_failed",
-                rank=self.rank,
-                reason=self._last_sync_error,
-            )
+            logger.warning("Replacing non-finite local gradients with zeros (allow_degraded=True).")
             flat_grads = np.zeros_like(flat_grads)
 
         # Record expected size on first call for shape validation

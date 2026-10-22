@@ -47,19 +47,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Run framework-agnostic tests
-        run: |
-          python -m pytest tests/ -v \
-            --ignore=tests/test_engines/test_torch_engine.py \
-            --ignore=tests/test_engines/test_mlx_engine.py \
-            --ignore=tests/test_integration \
-            --ignore=tests/test_training \
-            --ignore=tests/test_sdk \
-            --ignore=tests/test_compute \
-            --ignore=tests/test_compression/test_compression.py
+        run: python -m pytest tests/ -v --ignore=tests/test_integration
 
   torch-mps:
     name: torch-mps (macos-arm64, py${{ matrix.python }})
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
@@ -75,19 +67,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev,torch]"
       - name: Run torch + framework-agnostic tests
-        run: python -m pytest tests/ -v --ignore=tests/test_engines/test_mlx_engine.py
+        run: python -m pytest tests/ -v
 
   mlx:
     name: mlx (macos-arm64, py${{ matrix.python }})
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12"]
-        include:
-          - python: "3.13"
-            continue-on-error: true
-    continue-on-error: ${{ matrix.continue-on-error || false }}
+        python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -97,13 +85,16 @@ jobs:
       - name: Install with mlx
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,mlx]" || echo "MLX install failed on py${{ matrix.python }} (expected on 3.13)"
+          pip install -e ".[dev,mlx]"
       - name: Run MLX tests
-        run: python -m pytest tests/test_engines/test_mlx_engine.py -v
+        run: |
+          python -m pytest tests/test_engines/test_mlx_engine.py \
+            tests/test_sdk/test_sdk_mlx.py \
+            tests/test_integration/test_pool_training_processes.py -v
 
   integration:
     name: integration (macos-arm64, py3.12)
-    runs-on: macos-14
+    runs-on: macos-15
     needs: [framework-agnostic]
     steps:
       - uses: actions/checkout@v4

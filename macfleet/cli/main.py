@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import shlex
 import signal
 import sys
 import time
@@ -1437,10 +1438,11 @@ def pair(
             fleet_id=result.fleet_id,
             server_node=result.server_node,
         )
+        join_command = shlex.join(["macfleet", "join"] + (["--fleet-id", result.fleet_id] if result.fleet_id else []))
         console.print(
             f"[green]Paired.[/green] Token written to {TOKEN_FILE}"
             + (f" (fleet: [bold]{result.fleet_id}[/bold])" if result.fleet_id else "")
-            + f"\n[dim]Server: {result.server_node}. Next: macfleet join[/dim]"
+            + f"\n[dim]Server: {result.server_node}. Next: {join_command}[/dim]"
         )
         return
 
@@ -1485,10 +1487,11 @@ def pair(
     confirm_token_replacement(can_prompt=not from_stdin)
     write_pairing_token(token)
     audit_event("pairing.completed", mode="legacy_url", fleet_id=fleet_id)
+    join_command = shlex.join(["macfleet", "join"] + (["--fleet-id", fleet_id] if fleet_id else []))
     console.print(
         f"[green]Paired from legacy token URL.[/green] Token written to {TOKEN_FILE}"
         + (f" (fleet: [bold]{fleet_id}[/bold])" if fleet_id else "")
-        + "\n[dim]Next: macfleet join[/dim]"
+        + f"\n[dim]Next: {join_command}[/dim]"
     )
 
 
@@ -1552,8 +1555,8 @@ Written by `macfleet quickstart`. Run it:
     python {filename}
 
 If you've paired a second Mac via `macfleet join --bootstrap` + `macfleet pair`,
-set `enable_pool_distributed=True` below and run THIS SAME SCRIPT on both Macs
-to spread training across them (each Mac becomes one rank; gradients are
+stop `macfleet join` on both Macs, set `enable_pool_distributed=True` below,
+and run THIS SAME SCRIPT on both Macs (each Mac becomes one rank; gradients are
 averaged every step).
 """
 
@@ -1585,6 +1588,7 @@ def main() -> None:
         engine="torch",
         # Flip to True after pairing a second Mac (see docs/getting-started/pairing.md)
         enable_pool_distributed=False,
+        quorum_size=2,  # Wait for both Macs before distributed training.
     ) as pool:
         print(f"Pool world size: {{pool.world_size}}")
         result = pool.train(

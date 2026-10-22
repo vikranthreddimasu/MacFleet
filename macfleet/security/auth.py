@@ -37,6 +37,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from macfleet.utils.atomic_write import atomic_write_bytes
+
 logger = logging.getLogger(__name__)
 
 # Default mDNS service type (open fleet, no isolation)
@@ -122,29 +124,11 @@ def _read_token_file() -> Optional[str]:
     Fails closed if the file is readable by group or other (v2.2 PR 3 / A6):
     raises PermissionError so a world-readable credential cannot be loaded.
     """
-    try:
-        st = os.lstat(TOKEN_FILE)
-    except FileNotFoundError:
-        return None
-    if stat.S_ISLNK(st.st_mode):
-        logger.warning(
-            "Refusing to read fleet token symlink at %s. Replace it with a "
-            "regular file owned by your user and mode 0600.",
-            TOKEN_FILE,
-        )
-        return None
-    if not stat.S_ISREG(st.st_mode):
-        logger.warning(
-            "Refusing to read fleet token at %s because it is not a regular file.",
-            TOKEN_FILE,
-        )
-        return None
-    _check_token_file_mode(st.st_mode)
-    flags = os.O_RDONLY | _nofollow_flag()
+    # O_NONBLOCK prevents a replaced FIFO from hanging before fstat validates it.
+    flags = os.O_RDONLY | _nofollow_flag() | os.O_NONBLOCK
     try:
         fd = os.open(TOKEN_FILE, flags)
     except FileNotFoundError:
-        # Race: someone deleted it between lstat and open
         return None
     except OSError as exc:
         if exc.errno == errno.ELOOP:
@@ -153,6 +137,11 @@ def _read_token_file() -> Optional[str]:
         raise
 
     try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            logger.warning("Refusing to read non-regular fleet token file at %s.", TOKEN_FILE)
+            return None
+        _check_token_file_mode(st.st_mode)
         with os.fdopen(fd) as f:
             fd = -1
             token = f.read().strip()
@@ -178,31 +167,11 @@ def _check_token_file_mode(st_mode: int) -> None:
 
 
 def _write_token_file(token: str) -> None:
-    """Save fleet token to ~/.macfleet/fleet-token with restricted permissions.
-
-    Creates the file with mode 0600 via O_CREAT. If the file already exists
-    with broader permissions, O_CREAT won't tighten them — so we explicitly
-    chmod after the write to enforce 0o600 on every call (repairs a
-    previously-mis-permissioned file).
-    """
+    """Atomically replace the saved token with a private, durable file."""
     _ensure_private_token_dir()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _nofollow_flag()
-    try:
-        fd = os.open(TOKEN_FILE, flags, 0o600)
-    except OSError as exc:
-        if exc.errno == errno.ELOOP:
-            raise PermissionError(
-                f"Refusing to write fleet token through symlink: {TOKEN_FILE}"
-            ) from exc
-        raise
-    try:
-        os.write(fd, token.encode("utf-8"))
-        os.fsync(fd)
-        os.fchmod(fd, 0o600)
-    finally:
-        os.close(fd)
-    # Re-enforce 0600 in case the file pre-existed with broader mode
-    os.chmod(TOKEN_FILE, 0o600)
+    if os.path.islink(TOKEN_FILE):
+        raise PermissionError(f"Refusing to write fleet token through symlink: {TOKEN_FILE}")
+    atomic_write_bytes(TOKEN_FILE, token.encode("utf-8"), fsync_dir=True, mode=0o600)
 
 
 def generate_fleet_token() -> str:

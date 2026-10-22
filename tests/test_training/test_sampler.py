@@ -158,6 +158,40 @@ class TestDistributedBatchSampler:
         batches = list(bs)
         assert all(len(b) == 10 for b in batches[:-1])
 
+    @pytest.mark.parametrize("drop_last", [False, True])
+    @pytest.mark.parametrize("size", [0, 1, 11, 100, 103])
+    @pytest.mark.parametrize("weights", [[0.38, 0.62], [0.999, 0.0005, 0.0005]])
+    def test_every_rank_has_matching_global_batches(self, drop_last, size, weights):
+        samplers = [
+            DistributedBatchSampler(
+                _make_dataset(size), batch_size=10, num_replicas=len(weights),
+                rank=rank, weights=weights, shuffle=False, drop_last=drop_last,
+            )
+            for rank in range(len(weights))
+        ]
+        batches = [list(sampler) for sampler in samplers]
+        expected_steps = size // 10 if drop_last else (size + 9) // 10
+        assert [len(sampler) for sampler in samplers] == [expected_steps] * len(weights)
+        assert [len(rank_batches) for rank_batches in batches] == [expected_steps] * len(weights)
+        for step in range(expected_steps):
+            rank_batches = [rank[step] for rank in batches]
+            assert all(rank_batches)
+            actual = [index for batch in rank_batches for index in batch]
+            expected = list(range(step * 10, min(size, (step + 1) * 10)))
+            padding = max(0, len(weights) - len(expected))
+            expected += [expected[i % len(expected)] for i in range(padding)]
+            assert actual == expected
+
+    def test_weighted_full_batch_allocation_preserves_global_size(self):
+        samplers = [
+            DistributedBatchSampler(
+                _make_dataset(10), 10, 2, rank, weights=[0.38, 0.62], shuffle=False,
+            )
+            for rank in range(2)
+        ]
+        assert [sampler.batch_size for sampler in samplers] == [4, 6]
+        assert [len(next(iter(sampler))) for sampler in samplers] == [4, 6]
+
     @pytest.mark.parametrize(
         ("batch_size", "num_replicas", "message"),
         [(0, 1, "positive integer"), (1, 2, "at least num_replicas")],

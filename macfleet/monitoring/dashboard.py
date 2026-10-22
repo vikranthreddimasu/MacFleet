@@ -70,7 +70,9 @@ def build_cluster_table(nodes: list[NodeHealth]) -> Table:
 
         # Score
         score = node.health_score
-        if score >= 0.7:
+        if node.status == HealthStatus.UNKNOWN:
+            score_str = "[dim]--[/dim]"
+        elif score >= 0.7:
             score_str = f"[green]{score:.2f}[/green]"
         elif score >= 0.4:
             score_str = f"[yellow]{score:.2f}[/yellow]"

@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import struct
 
 import pytest
 
-from macfleet.comm.protocol import MessageFlags, MessageType, WireMessage
+from macfleet.comm.protocol import HEADER_FORMAT, MessageFlags, MessageType, WireMessage
 from macfleet.comm.transport import PeerTransport, TransportConfig
 from macfleet.security.auth import (
     HS_LABEL_CLIENT_RESP,
@@ -296,3 +297,60 @@ class TestPeerIdLengthCap:
                 pass
         finally:
             await server.disconnect_all()
+
+
+@pytest.mark.parametrize("secure", [False, True])
+async def test_handshake_rejects_oversized_header_without_reading_body(secure, monkeypatch):
+    monkeypatch.delenv("MACFLEET_TOKEN", raising=False)
+    security = SecurityConfig(token="fleet-token-long-enough") if secure else SecurityConfig()
+    server = PeerTransport(local_id="server", config=CONFIG, security=security)
+    await server.start_server("127.0.0.1", 0)
+    writer = None
+    try:
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1", server._server.sockets[0].getsockname()[1],
+            ssl=create_client_ssl_context() if secure else None,
+        )
+        writer.write(struct.pack(
+            HEADER_FORMAT, 0, MessageType.CONTROL, MessageFlags.HANDSHAKE_V2,
+            256 * 1024 * 1024, 0, 0, 0,
+        ))
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(1), timeout=1.0) == b""
+        assert server.peer_ids == []
+    finally:
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        await server.disconnect_all()
+
+
+@pytest.mark.parametrize("secure", [False, True])
+async def test_client_rejects_oversized_ack_before_reading_body(secure, monkeypatch):
+    monkeypatch.delenv("MACFLEET_TOKEN", raising=False)
+    security = SecurityConfig(token="fleet-token-long-enough") if secure else SecurityConfig()
+    ssl_context = create_server_tls_context()[0] if secure else None
+    finished = asyncio.Event()
+
+    async def send_bad_ack(reader, writer):
+        try:
+            await WireMessage.read_from_stream(reader)
+            writer.write(struct.pack(HEADER_FORMAT, 0, MessageType.CONTROL, 0, 256 * 1024 * 1024, 0, 0, 0))
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            finished.set()
+
+    server = await asyncio.start_server(send_bad_ack, "127.0.0.1", 0, ssl=ssl_context)
+    client = PeerTransport(local_id="client", config=CONFIG, security=security)
+    try:
+        with pytest.raises(ValueError, match="exceeds maximum"):
+            await asyncio.wait_for(client.connect("server", "127.0.0.1", server.sockets[0].getsockname()[1]), 1)
+        assert client.peer_ids == []
+    finally:
+        await client.disconnect_all()
+        server.close()
+        await server.wait_closed()
+        await asyncio.wait_for(finished.wait(), 1)

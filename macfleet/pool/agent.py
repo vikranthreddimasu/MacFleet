@@ -15,6 +15,8 @@ import secrets as secrets_mod
 import socket
 import ssl
 import subprocess
+import sys
+from functools import lru_cache
 from typing import Optional
 
 from rich.console import Console
@@ -26,11 +28,12 @@ from macfleet.compute.worker import TaskWorker
 from macfleet.engines.base import HardwareProfile
 from macfleet.monitoring.thermal import get_thermal_state
 from macfleet.pool.discovery import DiscoveredNode, ServiceRegistry
-from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig
+from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig, NodeStatus
 from macfleet.pool.network import LinkType, get_network_topology
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
 from macfleet.security.auth import (
     HW_HANDSHAKE_MAX_JSON_BYTES,
+    MAX_NODE_ID_BYTES,
     AuthRateLimiter,
     HandshakeHwValidationError,
     SecurityConfig,
@@ -53,6 +56,7 @@ HEARTBEAT_READ_TIMEOUT_SEC = 1.0
 # heartbeat handler. Without this, a slowloris-on-the-receive-side
 # attacker could pin handlers indefinitely on writer.drain().
 HEARTBEAT_WRITE_TIMEOUT_SEC = 1.0
+MAX_REVERSE_PEER_PROBES = 32
 
 console = Console()
 
@@ -148,22 +152,25 @@ def _detect_memory_bandwidth() -> float:
         return 100.0  # base M-series
 
 
-def _check_mps_available() -> bool:
-    """Check if MPS (Metal Performance Shaders) backend is available."""
+@lru_cache(maxsize=2)
+def _probe_framework(script: str) -> bool:
+    """Probe optional runtimes without loading them into the pool daemon."""
     try:
-        import torch
-        return torch.backends.mps.is_available()  # type: ignore[no-any-return]
-    except (ImportError, AttributeError):
+        return subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, timeout=10,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+def _check_mps_available() -> bool:
+    """Check the installed Torch runtime's MPS support in a separate process."""
+    return _probe_framework("import torch; raise SystemExit(0 if torch.backends.mps.is_available() else 1)")
 
 
 def _check_mlx_available() -> bool:
     """Check if MLX is installed and functional."""
-    try:
-        import mlx.core  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return _probe_framework("import mlx.core")
 
 
 def profile_hardware() -> HardwareProfile:
@@ -205,6 +212,13 @@ class PoolAgent:
         tls: bool = False,
         peers: Optional[list[str]] = None,
     ):
+        for option, value in (("port", port), ("data_port", data_port)):
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535):
+                raise ValueError(f"{option} must be an integer between 0 and 65535")
+        if port is None:
+            raise ValueError("port must be an integer between 0 and 65535")
+        if port == 65535 and data_port is None:
+            raise ValueError("port=65535 requires an explicit data_port below 65536")
         # Port split (v2.2 PR 2): heartbeat/discovery on `port` (50051 default),
         # data transport (future PeerTransport from Issue 1a) on `data_port`
         # (50052 default). Must be distinct ports — heartbeat uses line-delimited
@@ -239,6 +253,7 @@ class PoolAgent:
         self._discovery = ServiceRegistry(security=self._security)
         self._heartbeat: Optional[GossipHeartbeat] = None
         self._registry: Optional[ClusterRegistry] = None
+        self._peer_probes: dict[str, asyncio.Task] = {}
 
         self._running = False
         self._task_worker: Optional[TaskWorker] = None
@@ -278,6 +293,7 @@ class PoolAgent:
             mps_available=hw.mps_available,
             mlx_available=hw.mlx_available,
             data_port=self.data_port,
+            heartbeat_port=self.port,
         )
 
     @staticmethod
@@ -305,6 +321,15 @@ class PoolAgent:
 
     async def start(self) -> None:
         """Start the pool agent: profile, register, discover, heartbeat."""
+        if self._running:
+            raise RuntimeError("Pool agent is already running")
+        try:
+            await self._start()
+        except BaseException:
+            await self.stop()
+            raise
+
+    async def _start(self) -> None:
         # 1. Profile hardware
         self.hardware = profile_hardware()
         if self._name_override:
@@ -330,14 +355,16 @@ class PoolAgent:
 
         # 2. Detect network
         topology = get_network_topology()
-        link_types_str = ",".join(
-            l.link_type.value for l in topology.links if l.link_type != LinkType.LOOPBACK
-        )
+        link_types_str = ",".join(sorted({
+            link.link_type.value for link in topology.links if link.link_type != LinkType.LOOPBACK
+        }))
         console.print(f"  Network: {link_types_str or 'none detected'}")
 
         # Pick the best IP to advertise
         best = topology.best_link
         ip_address = best.ip_address if best else "127.0.0.1"
+        if best is None:
+            console.print("[yellow]No usable IPv4 interface; this pool is reachable only on this Mac.[/yellow]")
 
         # 3. Start heartbeat responder server FIRST so we know the actual bound
         # port before anything else (registry / mDNS) needs it. When the caller
@@ -347,17 +374,15 @@ class PoolAgent:
         self._heartbeat_server = await asyncio.start_server(
             self._handle_heartbeat_ping, "0.0.0.0", self.port,
             ssl=self._heartbeat_ssl_ctx,
+            ssl_handshake_timeout=3.0 if self._heartbeat_ssl_ctx else None,
+            ssl_shutdown_timeout=3.0 if self._heartbeat_ssl_ctx else None,
             reuse_address=True,
         )
         bound_port = self._heartbeat_server.sockets[0].getsockname()[1]
         if self.port == 0:
             self.port = bound_port
-            # If data_port was also 0, resolve it now via a throwaway bind.
-            # The transport layer hasn't bound yet, so we're free to pick an
-            # ephemeral port the kernel will hand back (and which won't
-            # collide with self.port since each bind to 0 gets a distinct one).
-            if self.data_port == 0:
-                self.data_port = _pick_ephemeral_port(exclude=self.port)
+        if self.data_port == 0:
+            self.data_port = _pick_ephemeral_port(exclude=self.port)
 
         # 4. Initialize registry (now that ports are final)
         self._registry = ClusterRegistry(self.hardware.node_id)
@@ -386,12 +411,6 @@ class PoolAgent:
             network_links=tuple(topology.links),
         )
 
-        # 6. Start discovery
-        self._discovery.start_discovery(
-            on_add=self._on_peer_discovered,
-            on_remove=self._on_peer_removed,
-        )
-
         # 7. Start heartbeat gossip. In secure mode the gossip pings carry
         # signed HW (APING v2) so mDNS-discovered peers refresh from a
         # zero-score placeholder to their real compute_score on the first
@@ -407,6 +426,16 @@ class PoolAgent:
             on_peer_hw=self._on_peer_hw_received if self._security.is_secure else None,
         )
 
+        # 6. Start discovery
+        loop = asyncio.get_running_loop()
+
+        def discovered(node: DiscoveredNode) -> None:
+            loop.call_soon_threadsafe(self._on_peer_discovered, node)
+
+        def removed(node_id: str) -> None:
+            loop.call_soon_threadsafe(self._on_peer_removed, node_id)
+
+        self._discovery.start_discovery(on_add=discovered, on_remove=removed, on_update=discovered)
         await self._heartbeat.start()
         self._running = True
 
@@ -426,17 +455,26 @@ class PoolAgent:
         """Stop the agent gracefully."""
         self._running = False
 
+        probes = list(self._peer_probes.values())
+        for probe in probes:
+            probe.cancel()
+        await asyncio.gather(*probes, return_exceptions=True)
+        self._peer_probes.clear()
+
         if self._task_worker:
             await self._task_worker.stop()
             self._task_worker = None
 
         if self._heartbeat:
             await self._heartbeat.stop()
+            self._heartbeat = None
         if self._heartbeat_server:
             self._heartbeat_server.close()
             await self._heartbeat_server.wait_closed()
+            self._heartbeat_server = None
 
         await self._discovery.async_stop()
+        self._registry = None
         console.print("[yellow]Left pool[/yellow]")
 
     async def _handle_heartbeat_ping(
@@ -538,6 +576,11 @@ class PoolAgent:
                         logger.debug("APING v2 auth failed from peer %s", peer_node_id)
                         return
                     self._heartbeat_rate_limiter.record_success(peer_ip)
+                    try:
+                        peer_hw = HardwareExchange.from_json_bytes(hw_json)
+                    except HandshakeHwValidationError as e:
+                        logger.debug("APING v2 from %s: bad HW payload: %s", peer_node_id, e)
+                        return
                     # Reply with APONG v2 (5-field) carrying local HW. The
                     # signature is bound to the request nonce (v2.3) — replay
                     # of a stale APONG against a later APING fails.
@@ -563,6 +606,7 @@ class PoolAgent:
                         )
                     except asyncio.TimeoutError:
                         logger.debug("APONG v2 drain timed out for %s", peer_ip)
+                    self._queue_peer_probe(peer_node_id, peer_ip, peer_hw)
                 else:
                     self._heartbeat_rate_limiter.record_failure(peer_ip)
                     logger.debug("APING malformed (%d fields) from %s", len(parts), peer_ip)
@@ -606,7 +650,36 @@ class PoolAgent:
             except (OSError, ssl.SSLError, BrokenPipeError, ConnectionResetError):
                 pass
 
-    async def _add_manual_peer(self, peer_addr: str) -> None:
+    def _queue_peer_probe(self, peer_id: str, peer_ip: str, hw: HardwareExchange) -> None:
+        """Verify an inbound caller's listening endpoint before admitting it."""
+        registry = self._registry
+        if (not self._running or not self._security.is_secure or registry is None
+                or not hw.heartbeat_port or peer_id == self.node_id or not peer_id
+                or len(peer_id.encode("utf-8")) > MAX_NODE_ID_BYTES or peer_ip == "unknown"):
+            return
+        known = registry.get_node(peer_id)
+        if (known is not None and known.is_alive
+                and known.ip_address == peer_ip and known.port == hw.heartbeat_port):
+            return
+        if peer_id in self._peer_probes or len(self._peer_probes) >= MAX_REVERSE_PEER_PROBES:
+            return
+
+        # APING can be replayed; require a fresh APONG from the claimed source endpoint.
+        async def verify_peer() -> None:
+            async with asyncio.timeout(10.0):
+                await self._add_manual_peer(f"{peer_ip}:{hw.heartbeat_port}", expected_peer_id=peer_id)
+
+        probe = asyncio.create_task(verify_peer())
+        self._peer_probes[peer_id] = probe
+
+        def finished(done: asyncio.Task) -> None:
+            self._peer_probes.pop(peer_id, None)
+            if not done.cancelled() and (error := done.exception()) is not None:
+                logger.debug("Reverse peer probe failed for %s: %s", peer_id, type(error).__name__)
+
+        probe.add_done_callback(finished)
+
+    async def _add_manual_peer(self, peer_addr: str, *, expected_peer_id: Optional[str] = None) -> None:
         """Connect to a manually specified peer (bypasses mDNS).
 
         Used when mDNS is blocked (e.g. enterprise WiFi with client isolation).
@@ -654,11 +727,11 @@ class PoolAgent:
                         f"{sig.hex()} {local_hw_json.hex()}\n"
                     ).encode()
                 )
-                await writer.drain()
+                await asyncio.wait_for(writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC)
                 response = await asyncio.wait_for(reader.readline(), timeout=10.0)
             else:
                 writer.write(f"PING {self.node_id}\n".encode())
-                await writer.drain()
+                await asyncio.wait_for(writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC)
                 response = await asyncio.wait_for(reader.readline(), timeout=10.0)
 
             peer_hw: Optional[HardwareExchange] = None
@@ -738,6 +811,14 @@ class PoolAgent:
                 parts = response.decode().strip().split(" ")
                 peer_node_id = parts[1] if len(parts) >= 2 else f"peer-{host}"
 
+            if expected_peer_id is not None and peer_node_id != expected_peer_id:
+                logger.warning(
+                    "Manual peer identity mismatch: expected %s, received %s", expected_peer_id, peer_node_id,
+                )
+                return
+            if peer_node_id == self.node_id:
+                return
+
             # Register the peer. With v2.2 APONG we have real HW; without it we
             # fall back to a zero-score placeholder so the peer still shows up in
             # the registry (just loses coordinator election until discovered via
@@ -785,7 +866,7 @@ class PoolAgent:
             if writer is not None:
                 try:
                     writer.close()
-                    await writer.wait_closed()
+                    await asyncio.wait_for(writer.wait_closed(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC)
                 except (OSError, ssl.SSLError, BrokenPipeError, ConnectionResetError, asyncio.TimeoutError):
                     pass
 
@@ -820,6 +901,7 @@ class PoolAgent:
             data_port=node.data_port,
             hardware=hw,
             network_links=node.network_links,
+            status=NodeStatus.SUSPECTED if self._security.is_secure else NodeStatus.ALIVE,
         ))
 
         # Use locally-computed score, not the broadcast one. Guard against the
@@ -899,3 +981,4 @@ class PoolAgent:
         # re-election runs in the same critical section.
         new_data_port = peer_hw.data_port if peer_hw.data_port > 0 else None
         registry.update_hardware(peer_node_id, new_hw, new_data_port=new_data_port)
+        registry.mark_alive(peer_node_id)

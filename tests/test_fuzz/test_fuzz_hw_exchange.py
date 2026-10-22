@@ -31,24 +31,30 @@ json_dict = st.dictionaries(
     max_size=20,
 )
 
+chip_names = st.one_of(
+    st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=126), min_size=1, max_size=128),
+    st.text(alphabet=st.characters().filter(str.isprintable), min_size=1, max_size=32),
+)
+
 
 class TestHardwareExchangeRoundtrip:
     @given(
         gpu_cores=st.integers(min_value=0, max_value=128),
         ram_gb=st.floats(min_value=0.0, max_value=2048.0, allow_nan=False),
         bw=st.floats(min_value=0.0, max_value=10000.0, allow_nan=False),
-        chip_name=st.text(min_size=0, max_size=80),
+        chip_name=chip_names,
         has_ane=st.booleans(),
         mps=st.booleans(),
         mlx=st.booleans(),
         data_port=st.integers(min_value=0, max_value=65535),
+        heartbeat_port=st.integers(min_value=0, max_value=65535),
     )
     @settings(max_examples=300, deadline=None)
-    def test_roundtrip(self, gpu_cores, ram_gb, bw, chip_name, has_ane, mps, mlx, data_port):
+    def test_roundtrip(self, gpu_cores, ram_gb, bw, chip_name, has_ane, mps, mlx, data_port, heartbeat_port):
         hw = HardwareExchange(
             gpu_cores=gpu_cores, ram_gb=ram_gb, memory_bandwidth_gbps=bw,
             chip_name=chip_name, has_ane=has_ane,
-            mps_available=mps, mlx_available=mlx, data_port=data_port,
+            mps_available=mps, mlx_available=mlx, data_port=data_port, heartbeat_port=heartbeat_port,
         )
         restored = HardwareExchange.from_json_bytes(hw.to_json_bytes())
         assert restored == hw
@@ -61,17 +67,10 @@ class TestHardwareExchangeJSONRobust:
         suppress_health_check=[HealthCheck.filter_too_much],
     )
     def test_arbitrary_dict_does_not_crash(self, payload):
-        # Arbitrary key/value dict — known fields are accepted, unknown
-        # fields ignored (forward compat). Should never raise unless
-        # the field type is wrong.
+        # Known fields must satisfy the schema; unknown fields are ignored.
         try:
             HardwareExchange.from_json_bytes(json.dumps(payload).encode())
         except HandshakeHwValidationError:
-            # Known field with the wrong type triggers this.
-            pass
-        except TypeError:
-            # Field type mismatches that slip past filtering — expected
-            # to raise TypeError on dataclass construction.
             pass
 
     @given(blob=st.binary(min_size=0, max_size=2048))
@@ -83,9 +82,16 @@ class TestHardwareExchangeJSONRobust:
             HardwareExchange.from_json_bytes(blob)
         except HandshakeHwValidationError:
             pass
-        except TypeError:
-            # Edge case where filtered dict has wrong types
-            pass
+
+    @given(chip_name=st.one_of(
+        st.just(""),
+        st.text(min_size=129, max_size=200),
+        st.text(max_size=30).map(lambda value: "\x00" + value),
+    ))
+    @settings(max_examples=100, deadline=None)
+    def test_invalid_chip_names_are_rejected(self, chip_name):
+        with pytest.raises(HandshakeHwValidationError):
+            HardwareExchange.from_json_bytes(json.dumps({"chip_name": chip_name}).encode())
 
     def test_non_object_top_level_rejected(self):
         with pytest.raises(HandshakeHwValidationError):
@@ -122,7 +128,7 @@ class TestHardwareExchangeJSONDeterminism:
 
     @given(
         gpu_cores=st.integers(min_value=0, max_value=128),
-        chip_name=st.text(min_size=0, max_size=40),
+        chip_name=chip_names,
     )
     @settings(max_examples=100, deadline=None)
     def test_same_input_produces_same_bytes(self, gpu_cores, chip_name):
@@ -132,7 +138,7 @@ class TestHardwareExchangeJSONDeterminism:
 
     @given(
         gpu_cores=st.integers(min_value=0, max_value=128),
-        chip_name=st.text(min_size=0, max_size=40),
+        chip_name=chip_names,
     )
     @settings(max_examples=100, deadline=None)
     def test_keys_sorted(self, gpu_cores, chip_name):

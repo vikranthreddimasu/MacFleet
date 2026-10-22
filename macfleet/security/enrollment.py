@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import time
 from dataclasses import dataclass
@@ -116,10 +117,13 @@ class EnrollmentServer:
             raise EnrollmentError(
                 f"Fleet token is too short for enrollment ({len(token)} chars)"
             )
-        if ttl_sec <= 0:
-            raise EnrollmentError("Enrollment TTL must be positive")
-        if max_uses < 1:
-            raise EnrollmentError("Enrollment max_uses must be >= 1")
+        if (isinstance(ttl_sec, bool) or not isinstance(ttl_sec, (int, float))
+                or not math.isfinite(ttl_sec) or ttl_sec <= 0):
+            raise EnrollmentError("Enrollment TTL must be positive and finite")
+        if isinstance(max_uses, bool) or not isinstance(max_uses, int) or max_uses < 1:
+            raise EnrollmentError("Enrollment max_uses must be a positive integer")
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+            raise EnrollmentError("Enrollment port must be an integer in 0..65535")
 
         self.token = token
         self.fleet_id = fleet_id
@@ -161,6 +165,8 @@ class EnrollmentServer:
             self.host,
             self.requested_port,
             ssl=ssl_ctx,
+            ssl_handshake_timeout=ENROLLMENT_READ_TIMEOUT_SEC,
+            ssl_shutdown_timeout=5.0,
         )
         self._started_at_monotonic = time.monotonic()
         self._expires_at_epoch = time.time() + self.ttl_sec
@@ -293,7 +299,7 @@ class EnrollmentServer:
 
     async def _write_response(self, writer: asyncio.StreamWriter, payload: dict) -> None:
         writer.write((json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
-        await writer.drain()
+        await asyncio.wait_for(writer.drain(), timeout=ENROLLMENT_READ_TIMEOUT_SEC)
 
 
 async def request_enrollment(
@@ -322,7 +328,7 @@ async def request_enrollment(
             "proof": _proof(code, nonce, binding).hex(),
         }
         writer.write((json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
-        await writer.drain()
+        await asyncio.wait_for(writer.drain(), timeout=ENROLLMENT_READ_TIMEOUT_SEC)
         line = await asyncio.wait_for(reader.readline(), timeout=timeout_sec)
         if not line:
             raise EnrollmentError("Enrollment server closed without a response")

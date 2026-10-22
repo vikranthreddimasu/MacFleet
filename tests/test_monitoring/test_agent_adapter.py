@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import secrets
+
 from macfleet.monitoring.agent_adapter import (
     build_node_health_for_peers,
     build_node_health_for_self,
@@ -30,7 +32,7 @@ class TestBuildNodeHealthForSelf:
     def test_snapshot_populates_basics(self):
         with Pool(
             name="dash-self",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -54,7 +56,7 @@ class TestBuildNodeHealthForSelf:
     def test_connection_failures_tracked(self):
         with Pool(
             name="dash-failures",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -72,7 +74,7 @@ class TestBuildNodeHealthForPeers:
         """No peers in registry → empty list."""
         with Pool(
             name="dash-solo",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -86,7 +88,7 @@ class TestBuildNodeHealthForPeers:
         """build_node_health_for_peers must not include self."""
         with Pool(
             name="dash-no-self",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -102,7 +104,7 @@ class TestSnapshotAll:
     def test_includes_self_first(self):
         with Pool(
             name="dash-all",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -117,7 +119,7 @@ class TestSnapshotAll:
         """Pool.dashboard_snapshot() is the one-call entry point."""
         with Pool(
             name="dash-helper",
-            open=True,
+            token=secrets.token_hex(32),
             port=0,
             data_port=0,
             enable_pool_distributed=True,
@@ -132,3 +134,18 @@ class TestSnapshotAll:
         """Without a live agent, Pool.dashboard_snapshot returns []."""
         with Pool(open=True) as pool:  # flag off by default
             assert pool.dashboard_snapshot() == []
+
+
+def test_remote_health_is_unknown_without_live_sensor_readings():
+    from types import SimpleNamespace
+
+    from macfleet.engines.base import HardwareProfile
+    from macfleet.pool.registry import ClusterRegistry, NodeRecord
+
+    registry = ClusterRegistry("self")
+    registry.register(NodeRecord("peer", "peer", "127.0.0.1", 50051,
+                                 HardwareProfile("peer", "peer", 8, 8, 100, True, "Apple M1")))
+    peers = build_node_health_for_peers(SimpleNamespace(node_id="self", registry=registry))
+    assert len(peers) == 1
+    assert peers[0].status == HealthStatus.UNKNOWN
+    assert peers[0].thermal is None and peers[0].memory is None

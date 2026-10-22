@@ -143,7 +143,10 @@ class TestNaNGradientPoisoning:
         try:
             groups = _make_groups(n, transports)
             engines = [_make_engine(seed=42)[1] for _ in range(n)]
-            dps = [DataParallel(engines[i], groups[i]) for i in range(n)]
+            dps = [
+                DataParallel(engines[i], groups[i], config=DataParallelConfig(allow_degraded=True))
+                for i in range(n)
+            ]
 
             # Make rank 0 have NaN gradients.
             engines[0].zero_grad()

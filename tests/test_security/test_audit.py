@@ -105,3 +105,11 @@ def test_audit_ignores_non_string_event_names(tmp_path, monkeypatch):
     audit.audit_event(["not", "an", "event"])
 
     assert not audit_path.exists()
+
+
+def test_audit_write_failure_is_visible_without_credentials(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(audit, "AUDIT_DIR", str(tmp_path))
+    monkeypatch.setattr(audit, "AUDIT_FILE", str(tmp_path / "missing" / "audit.jsonl"))
+    audit.audit_event("auth.failure", token="private-test-value")
+    assert "Security audit write failed" in caplog.text
+    assert "private-test-value" not in caplog.text

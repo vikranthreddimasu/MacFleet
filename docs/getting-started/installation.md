@@ -59,13 +59,11 @@ missing and what to fix.
 
 ## Platform notes
 
-**macOS**: fully supported. All tests run on macOS 14 (Sonoma) and
-15 (Sequoia) with M1/M2/M3/M4.
+**macOS**: Apple Silicon is the target platform. Hardware, OS and engine-version
+coverage must be verified on actual Macs; a passing CI job is not proof of GPU
+availability or support for every macOS release.
 
-**Linux**: the framework-agnostic core works (you can run a pool, use
-`@macfleet.task` dispatch, etc.) but the ML engines depend on MPS/MLX
-which are macOS-only. In practice: a Linux box can be a `Pool` caller
-that dispatches work to macOS peers, but can't serve as a training
-node itself.
+**Linux**: NumPy networking and task primitives are testable without MLX or MPS.
+Torch can use CPU. `Pool.map`/`submit` do not automatically dispatch to other Macs.
 
 **Windows**: untested. File an issue if you try it.

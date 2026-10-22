@@ -192,3 +192,16 @@ class TestDiscoveryAdvertisementValidation:
             properties=properties,
             server="node-1.local.",
         )
+
+
+async def test_async_discovery_lookup_failure_is_logged(caplog):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    zc = SimpleNamespace(loop=asyncio.get_running_loop(),
+                         async_get_service_info=AsyncMock(side_effect=OSError("lookup failed")))
+    PoolServiceListener().add_service(zc, "_macfleet._tcp.local.", "peer")
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert "Discovery lookup failed for peer" in caplog.text

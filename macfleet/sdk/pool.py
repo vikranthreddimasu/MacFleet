@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 import time
 from concurrent.futures import (
@@ -55,8 +56,8 @@ def _dataset_len(dataset: Any) -> int:
     Both `(X, y)` tuples and `[X, y]` lists are accepted as paired
     inputs as long as both halves expose a matching .shape[0]. This
     matches what Pool._train_torch / Pool._train_mlx accept downstream.
-    A plain non-paired list (no .shape on the elements, or mismatched
-    leading dims) falls through to len() like any other sized object.
+    A plain non-paired list falls through to len() like any other sized
+    object. Paired arrays must have matching, non-scalar leading dimensions.
 
     v2.2 PR 9 (A4): used by Pool.train's preflight guard.
     """
@@ -72,12 +73,66 @@ def _dataset_len(dataset: Any) -> int:
         n_y = y.shape[0] if hasattr(y.shape, "__len__") and len(y.shape) > 0 else None
         if n_x is not None and n_y is not None and int(n_x) == int(n_y):
             return int(n_x)
+        raise ValueError("Paired dataset inputs and targets must have matching sample counts")
     if hasattr(dataset, "__len__"):
         return len(dataset)
     raise TypeError(
         f"Cannot determine size of dataset {type(dataset).__name__}; "
         f"provide a Dataset with __len__ or an (X, y) tuple of arrays."
     )
+
+
+def _torch_dataset(dataset: Any) -> Any:
+    """Normalize paired arrays without interpreting a two-sample dataset as (X, y)."""
+    import torch
+    from torch.utils.data import TensorDataset
+
+    if isinstance(dataset, tuple) and len(dataset) == 2 or (
+        isinstance(dataset, list) and len(dataset) == 2
+        and all(hasattr(item, "shape") for item in dataset)
+    ):
+        x, y = dataset
+        if not isinstance(x, torch.Tensor):
+            x = torch.as_tensor(x, dtype=torch.float32)
+        if not isinstance(y, torch.Tensor):
+            y = torch.as_tensor(y)
+            y = y.to(torch.float32 if y.is_floating_point() else torch.long)
+        _dataset_len((x, y))
+        return TensorDataset(x, y)
+    return dataset
+
+
+def _torch_batch_loss(engine: Any, batch: Any, loss_fn: Any) -> Any:
+    """Handle tensor batches and DataLoader's (inputs, targets) batches alike."""
+    targets = None
+    inputs = batch
+    if isinstance(batch, (tuple, list)):
+        if not 1 <= len(batch) <= 2:
+            raise ValueError("Torch batches must contain inputs and optional targets")
+        inputs = batch[0]
+        if len(batch) == 2:
+            targets = batch[1]
+    outputs = engine.forward(inputs.to(engine.device) if hasattr(inputs, "to") else inputs)
+    if loss_fn is None:
+        return outputs.sum()
+    if targets is None:
+        return loss_fn(outputs)
+    return loss_fn(outputs, targets.to(engine.device))
+
+
+def _mlx_dataset(dataset: Any) -> tuple[Any, Any]:
+    """Normalize and validate the paired arrays used by both MLX runners."""
+    import mlx.core as mx
+
+    if not (isinstance(dataset, (tuple, list)) and len(dataset) == 2):
+        raise ValueError("MLX training expects dataset as (X, y) tuple")
+    x, y = dataset
+    if not isinstance(x, mx.array):
+        x = mx.array(x if not hasattr(x, "numpy") else x.numpy(), dtype=mx.float32)
+    if not isinstance(y, mx.array):
+        y = mx.array(y if not hasattr(y, "numpy") else y.numpy())
+    _dataset_len((x, y))
+    return x, y
 
 
 def _run_pickled(fn_bytes: bytes, args_bytes: bytes, kwargs_bytes: bytes) -> Any:
@@ -134,14 +189,18 @@ async def _distributed_train_torch(
     """
     import hashlib
 
+    import numpy as np
     import torch
-    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data import DataLoader
 
     from macfleet.engines.torch_engine import TorchEngine
     from macfleet.pool.network import LinkType
     from macfleet.training.data_parallel import DataParallel, DataParallelConfig
     from macfleet.training.mesh import form_mesh
     from macfleet.training.sampler import WeightedDistributedSampler
+
+    if nodes and (batch_size < len(nodes) or batch_size % len(nodes)):
+        raise ValueError(f"Global batch_size ({batch_size}) must be divisible by world_size ({len(nodes)})")
 
     mesh = await form_mesh(
         local_id,
@@ -155,17 +214,9 @@ async def _distributed_train_torch(
         if optimizer is None:
             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         engine.load_model(model, optimizer)
-        dev = engine.device
+        dataset = _torch_dataset(dataset)
 
-        if isinstance(dataset, (tuple, list)) and len(dataset) == 2:
-            X, y = dataset
-            if not isinstance(X, torch.Tensor):
-                X = torch.tensor(X, dtype=torch.float32)
-            if not isinstance(y, torch.Tensor):
-                y = torch.tensor(y, dtype=torch.long)
-            dataset = TensorDataset(X, y)
-
-        per_rank_batch = max(1, batch_size // mesh.world_size)
+        per_rank_batch = batch_size // mesh.world_size
         # drop_last=True → floor(N/world) samples on EVERY rank, so the
         # per-epoch step count is identical across the fleet.
         sampler = WeightedDistributedSampler(
@@ -184,7 +235,11 @@ async def _distributed_train_torch(
             config=DataParallelConfig(compression=compression),
             link_type=link_type if link_type is not None else LinkType.UNKNOWN,
         )
-        await dp.setup()  # validates architecture, broadcasts rank 0's weights
+        await dp.setup()
+        await dp.check_consistent(
+            np.array([epochs, len(dataset), batch_size, len(dataloader)], dtype=np.int64),
+            "Training schedule mismatch",
+        )
 
         total_start = time.time()
         history: list[float] = []
@@ -196,16 +251,7 @@ async def _distributed_train_torch(
             for batch in dataloader:
                 engine.zero_grad()
 
-                if loss_fn is not None:
-                    if len(batch) >= 2:
-                        inputs, targets = batch[0].to(dev), batch[1].to(dev)
-                        outputs = model(inputs)
-                        loss = loss_fn(outputs, targets)
-                    else:
-                        loss = loss_fn(model(batch[0].to(dev)))
-                else:
-                    loss = model(batch[0].to(dev)).sum()
-
+                loss = _torch_batch_loss(engine, batch, loss_fn)
                 engine.backward(loss)
                 await dp.sync_gradients()
                 engine.step()
@@ -264,7 +310,6 @@ async def _distributed_train_mlx(
     """
     import hashlib
 
-    import mlx.core as mx
     import mlx.optimizers as optim
     import numpy as np
 
@@ -273,8 +318,10 @@ async def _distributed_train_mlx(
     from macfleet.training.data_parallel import DataParallel, DataParallelConfig
     from macfleet.training.mesh import form_mesh
 
-    if not (isinstance(dataset, (tuple, list)) and len(dataset) == 2):
-        raise ValueError("MLX training expects dataset as (X, y) tuple")
+    X, y = _mlx_dataset(dataset)
+
+    if nodes and (batch_size < len(nodes) or batch_size % len(nodes)):
+        raise ValueError(f"Global batch_size ({batch_size}) must be divisible by world_size ({len(nodes)})")
 
     mesh = await form_mesh(
         local_id,
@@ -289,15 +336,9 @@ async def _distributed_train_mlx(
             optimizer = optim.Adam(learning_rate=lr)
         engine.load_model(model, optimizer, loss_fn=loss_fn)
 
-        X, y = dataset
-        if not isinstance(X, mx.array):
-            X = mx.array(X if not hasattr(X, "numpy") else X.numpy(), dtype=mx.float32)
-        if not isinstance(y, mx.array):
-            y = mx.array(y if not hasattr(y, "numpy") else y.numpy(), dtype=mx.int32)
-
         n_samples = X.shape[0]
         shard = n_samples // mesh.world_size  # equal on every rank
-        per_rank_batch = max(1, batch_size // mesh.world_size)
+        per_rank_batch = batch_size // mesh.world_size
 
         dp = DataParallel(
             engine,
@@ -306,6 +347,9 @@ async def _distributed_train_mlx(
             link_type=link_type if link_type is not None else LinkType.UNKNOWN,
         )
         await dp.setup()
+        await dp.check_consistent(
+            np.array([epochs, n_samples, batch_size, shard], dtype=np.int64), "Training schedule mismatch",
+        )
 
         total_start = time.time()
         history: list[float] = []
@@ -399,6 +443,13 @@ class Pool:
     ):
         from macfleet.security.auth import resolve_token_with_file
 
+        if isinstance(quorum_size, bool) or not isinstance(quorum_size, int) or quorum_size < 1:
+            raise ValueError("quorum_size must be a positive integer")
+        for option, value in (
+            ("quorum_timeout_sec", quorum_timeout_sec), ("rendezvous_timeout_sec", rendezvous_timeout_sec),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{option} must be positive and finite")
         self.name = name
         if open and token is not None:
             raise ValueError(
@@ -409,7 +460,7 @@ class Pool:
         if open:
             self.token = None
         else:
-            self.token = resolve_token_with_file(token, auto_generate=True)
+            self.token = resolve_token_with_file(token, auto_generate=enable_pool_distributed)
         self.engine_type = engine
         self.port = port
         self.data_port = data_port
@@ -424,7 +475,6 @@ class Pool:
         self._manual_peers = peers or []
         self._joined = False
         self._agent: Optional[PoolAgent] = None
-        self._peers: list[str] = []
 
         # Background event loop — keeps the async PoolAgent alive across
         # sync Pool method calls. Started lazily in join() when the
@@ -477,6 +527,7 @@ class Pool:
                 )
                 fut.result(timeout=5.0)
             except Exception as e:
+                fut.cancel()
                 logger.warning("Pool.leave: agent stop raised %s", e)
             self._agent = None
 
@@ -494,6 +545,16 @@ class Pool:
         """
         from macfleet.pool.agent import PoolAgent
 
+        self._agent = PoolAgent(
+            name=self.name,
+            port=self.port,
+            data_port=self.data_port,
+            token=self.token,
+            fleet_id=self.fleet_id,
+            tls=self.tls,
+            peers=self._manual_peers,
+        )
+
         new_loop = asyncio.new_event_loop()
         self._loop = new_loop
         ready = threading.Event()
@@ -501,7 +562,15 @@ class Pool:
         def _run_loop() -> None:
             asyncio.set_event_loop(new_loop)
             ready.set()
-            new_loop.run_forever()
+            try:
+                new_loop.run_forever()
+            finally:
+                tasks = asyncio.all_tasks(new_loop)
+                for task in tasks:
+                    task.cancel()
+                new_loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+                new_loop.run_until_complete(new_loop.shutdown_asyncgens())
+                new_loop.close()
 
         self._loop_thread = threading.Thread(
             target=_run_loop, name="macfleet-pool-loop", daemon=True,
@@ -514,15 +583,7 @@ class Pool:
                 "Pool background event loop failed to start within 2s."
             )
 
-        self._agent = PoolAgent(
-            name=self.name,
-            port=self.port,
-            data_port=self.data_port,
-            token=self.token,
-            fleet_id=self.fleet_id,
-            tls=self.tls,
-            peers=self._manual_peers,
-        )
+
 
         # Start the agent on the background loop. Agent startup includes
         # mDNS registration + heartbeat server bind, which can take a few
@@ -539,8 +600,9 @@ class Pool:
             # agent.start() can raise (mDNS bind failure, port conflict).
             # Tear down the orphaned loop+thread before re-raising so a
             # subsequent join() doesn't stack a fresh loop on top.
-            self._agent = None
+            start_fut.cancel()
             self._teardown_loop()
+            self._agent = None
             raise
 
         # Wait for quorum — poll the agent's registry for alive peers
@@ -627,15 +689,14 @@ class Pool:
             loss_fn: Loss function (optional, defaults to model output).
             engine: Override engine type.
             compression: Gradient compression for the distributed path —
-                "none", "light", "moderate", "aggressive", "adaptive".
-                Ignored by single-node training.
+                "none", "light", or "adaptive". Non-default compression
+                is rejected by single-node training.
             device: Torch device ("auto", "mps", "cpu"). "auto" picks the
                 Apple Silicon GPU (MPS) when available. Ignored by the MLX
-                engine (unified memory).
-            distributed: Force the training mode. None (default) = auto:
-                multi-node when the pool is distributed with peers, else
-                single-node. True = require multi-node (raises if the pool
-                has no peers). False = force single-node even with peers.
+                engine, which uses its configured default device.
+            distributed: None follows enable_pool_distributed. A distributed
+                pool requires live peers and never silently falls back locally.
+                False explicitly selects single-node training.
 
         Returns:
             Dict with training results:
@@ -644,6 +705,8 @@ class Pool:
             distributed mode (params_sha256 matches across ranks iff the
             fleet stayed in sync).
         """
+        if kwargs:
+            raise TypeError(f"Unknown training option(s): {', '.join(sorted(kwargs))}")
         if not self._joined:
             raise RuntimeError("Must join pool before training. Use Pool as context manager.")
 
@@ -663,13 +726,13 @@ class Pool:
 
         has_peers = self.is_distributed and self.world_size > 1
         if distributed is None:
-            distributed = has_peers
-        elif distributed and not has_peers:
+            distributed = self.enable_pool_distributed
+        if distributed and not has_peers:
             raise RuntimeError(
                 "distributed=True but this pool has no live peers. Construct "
                 "Pool(enable_pool_distributed=True, quorum_size=N) and run the "
                 "same training script on every Mac (see docs/guides/train.md), "
-                "or drop distributed=True to train single-node."
+                "or pass distributed=False to explicitly train on this Mac only."
             )
 
         if not distributed and compression not in (None, "none"):
@@ -806,13 +869,11 @@ class Pool:
     ) -> dict:
         """Single-node PyTorch training (multi-node via DataParallel in programmatic API)."""
         import torch
-        from torch.utils.data import DataLoader, TensorDataset
+        from torch.utils.data import DataLoader
 
         from macfleet.engines.torch_engine import TorchEngine
 
         engine = TorchEngine(device=device)
-        dev = engine.device
-
         # Setup optimizer
         if optimizer is None:
             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -820,13 +881,7 @@ class Pool:
         engine.load_model(model, optimizer)
 
         # Setup dataloader
-        if isinstance(dataset, (tuple, list)) and len(dataset) == 2:
-            X, y = dataset
-            if not isinstance(X, torch.Tensor):
-                X = torch.tensor(X, dtype=torch.float32)
-            if not isinstance(y, torch.Tensor):
-                y = torch.tensor(y, dtype=torch.long)
-            dataset = TensorDataset(X, y)
+        dataset = _torch_dataset(dataset)
 
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
@@ -840,18 +895,7 @@ class Pool:
             for batch in dataloader:
                 engine.zero_grad()
 
-                if loss_fn is not None:
-                    # Separate input/target batches
-                    if len(batch) >= 2:
-                        inputs, targets = batch[0].to(dev), batch[1].to(dev)
-                        outputs = model(inputs)
-                        loss = loss_fn(outputs, targets)
-                    else:
-                        loss = loss_fn(model(batch[0].to(dev)))
-                else:
-                    # Model returns loss directly
-                    loss = model(batch[0].to(dev)).sum()
-
+                loss = _torch_batch_loss(engine, batch, loss_fn)
                 engine.backward(loss)
                 engine.step()
                 epoch_loss += loss.item()
@@ -881,7 +925,6 @@ class Pool:
         **kwargs: Any,
     ) -> dict:
         """Single-node MLX training."""
-        import mlx.core as mx
         import mlx.optimizers as optim
 
         from macfleet.engines.mlx_engine import MLXEngine
@@ -893,16 +936,7 @@ class Pool:
 
         engine.load_model(model, optimizer, loss_fn=loss_fn)
 
-        # Convert dataset to MLX arrays
-        if isinstance(dataset, (tuple, list)) and len(dataset) == 2:
-            X, y = dataset
-            if not isinstance(X, mx.array):
-                X = mx.array(X if not hasattr(X, 'numpy') else X.numpy(), dtype=mx.float32)
-            if not isinstance(y, mx.array):
-                y = mx.array(y if not hasattr(y, 'numpy') else y.numpy(), dtype=mx.int32)
-        else:
-            raise ValueError("MLX training expects dataset as (X, y) tuple")
-
+        X, y = _mlx_dataset(dataset)
         n_samples = X.shape[0]
 
         total_start = time.time()
@@ -975,6 +1009,11 @@ class Pool:
         """
         if not self._joined:
             raise RuntimeError("Must join pool before compute. Use Pool as context manager.")
+        if self.enable_pool_distributed:
+            raise NotImplementedError(
+                "Pool task execution is local-only. Use TaskDispatcher/TaskWorker with an explicit "
+                "transport for remote tasks, or a separate Pool() for local execution."
+            )
 
         items = list(iterable)
         if not items:
@@ -1046,6 +1085,11 @@ class Pool:
         """
         if not self._joined:
             raise RuntimeError("Must join pool before compute. Use Pool as context manager.")
+        if self.enable_pool_distributed:
+            raise NotImplementedError(
+                "Pool task execution is local-only. Use TaskDispatcher/TaskWorker with an explicit "
+                "transport for remote tasks, or a separate Pool() for local execution."
+            )
 
         if self._is_registered_task(fn):
             return self._run_registered_task(fn, *args, timeout=timeout, **kwargs)
@@ -1121,7 +1165,8 @@ class Pool:
         except FutureTimeoutError as e:
             future.cancel()
             raise TimeoutError(
-                f"Pool task {spec.task_id!r} timed out after {spec.timeout_sec}s"
+                f"Pool task {spec.task_id!r} timed out after {spec.timeout_sec}s. "
+                "Execution may still be running; check the task before retrying."
             ) from e
         finally:
             executor.shutdown(wait=future.done(), cancel_futures=True)
@@ -1167,7 +1212,8 @@ class Pool:
                 first_timeout = futures.index(next(iter(not_done)))
                 timed_out_spec = calls[first_timeout][0]
                 raise TimeoutError(
-                    f"Pool.map task {timed_out_spec.task_id!r} timed out after {timeout}s"
+                    f"Pool.map task {timed_out_spec.task_id!r} timed out after {timeout}s. "
+                    "Execution may still be running; check the tasks before retrying."
                 )
             return [future.result() for future in futures]
         finally:
