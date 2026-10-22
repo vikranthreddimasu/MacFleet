@@ -70,3 +70,5 @@ nav:
     - Security: reference/security.md
     - Protocol: reference/protocol.md
   - CLI: cli.md
+  - Development:
+    - Testing: development/testing.md

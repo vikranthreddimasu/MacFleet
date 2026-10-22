@@ -416,3 +416,74 @@ async def test_secure_listener_expires_clients_that_never_begin_tls():
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+@pytest.mark.parametrize("secure", [False, True])
+async def test_retiring_listener_preserves_existing_peer_connections(secure):
+    from macfleet.security.auth import SecurityConfig, create_client_ssl_context
+
+    security = SecurityConfig(token="retiring-listener-test-" + "a" * 32) if secure else SecurityConfig()
+    server = PeerTransport(local_id="server", security=security)
+    client = PeerTransport(local_id="client", security=security)
+    connected = asyncio.Event()
+    await server.start_server("127.0.0.1", 0, on_connect=lambda *_: connected.set())
+    listener = server._server
+    port = listener.sockets[0].getsockname()[1]
+    try:
+        async with asyncio.timeout(2):
+            await client.connect("server", "127.0.0.1", port)
+            await connected.wait()
+            server.stop_accepting()
+            server.stop_accepting()  # Safe to retire more than once.
+            assert server._server is listener
+            assert not listener.is_serving()
+            await client.send("server", b"final barrier request")
+            assert await server.recv("client") == b"final barrier request"
+            await server.send("client", b"final barrier response")
+            assert await client.recv("server") == b"final barrier response"
+            with pytest.raises(OSError):
+                await asyncio.open_connection(
+                    "127.0.0.1", port, ssl=create_client_ssl_context() if secure else None,
+                )
+            await server.stop_server()
+            assert server._server is None
+            assert server.connection_count == 0
+            await listener.wait_closed()
+    finally:
+        await client.disconnect_all()
+        await server.disconnect_all()
+
+
+async def test_retiring_listener_rejects_already_queued_accept(monkeypatch):
+    accepted = asyncio.Event()
+    queued = []
+    accept_callback = None
+    start_server = asyncio.start_server
+
+    def queue_accept(reader, writer):
+        queued.append((reader, writer))
+        accepted.set()
+
+    async def start_with_queued_accept(callback, *args, **kwargs):
+        nonlocal accept_callback
+        accept_callback = callback
+        return await start_server(queue_accept, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "start_server", start_with_queued_accept)
+    server = PeerTransport(local_id="server")
+    await server.start_server("127.0.0.1", 0)
+    reader, writer = await asyncio.open_connection("127.0.0.1", server._server.sockets[0].getsockname()[1])
+    try:
+        await asyncio.wait_for(accepted.wait(), 1)
+        server.stop_accepting()
+        accept_callback(*queued.pop())
+        assert await asyncio.wait_for(reader.read(), 1) == b""
+        assert not server._client_tasks
+        assert server.connection_count == 0
+    finally:
+        for _, queued_writer in queued:
+            queued_writer.close()
+            await queued_writer.wait_closed()
+        writer.close()
+        await writer.wait_closed()
+        await server.disconnect_all()

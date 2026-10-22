@@ -14,7 +14,9 @@ the rank assignment without any extra coordination round:
     mesh = await form_mesh("mac-a-9c41", nodes, security=sec)
     averaged = await mesh.group.allreduce(grads, op="mean")
     ...
-    await mesh.close()
+    await mesh.finish()
+
+Use mesh.close() without coordination if training fails or is cancelled.
 
 Connection convention: each node CONNECTS to every peer whose node_id
 sorts after its own, and ACCEPTS connections from peers that sort
@@ -35,6 +37,8 @@ import math
 import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
+
+import numpy as np
 
 from macfleet.comm.collectives import CollectiveGroup, _gather
 from macfleet.comm.transport import (
@@ -90,8 +94,24 @@ class Mesh:
     rank: int
     world_size: int
 
+    async def finish(self) -> None:
+        """Finish successful training after every rank retires its listener.
+
+        All ranks must call this after their final training operation. A fast
+        rank can then start another mesh without connecting to a slower rank's
+        previous listener. On failed or cancelled training, use close() alone:
+        another collective may be unsafe on a partially consumed byte stream.
+        """
+        try:
+            self.transport.stop_accepting()
+            ready = np.empty(0, dtype=np.uint8)
+            await self.group.gather(ready, dst=0)
+            await self.group.broadcast(ready, src=0)
+        finally:
+            await self.close()
+
     async def close(self) -> None:
-        """Close all peer connections and stop the transport server."""
+        """Close local resources without waiting for peers to finish training."""
         await self.transport.disconnect_all()
 
 
