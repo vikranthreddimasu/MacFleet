@@ -299,3 +299,15 @@ class TestLastThermal:
         assert ctrl.last_thermal() is None
         ctrl.tick()
         assert ctrl.last_thermal().pressure == ThermalPressure.FAIR
+
+
+@pytest.mark.parametrize("asynchronous", [True, False])
+async def test_zero_timeout_never_sleeps_even_when_paused(asynchronous, monkeypatch):
+    ctrl = ThermalPauseController(read_thermal=FakeThermalReader(ThermalPressure.CRITICAL))
+    ctrl.tick()
+    assert ctrl.is_paused()
+    monkeypatch.setattr("asyncio.sleep" if asynchronous else "time.sleep", lambda _: pytest.fail("unexpected sleep"))
+    if asynchronous:
+        assert not await ctrl.async_wait_for_resume(timeout_sec=0)
+    else:
+        assert not ctrl.wait_for_resume(timeout_sec=0)

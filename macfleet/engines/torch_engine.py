@@ -184,7 +184,21 @@ class TorchEngine:
             return np.array([], dtype=np.float32)
         return np.concatenate(grads)
 
-    def apply_flat_gradients(self, flat_grads: np.ndarray) -> None:
+    def gradient_presence(self) -> np.ndarray:
+        return np.array([p.grad is not None for p in self._collect_trainable_params()], dtype=np.int32)
+
+    async def sync_buffers(self, group) -> None:
+        """Publish rank zero's inference buffers without coercing dtype or shape."""
+        assert self._model is not None
+        for buf in self._model.buffers():
+            raw = (buf.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy()
+                   if group.rank == 0 else np.empty(0, dtype=np.uint8))
+            data = await group.broadcast(raw, src=0)
+            if group.rank != 0:
+                with torch.no_grad():
+                    buf.copy_(torch.from_numpy(data).view(buf.dtype).reshape(buf.shape))
+
+    def apply_flat_gradients(self, flat_grads: np.ndarray, *, presence: Optional[np.ndarray] = None) -> None:
         """Write averaged flat gradients back to model parameters.
 
         When a param.grad of matching shape already exists, copy_ is used
@@ -195,8 +209,12 @@ class TorchEngine:
         """
         validate_flat_array(flat_grads, sum(p.numel() for p in self._collect_trainable_params()))
         offset = 0
-        for param in self._collect_trainable_params():
+        for index, param in enumerate(self._collect_trainable_params()):
             numel = param.numel()
+            if presence is not None and not presence[index]:
+                param.grad = None
+                offset += numel
+                continue
             grad_data = flat_grads[offset : offset + numel].reshape(param.shape)
             cpu_grad = torch.from_numpy(grad_data.copy())
             if param.grad is not None and tuple(param.grad.shape) == tuple(cpu_grad.shape):

@@ -93,7 +93,9 @@ def _torch_dataset(dataset: Any) -> Any:
     ):
         x, y = dataset
         if not isinstance(x, torch.Tensor):
-            x = torch.as_tensor(x, dtype=torch.float32)
+            x = torch.as_tensor(x)
+            if x.is_floating_point():
+                x = x.float()
         if not isinstance(y, torch.Tensor):
             y = torch.as_tensor(y)
             y = y.to(torch.float32 if y.is_floating_point() else torch.long)
@@ -128,7 +130,9 @@ def _mlx_dataset(dataset: Any) -> tuple[Any, Any]:
         raise ValueError("MLX training expects dataset as (X, y) tuple")
     x, y = dataset
     if not isinstance(x, mx.array):
-        x = mx.array(x if not hasattr(x, "numpy") else x.numpy(), dtype=mx.float32)
+        import numpy as np
+        values = np.asarray(x if not hasattr(x, "numpy") else x.numpy())
+        x = mx.array(values.astype(np.float32, copy=False) if values.dtype.kind == "f" else values)
     if not isinstance(y, mx.array):
         y = mx.array(y if not hasattr(y, "numpy") else y.numpy())
     _dataset_len((x, y))
@@ -261,6 +265,7 @@ async def _distributed_train_torch(
             history.append(epoch_loss / max(steps, 1))
 
         total_time = time.time() - total_start
+        await dp.sync_buffers()
         # SHA of final flat params: identical across ranks iff sync held.
         params_sha = hashlib.sha256(
             engine.get_flat_parameters().tobytes()
@@ -998,7 +1003,7 @@ class Pool:
         Args:
             fn: Function to apply to each item. Prefer @macfleet.task.
             iterable: Items to process.
-            timeout: Per-task timeout in seconds.
+            timeout: Shared execution deadline for the batch, including time queued behind other items.
             max_workers: Max parallel workers.
 
         Returns:
@@ -1051,7 +1056,9 @@ class Pool:
         )
         workers = max_workers or min(os.cpu_count() or 1, 4)
         fn_bytes = cloudpickle.dumps(fn)
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        executor = ProcessPoolExecutor(max_workers=workers)
+        deadline = time.monotonic() + timeout
+        try:
             futures = [
                 executor.submit(
                     _run_pickled,
@@ -1061,7 +1068,9 @@ class Pool:
                 )
                 for item in items
             ]
-            return [f.result(timeout=timeout) for f in futures]
+            return [f.result(timeout=max(0.0, deadline - time.monotonic())) for f in futures]
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def submit(self, fn: Callable, *args: Any, timeout: float = 300.0, **kwargs: Any) -> Any:
         """Submit a single task and block until complete.
@@ -1203,20 +1212,21 @@ class Pool:
             resolved_args, resolved_kwargs = spec.validated_args(entry)
             calls.append((spec, entry, resolved_args, resolved_kwargs))
 
+        deadline = time.monotonic() + timeout
         executor = ThreadPoolExecutor(max_workers=workers)
         futures = [
             executor.submit(entry.fn, *resolved_args, **resolved_kwargs)
             for _, entry, resolved_args, resolved_kwargs in calls
         ]
         try:
-            _, not_done = wait(futures, timeout=timeout)
+            _, not_done = wait(futures, timeout=max(0.0, deadline - time.monotonic()))
             if not_done:
                 for future in not_done:
                     future.cancel()
                 first_timeout = futures.index(next(iter(not_done)))
                 timed_out_spec = calls[first_timeout][0]
                 raise TimeoutError(
-                    f"Pool.map task {timed_out_spec.task_id!r} timed out after {timeout}s. "
+                    f"Pool.map batch timed out after {timeout}s; task {timed_out_spec.task_id!r} was unfinished. "
                     "Execution may still be running; check the tasks before retrying."
                 )
             return [future.result() for future in futures]

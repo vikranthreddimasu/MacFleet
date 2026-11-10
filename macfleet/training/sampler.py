@@ -185,6 +185,12 @@ class DistributedBatchSampler(Sampler[list[int]]):
             counts[rank] += 1
         return counts
 
+    def sample_weight(self, step: int) -> float:
+        """Fraction of examples on this rank in this (possibly padded) batch."""
+        remaining = self.sampler._dataset_size - step * self.global_batch_size
+        size = max(self.sampler.num_replicas, min(remaining, self.global_batch_size))
+        return self._batch_counts(size)[self.sampler.rank] / size
+
     def __iter__(self) -> Iterator[list[int]]:
         indices = self.sampler._indices()
         for start in range(0, len(indices), self.global_batch_size):

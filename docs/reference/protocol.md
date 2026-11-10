@@ -25,31 +25,21 @@ and vice versa.
 
 Used only for open pools (no token). Terminal newline-delimited.
 
-### Secure mode — APING v1 (4 fields, v2.1 legacy)
+### Secure heartbeat
+
+Both nodes must run the same protocol. Over TLS, they derive the heartbeat
+key from the fleet key and the server certificate fingerprint:
 
 ```
-→ APING <node_id> <nonce_hex> <hmac_sig_hex>
-← APONG <responder_id> <nonce_hex> <hmac_sig_hex>
+→ APING <client_id> <client_nonce> <client_proof>
+← APONG <server_id> <server_nonce> <server_proof> [<server_hw_hex>]
+→ AHW <client_hw_proof> <client_hw_hex>   (if the client shares hardware)
 ```
 
-Where `hmac_sig = HMAC-SHA256(fleet_key, node_id || nonce)`.
-
-### Secure mode — APING v2 (5 fields, v2.2+)
-
-```
-→ APING <node_id> <nonce_hex> <hmac_sig_hex> <hw_json_hex>
-← APONG <responder_id> <nonce_hex> <hmac_sig_hex> <hw_json_hex>
-```
-
-Where `hmac_sig = HMAC-SHA256(fleet_key, node_id || nonce || hw_json)`.
-
-The 5-field variant is used by `--peer` manual-peer bootstrap so the
-peer registers with real hardware info (GPU cores, RAM, data_port)
-instead of a zero-score placeholder. The HMAC covers the HW JSON so
-a rogue peer can't lie about hardware to win coordinator election.
-
-APONG signatures are bound to the request nonce, so a captured response
-cannot be replayed as the answer to a later APING.
+APONG authenticates both nonces and the server's hardware. Only after
+verifying it does the client send its hardware, signed against the server
+nonce. A TLS relay with a different certificate cannot forward valid proofs.
+A manual peer is registered on the receiving side after a fresh reverse probe.
 
 ### Bounds
 
@@ -79,9 +69,10 @@ Struct format: `!IHHIIII` (big-endian).
 
 ### Payload bounds
 
-- Max payload: 256 MB (`MAX_PAYLOAD_SIZE`). Set conservatively high —
-  100M-param float32 gradients are ~400 MB uncompressed, but
-  compressed gradients (Top-K, FP8) are much smaller.
+- Max frame payload: 256 MiB (`MAX_PAYLOAD_SIZE`). A larger collective array
+  starts with a zero dtype-length marker followed by its regular array header.
+  Raw 8 MiB frames follow, with a shorter final frame if needed. Receivers
+  validate the shape, dtype and each chunk size before accepting the array.
 
 ### Message types
 

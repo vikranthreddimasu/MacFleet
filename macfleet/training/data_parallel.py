@@ -280,7 +280,12 @@ class DataParallel:
         if np.any(all_values != values):
             raise RuntimeError(f"{label} across ranks. Run the same model and training configuration on every Mac.")
 
-    async def sync_gradients(self) -> float:
+    async def sync_buffers(self) -> None:
+        sync = getattr(self.engine, "sync_buffers", None)
+        if sync is not None and self.world_size > 1:
+            await sync(self.group)
+
+    async def sync_gradients(self, *, sample_weight: Optional[float] = None) -> float:
         """AllReduce gradients across all nodes.
 
         Dense-safe compression (``light`` / dense-safe ``adaptive``) may
@@ -325,24 +330,22 @@ class DataParallel:
 
         original_bytes = flat_grads.nbytes
 
-        # Compress if active. NOTE: until sparse-on-wire (TODOS Issue 3),
-        # compressed gradients are decompressed locally before allreduce,
-        # so the wire payload is dense regardless. _bytes_sent therefore
-        # reflects ACTUAL wire bytes. _bytes_saved stays 0 in v2.2.
+        get_presence = getattr(self.engine, "gradient_presence", None)
+        local_presence = get_presence() if get_presence is not None else None
+        presence = local_presence
         try:
+            dense = flat_grads
             if self._compressor is not None:
                 compressed = self._compressor.compress(flat_grads)
-
-                if isinstance(compressed, CompressedArray):
-                    dense_grads = self._compressor.decompress(compressed)
-                    averaged = await self.group.allreduce(dense_grads, op="mean")
-                else:
-                    averaged = await self.group.allreduce(compressed, op="mean")
-                self._bytes_sent += original_bytes
+                dense = (self._compressor.decompress(compressed)
+                         if isinstance(compressed, CompressedArray) else compressed)
+            if local_presence is not None:
+                presence = await self.group.allreduce(local_presence, op="sum")
+            if sample_weight is None:
+                averaged = await self.group.allreduce(dense, op="mean")
             else:
-                # No compression
-                averaged = await self.group.allreduce(flat_grads, op="mean")
-                self._bytes_sent += original_bytes
+                averaged = await self.group.allreduce(dense * sample_weight, op="sum")
+            self._bytes_sent += original_bytes
         except GradientValidationError as e:
             # SECURITY: Metadata bomb or corrupt compressed gradient from peer.
             logger.error("Gradient deserialization failed: %s", e)
@@ -405,7 +408,10 @@ class DataParallel:
             averaged = flat_grads
 
         # Write averaged gradients back to model
-        self.engine.apply_flat_gradients(averaged)
+        if presence is None:
+            self.engine.apply_flat_gradients(averaged)
+        else:
+            self.engine.apply_flat_gradients(averaged, presence=local_presence if averaged is flat_grads else presence)  # type: ignore[call-arg]
 
         elapsed = time.monotonic() - t0
         self._step_count += 1

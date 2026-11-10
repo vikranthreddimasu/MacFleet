@@ -209,13 +209,14 @@ class ThermalPauseController:
         For async training loops use `await async_wait_for_resume(...)`
         instead so the event loop isn't blocked.
         """
-        if not self.is_paused():
-            return True
-        deadline = (time.monotonic() + timeout_sec) if timeout_sec else float("inf")
+        if timeout_sec is not None and (not math.isfinite(timeout_sec) or timeout_sec < 0):
+            raise ValueError("timeout_sec must be nonnegative and finite")
+        deadline = time.monotonic() + timeout_sec if timeout_sec is not None else math.inf
         while self.is_paused():
-            if time.monotonic() > deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return False
-            time.sleep(self.config.poll_interval_sec)
+            time.sleep(min(self.config.poll_interval_sec, remaining))
             self.tick()
         return True
 
@@ -224,13 +225,14 @@ class ThermalPauseController:
     ) -> bool:
         """Async variant of wait_for_resume — yields the loop while polling."""
         import asyncio
-        if not self.is_paused():
-            return True
-        deadline = (time.monotonic() + timeout_sec) if timeout_sec else float("inf")
+        if timeout_sec is not None and (not math.isfinite(timeout_sec) or timeout_sec < 0):
+            raise ValueError("timeout_sec must be nonnegative and finite")
+        deadline = time.monotonic() + timeout_sec if timeout_sec is not None else math.inf
         while self.is_paused():
-            if time.monotonic() > deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return False
-            await asyncio.sleep(self.config.poll_interval_sec)
+            await asyncio.sleep(min(self.config.poll_interval_sec, remaining))
             self.tick()
         return True
 

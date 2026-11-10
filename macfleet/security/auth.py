@@ -166,12 +166,25 @@ def _check_token_file_mode(st_mode: int) -> None:
         )
 
 
-def _write_token_file(token: str) -> None:
-    """Atomically replace the saved token with a private, durable file."""
+def _write_token_file(token: Optional[str]) -> str:
+    """Replace the saved token, or initialize it once when token is None."""
+    import fcntl
+
     _ensure_private_token_dir()
-    if os.path.islink(TOKEN_FILE):
-        raise PermissionError(f"Refusing to write fleet token through symlink: {TOKEN_FILE}")
-    atomic_write_bytes(TOKEN_FILE, token.encode("utf-8"), fsync_dir=True, mode=0o600)
+    fd = os.open(TOKEN_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if os.path.islink(TOKEN_FILE):
+            raise PermissionError(f"Refusing to write fleet token through symlink: {TOKEN_FILE}")
+        if token is None:
+            saved = _read_token_file()
+            if saved is not None:
+                return saved
+            token = generate_fleet_token()
+        atomic_write_bytes(TOKEN_FILE, token.encode("utf-8"), fsync_dir=True, mode=0o600)
+        return token
+    finally:
+        os.close(fd)
 
 
 def generate_fleet_token() -> str:
@@ -231,9 +244,7 @@ def resolve_token_with_file(token: Optional[str] = None, *, auto_generate: bool 
     if saved is not None:
         return saved
     if auto_generate:
-        new_token = generate_fleet_token()
-        _write_token_file(new_token)
-        return new_token
+        return _write_token_file(None)
     return None
 
 
@@ -572,6 +583,13 @@ def verify_hw_profile(
 # ------------------------------------------------------------------ #
 # Heartbeat Authentication                                            #
 # ------------------------------------------------------------------ #
+
+
+def heartbeat_channel_key(fleet_key: bytes, fingerprint: bytes) -> bytes:
+    """Scope heartbeat proofs to the certificate on this TLS connection."""
+    if len(fingerprint) != 32:
+        raise ValueError("Authenticated heartbeat requires a TLS certificate fingerprint")
+    return hmac_mod.digest(fleet_key, b"MF-HEARTBEAT-CHANNEL:" + fingerprint, "sha256")
 
 
 def sign_heartbeat(fleet_key: bytes, node_id: str, nonce: bytes) -> bytes:

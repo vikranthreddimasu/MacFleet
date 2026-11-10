@@ -32,7 +32,9 @@ A distributed Pool rejects these local-only convenience methods.
 
 ## Timeouts and local parallelism
 
-`timeout` bounds the caller's wait for registered tasks:
+`timeout` bounds the caller's wait. For `map`, all items share a single
+execution deadline, including time queued behind earlier items. On timeout,
+queued items are cancelled where possible; already running calls may finish:
 
 ```python
 with macfleet.Pool() as pool:

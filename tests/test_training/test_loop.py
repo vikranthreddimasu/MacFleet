@@ -66,3 +66,64 @@ async def test_distributed_loop_rejects_unsized_loader_before_training():
     with pytest.raises(TrainingConfigError, match="sized dataloader"):
         await training_loop(engine, dp, iter([1]), TrainingConfig(epochs=1))
     engine.forward.assert_not_called()
+
+
+@pytest.mark.parametrize("optimizer_kind", ["SGD", "AdamW"])
+async def test_weighted_gradient_and_unused_parameters_match_single_mac(optimizer_kind):
+    import asyncio
+
+    torch = pytest.importorskip("torch")
+    from macfleet.engines.torch_engine import TorchEngine
+    from macfleet.training.data_parallel import DataParallel
+    from macfleet.training.loop import training_loop
+    from macfleet.training.sampler import DistributedBatchSampler
+    from tests.test_comm.test_collectives import _make_groups, _setup_mesh, _teardown_mesh
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.scale = torch.nn.Parameter(torch.tensor(0.))
+            self.branch = torch.nn.Parameter(torch.tensor(1.))
+            self.unused = torch.nn.Parameter(torch.tensor(2.))
+
+        def forward(self, x):
+            y = self.scale * x
+            if (x > 2).any():
+                y = y + self.branch * (x > 2)
+            return y.mean()
+
+    def build():
+        model = Model()
+        optimizer = getattr(torch.optim, optimizer_kind)(model.parameters(), lr=1.0)
+        return model, optimizer
+
+    data = torch.tensor([1.] * 7 + [3.] * 3)
+    reference, optimizer = build()
+    reference(data).backward()
+    clip = 0.5 if optimizer_kind == "AdamW" else 0.0
+    if clip:
+        torch.nn.utils.clip_grad_norm_(reference.parameters(), clip)
+    optimizer.step()
+    if optimizer_kind == "SGD":
+        assert reference.scale.item() == pytest.approx(-1.6)
+    transports, _ = await _setup_mesh(2)
+    try:
+        ranks = [build(), build()]
+        runs = []
+        for rank, ((model, opt), group) in enumerate(zip(ranks, _make_groups(transports))):
+            engine = TorchEngine(device="cpu")
+            engine.load_model(model, opt)
+            sampler = DistributedBatchSampler(data, 10, 2, rank, weights=[0.7, 0.3], shuffle=False)
+            loader = torch.utils.data.DataLoader(data, batch_sampler=sampler)
+            cfg = TrainingConfig(epochs=1, max_grad_norm=clip)
+            runs.append(training_loop(engine, DataParallel(engine, group), loader, cfg))
+        await asyncio.gather(*runs)
+        for model, opt in ranks:
+            for p, ref in zip(model.parameters(), reference.parameters()):
+                torch.testing.assert_close(p, ref)
+                if p in opt.state:
+                    for name, value in opt.state[p].items():
+                        torch.testing.assert_close(value, optimizer.state[ref][name])
+            assert model.unused.grad is None and model.unused not in opt.state
+    finally:
+        await _teardown_mesh(transports)

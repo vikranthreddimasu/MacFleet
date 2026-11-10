@@ -102,21 +102,11 @@ sent to peers that have already proven token knowledge.
 
 ### Authenticated heartbeat
 
-Heartbeat pings carry a signed HW profile (Issue 6):
-
-```
-APING (4 fields): APING {node_id} {nonce_hex} {sig_hex}
-APING (5 fields): APING {node_id} {nonce_hex} {sig_hex} {hw_json_hex}
-```
-
-The client signs first (the responder never answers unauthenticated
-pings), and since v2.3 the APONG response signature is bound to the
-REQUEST nonce — a captured APONG cannot be replayed as the answer to
-any later APING.
-
-This is what makes `--peer host:port` work correctly — a manually-added
-peer no longer registers with a zero-score placeholder; the APONG v2
-response carries the peer's real HW profile.
+Authenticated heartbeats use the server's TLS certificate fingerprint in
+both peers' proofs. The client sends its identity and a nonce first; the
+server authenticates its answer before the client discloses hardware.
+Both nonces and the signed hardware payload prevent response replay or
+substitution. Upgrade all nodes together. See the [wire format](protocol.md#secure-heartbeat).
 
 ## TLS
 
@@ -179,7 +169,8 @@ macfleet pair --host 192.168.1.10:61234 --code AB12CD-EF34GH-IJ56KL-MN78OP
 
 The displayed code is not the fleet token. It is a one-time verifier
 used to authenticate a TLS request to the enrollment server, where the
-permanent token is returned only after a channel-bound HMAC proof. The
+permanent token is returned only after a channel-bound HMAC proof. The client
+verifies the server’s proof over the credentials, request nonce and TLS certificate before saving the token. The
 default code lifetime is 5 minutes and the default use count is 1.
 
 Legacy `macfleet://pair?token=...` URLs are still accepted only for

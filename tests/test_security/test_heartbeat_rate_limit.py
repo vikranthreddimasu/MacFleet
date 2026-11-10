@@ -18,6 +18,8 @@ from macfleet.pool.agent import HEARTBEAT_READ_TIMEOUT_SEC, PoolAgent
 from macfleet.security.auth import (
     RATE_LIMIT_MAX_FAILURES,
     SecurityConfig,
+    create_client_ssl_context,
+    heartbeat_channel_key,
     sign_heartbeat,
     sign_heartbeat_with_hw,
 )
@@ -28,9 +30,8 @@ def _start_agent(token: str = "fleet-token") -> PoolAgent:
     from macfleet.engines.base import HardwareProfile
 
     agent = PoolAgent(
-        token=token, tls=False, port=50051, data_port=50052,
+        token=token, tls=True, port=50051, data_port=50052,
     )
-    agent._security.tls = False
     agent.hardware = HardwareProfile(
         hostname="test-host",
         node_id="test-host-abcd1234",
@@ -54,12 +55,12 @@ class TestHeartbeatReadTimeout:
         """A client that stalls after connect gets dropped in ~1s, not 5s."""
         agent = _start_agent()
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
         # Open a connection but never send anything
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         start = time.monotonic()
         # Server will timeout and close. Read returns EOF quickly.
         _ = await asyncio.wait_for(reader.read(1024), timeout=3.0)
@@ -88,13 +89,13 @@ class TestHeartbeatRateLimiter:
         assert agent._heartbeat_rate_limiter.is_banned("127.0.0.1")
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
         # Even a VALID ping from a banned IP should get no reply
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        fleet_key = agent._security.fleet_key
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
+        fleet_key = heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert)
         nonce = secrets.token_bytes(16)
         sig = sign_heartbeat(fleet_key, "honest-peer", nonce)
         try:
@@ -124,11 +125,11 @@ class TestHeartbeatRateLimiter:
         wrong_key = SecurityConfig(token="attacker-token").fleet_key
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         nonce = secrets.token_bytes(16)
         sig = sign_heartbeat(wrong_key, "attacker", nonce)
         writer.write(f"APING attacker {nonce.hex()} {sig.hex()}\n".encode())
@@ -153,7 +154,7 @@ class TestHeartbeatRateLimiter:
     async def test_successful_ping_clears_failures(self):
         """A good ping resets the failure count for that IP."""
         agent = _start_agent("fleet-token")
-        fleet_key = agent._security.fleet_key
+        fleet_key = heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert)
 
         # Pre-seed a couple of failures (below the ban threshold)
         agent._heartbeat_rate_limiter.record_failure("127.0.0.1")
@@ -162,12 +163,12 @@ class TestHeartbeatRateLimiter:
         assert not agent._heartbeat_rate_limiter.is_banned("127.0.0.1")
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
         # A good ping should clear the counter
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         nonce = secrets.token_bytes(16)
         sig = sign_heartbeat(fleet_key, "honest-peer", nonce)
         writer.write(f"APING honest-peer {nonce.hex()} {sig.hex()}\n".encode())
@@ -195,15 +196,15 @@ class TestHeartbeatRateLimiter:
         from macfleet.comm.transport import HardwareExchange
 
         agent = _start_agent("fleet-token")
-        fleet_key = agent._security.fleet_key
+        fleet_key = heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert)
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
         # One bad APING v2
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         nonce = secrets.token_bytes(16)
         real_hw = HardwareExchange(gpu_cores=8).to_json_bytes()
         lying_hw = HardwareExchange(gpu_cores=128).to_json_bytes()
@@ -236,11 +237,11 @@ class TestHeartbeatRateLimiter:
         agent = _start_agent("fleet-token")
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         writer.write(b"PING attacker\n")
         await writer.drain()
         try:

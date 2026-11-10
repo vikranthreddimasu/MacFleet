@@ -19,14 +19,45 @@ from typing import Callable, Optional
 
 from macfleet.security.auth import (
     HW_HANDSHAKE_MAX_JSON_BYTES,
+    MAX_NODE_ID_BYTES,
     SecurityConfig,
     create_client_ssl_context,
+    heartbeat_channel_key,
     sign_heartbeat,
     sign_heartbeat_with_hw,
+    tls_channel_binding_from_writer,
     verify_heartbeat_response,
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def request_heartbeat(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, fleet_key: bytes, node_id: str,
+    local_hw: Optional[bytes], expected_peer_id: Optional[str] = None,
+) -> tuple[str, Optional[bytes]]:
+    """Authenticate the server before releasing the client's hardware description."""
+    key = heartbeat_channel_key(fleet_key, tls_channel_binding_from_writer(writer))
+    nonce = secrets.token_bytes(16)
+    proof = sign_heartbeat(key, node_id, nonce)
+    writer.write(f"APING {node_id} {nonce.hex()} {proof.hex()}\n".encode())
+    await writer.drain()
+    parts = (await reader.readline()).decode().split()
+    if len(parts) not in (4, 5) or parts[0] != "APONG":
+        raise ValueError("Invalid authenticated heartbeat response")
+    _, peer_id, nonce_hex, proof_hex, *hardware = parts
+    server_nonce = bytes.fromhex(nonce_hex)
+    peer_hw = bytes.fromhex(hardware[0]) if hardware else None
+    if (len(server_nonce) != 16 or len(peer_id.encode()) > MAX_NODE_ID_BYTES
+            or (expected_peer_id is not None and peer_id != expected_peer_id)
+            or (peer_hw is not None and len(peer_hw) > HW_HANDSHAKE_MAX_JSON_BYTES)
+            or not verify_heartbeat_response(key, peer_id, server_nonce, nonce, bytes.fromhex(proof_hex), peer_hw)):
+        raise ValueError("Heartbeat peer authentication failed")
+    if local_hw is not None:
+        signature = sign_heartbeat_with_hw(key, node_id, server_nonce, local_hw)
+        writer.write(f"AHW {signature.hex()} {local_hw.hex()}\n".encode())
+        await writer.drain()
+    return peer_id, peer_hw
 
 
 class NodeStatus(Enum):
@@ -97,8 +128,7 @@ class GossipHeartbeat:
         self._on_suspected = on_suspected
         self._on_failed = on_failed
         self._on_recovered = on_recovered
-        # When set, secure-mode pings include the latest local HW JSON bytes
-        # via APING v2, and peer HW from APONG v2 is delivered to on_peer_hw.
+        # Share hardware only after the peer authenticates its APONG.
         # Refreshes registry compute_score on every successful round so
         # mDNS-discovered peers don't stay zero-scored forever (Issue 2/PR 4
         # only covered the transport handshake, not the gossip path).
@@ -232,75 +262,23 @@ class GossipHeartbeat:
             assert writer is not None  # narrow Optional for mypy
 
             if fleet_key:
-                # Authenticated heartbeat. Send v2 (5-field with HW) when a
-                # local-HW provider is configured, else v1 (4-field).
-                local_hw_json: Optional[bytes] = None
+                local_hw = None
                 if self._local_hw_provider is not None:
                     try:
-                        local_hw_json = self._local_hw_provider()
+                        local_hw = self._local_hw_provider()
                     except Exception:
                         logger.exception("Unable to serialize local heartbeat hardware")
-                        local_hw_json = None
-                nonce = secrets.token_bytes(16)
-                if local_hw_json is not None:
-                    sig = sign_heartbeat_with_hw(
-                        fleet_key, self.node_id, nonce, local_hw_json,
-                    )
-                    msg = (
-                        f"APING {self.node_id} {nonce.hex()} "
-                        f"{sig.hex()} {local_hw_json.hex()}\n"
-                    ).encode()
-                else:
-                    sig = sign_heartbeat(fleet_key, self.node_id, nonce)
-                    msg = f"APING {self.node_id} {nonce.hex()} {sig.hex()}\n".encode()
-                writer.write(msg)
-                await writer.drain()
-
-                response = await asyncio.wait_for(reader.readline(), timeout=2.0)
-
-                if not response.startswith(b"APONG"):
+                peer_id, peer_hw = await asyncio.wait_for(
+                    request_heartbeat(reader, writer, fleet_key, self.node_id, local_hw, peer.node_id), timeout=2.0,
+                )
+                if self._peers.get(peer.node_id) is not peer or peer.status == NodeStatus.LEFT:
                     return False
-                # v2.3: APONG signatures are bound to OUR request nonce, so a
-                # relayed/replayed response from another exchange verifies false.
-                parts = response.decode().strip().split(" ")
-                if len(parts) == 4:
-                    _, resp_node_id, resp_nonce_hex, resp_sig_hex = parts
-                    if resp_node_id != peer.node_id:
-                        return False
+                if peer_hw is not None and self._on_peer_hw is not None:
                     try:
-                        resp_nonce = bytes.fromhex(resp_nonce_hex)
-                        resp_sig = bytes.fromhex(resp_sig_hex)
-                    except ValueError:
-                        return False
-                    return verify_heartbeat_response(
-                        fleet_key, resp_node_id, resp_nonce, nonce, resp_sig,
-                    )
-                if len(parts) == 5:
-                    _, resp_node_id, resp_nonce_hex, resp_sig_hex, resp_hw_hex = parts
-                    if resp_node_id != peer.node_id:
-                        return False
-                    try:
-                        resp_nonce = bytes.fromhex(resp_nonce_hex)
-                        resp_sig = bytes.fromhex(resp_sig_hex)
-                        resp_hw = bytes.fromhex(resp_hw_hex)
-                    except ValueError:
-                        return False
-                    if len(resp_hw) > HW_HANDSHAKE_MAX_JSON_BYTES:
-                        return False
-                    if not verify_heartbeat_response(
-                        fleet_key, resp_node_id, resp_nonce, nonce, resp_sig,
-                        hw_json=resp_hw,
-                    ):
-                        return False
-                    if self._peers.get(peer.node_id) is not peer or peer.status == NodeStatus.LEFT:
-                        return False
-                    if self._on_peer_hw is not None:
-                        try:
-                            self._on_peer_hw(resp_node_id, resp_hw)
-                        except Exception:
-                            logger.exception("Unable to apply authenticated peer hardware for %s", peer.node_id)
-                    return True
-                return False
+                        self._on_peer_hw(peer_id, peer_hw)
+                    except Exception:
+                        logger.exception("Unable to apply authenticated peer hardware for %s", peer_id)
+                return True
             else:
                 # Open heartbeat (backward compatible)
                 msg = f"PING {self.node_id}\n".encode()

@@ -32,7 +32,7 @@ from macfleet.pool.discovery import (
     DiscoveredNode,
     ServiceRegistry,
 )
-from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig, NodeStatus
+from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig, NodeStatus, request_heartbeat
 from macfleet.pool.network import LinkType, get_network_topology
 from macfleet.pool.registry import ClusterRegistry, NodeRecord
 from macfleet.security.auth import (
@@ -42,11 +42,10 @@ from macfleet.security.auth import (
     HandshakeHwValidationError,
     SecurityConfig,
     create_client_ssl_context,
-    create_server_ssl_context,
+    create_server_tls_context,
+    heartbeat_channel_key,
     sign_heartbeat_response,
-    sign_heartbeat_with_hw,
     verify_heartbeat,
-    verify_heartbeat_response,
     verify_heartbeat_with_hw,
 )
 
@@ -270,9 +269,10 @@ class PoolAgent:
         self._running = False
         self._task_worker: Optional[TaskWorker] = None
         self._heartbeat_server: Optional[asyncio.Server] = None
+        self._heartbeat_cert = b""
         self._heartbeat_ssl_ctx = None
         if self._security.tls:
-            self._heartbeat_ssl_ctx = create_server_ssl_context()
+            self._heartbeat_ssl_ctx, self._heartbeat_cert = create_server_tls_context()
 
         # v2.2 PR 6 (Issue 22): per-IP rate limiter shared with the transport
         # layer pattern — banned IPs get dropped without reading, repeat
@@ -419,7 +419,7 @@ class PoolAgent:
         )
 
         # 7. Start heartbeat gossip. In secure mode the gossip pings carry
-        # signed HW (APING v2) so mDNS-discovered peers refresh from a
+        # signed hardware so mDNS-discovered peers refresh from a
         # zero-score placeholder to their real compute_score on the first
         # successful round.
         self._heartbeat = GossipHeartbeat(
@@ -487,19 +487,7 @@ class PoolAgent:
     async def _handle_heartbeat_ping(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        """Respond to heartbeat pings from peers.
-
-        v2.1 format (4 fields): `APING {node_id} {nonce_hex} {sig_hex}`
-        v2.2 format (5 fields): `APING {node_id} {nonce_hex} {sig_hex} {hw_json_hex}`
-
-        The 5-field variant is used by `--peer` manual-peer bootstrap (Issue 6)
-        so manual peers can exchange real hardware info without mDNS TXT records.
-        Server replies in matching format: 4-in → APONG 4-out, 5-in → APONG 5-out.
-
-        v2.2 PR 6 (Issue 22): per-IP rate limiting + tightened 1s read timeout.
-        Each failed auth increments a per-IP counter; 5 failures in a row earns
-        a 5-minute ban. A banned IP is disconnected before we even read.
-        """
+        """Verify a TLS-bound client proof before returning signed hardware and accepting a reverse probe."""
         fleet_key = self._security.fleet_key
 
         # Per-IP rate limiting: reject banned IPs before any I/O.
@@ -526,97 +514,34 @@ class PoolAgent:
             )
 
             if fleet_key and data.startswith(b"APING"):
-                # Authenticated heartbeat
-                parts = data.decode().strip().split(" ")
-                if len(parts) == 4:
-                    _, peer_node_id, nonce_hex, sig_hex = parts
-                    try:
-                        nonce = bytes.fromhex(nonce_hex)
-                        sig = bytes.fromhex(sig_hex)
-                    except ValueError:
-                        self._heartbeat_rate_limiter.record_failure(peer_ip)
-                        logger.debug("APING v1 malformed hex from %s", peer_ip)
-                        return
-                    if verify_heartbeat(fleet_key, peer_node_id, nonce, sig):
-                        self._heartbeat_rate_limiter.record_success(peer_ip)
-                        # Send authenticated PONG. v2.3: the response signature
-                        # is bound to the REQUEST nonce, so a captured APONG
-                        # can't be replayed as the answer to a later APING.
-                        resp_nonce = secrets_mod.token_bytes(16)
-                        resp_sig = sign_heartbeat_response(
-                            fleet_key, self.node_id, resp_nonce, req_nonce=nonce,
-                        )
-                        writer.write(
-                            f"APONG {self.node_id} {resp_nonce.hex()} {resp_sig.hex()}\n".encode()
-                        )
-                        try:
-                            await asyncio.wait_for(
-                                writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC,
-                            )
-                        except asyncio.TimeoutError:
-                            logger.debug("APONG drain timed out for %s", peer_ip)
-                    else:
-                        self._heartbeat_rate_limiter.record_failure(peer_ip)
-                        logger.debug("Heartbeat auth failed from peer %s", peer_node_id)
-                elif len(parts) == 5:
-                    # v2.2: carries peer HW profile
-                    _, peer_node_id, nonce_hex, sig_hex, hw_hex = parts
-                    try:
-                        nonce = bytes.fromhex(nonce_hex)
-                        sig = bytes.fromhex(sig_hex)
-                        hw_json = bytes.fromhex(hw_hex)
-                    except ValueError:
-                        self._heartbeat_rate_limiter.record_failure(peer_ip)
-                        logger.debug("APING v2 from %s: malformed hex", peer_node_id)
-                        return
-                    if len(hw_json) > HW_HANDSHAKE_MAX_JSON_BYTES:
-                        self._heartbeat_rate_limiter.record_failure(peer_ip)
-                        logger.debug(
-                            "APING v2 from %s: HW payload %dB exceeds max %dB",
-                            peer_node_id, len(hw_json), HW_HANDSHAKE_MAX_JSON_BYTES,
-                        )
-                        return
-                    if not verify_heartbeat_with_hw(
-                        fleet_key, peer_node_id, nonce, hw_json, sig,
-                    ):
-                        self._heartbeat_rate_limiter.record_failure(peer_ip)
-                        logger.debug("APING v2 auth failed from peer %s", peer_node_id)
-                        return
-                    self._heartbeat_rate_limiter.record_success(peer_ip)
-                    try:
-                        peer_hw = HardwareExchange.from_json_bytes(hw_json)
-                    except HandshakeHwValidationError as e:
-                        logger.debug("APING v2 from %s: bad HW payload: %s", peer_node_id, e)
-                        return
-                    # Reply with APONG v2 (5-field) carrying local HW. The
-                    # signature is bound to the request nonce (v2.3) — replay
-                    # of a stale APONG against a later APING fails.
-                    resp_nonce = secrets_mod.token_bytes(16)
-                    try:
-                        local_hw_json = self._local_hw_exchange().to_json_bytes()
-                    except Exception as e:
-                        logger.debug("APING v2 reply: local HW serialization failed: %s", e)
-                        return
-                    resp_sig = sign_heartbeat_response(
-                        fleet_key, self.node_id, resp_nonce,
-                        req_nonce=nonce, hw_json=local_hw_json,
-                    )
-                    writer.write(
-                        (
-                            f"APONG {self.node_id} {resp_nonce.hex()} "
-                            f"{resp_sig.hex()} {local_hw_json.hex()}\n"
-                        ).encode()
-                    )
-                    try:
-                        await asyncio.wait_for(
-                            writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.debug("APONG v2 drain timed out for %s", peer_ip)
-                    self._queue_peer_probe(peer_node_id, peer_ip, peer_hw)
-                else:
+                try:
+                    verb, peer_id, nonce_hex, proof_hex = data.decode().split()
+                    nonce = bytes.fromhex(nonce_hex)
+                    if writer.get_extra_info("ssl_object") is None:
+                        raise ValueError("Missing heartbeat TLS connection")
+                    key = heartbeat_channel_key(fleet_key, self._heartbeat_cert)
+                    if (verb != "APING" or len(peer_id.encode()) > MAX_NODE_ID_BYTES or len(nonce) != 16
+                            or not verify_heartbeat(key, peer_id, nonce, bytes.fromhex(proof_hex))):
+                        raise ValueError("Invalid heartbeat proof")
+                except ValueError:
                     self._heartbeat_rate_limiter.record_failure(peer_ip)
-                    logger.debug("APING malformed (%d fields) from %s", len(parts), peer_ip)
+                    return
+                self._heartbeat_rate_limiter.record_success(peer_ip)
+                server_nonce = secrets_mod.token_bytes(16)
+                hardware = self._local_hw_exchange().to_json_bytes()
+                proof = sign_heartbeat_response(key, self.node_id, server_nonce, nonce, hardware)
+                writer.write(f"APONG {self.node_id} {server_nonce.hex()} {proof.hex()} {hardware.hex()}\n".encode())
+                await asyncio.wait_for(writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC)
+                reply = await asyncio.wait_for(reader.readline(), timeout=HEARTBEAT_READ_TIMEOUT_SEC)
+                if reply:
+                    verb, signature_hex, hw_hex = reply.decode().split()
+                    hw = bytes.fromhex(hw_hex)
+                    if (verb != "AHW" or len(hw) > HW_HANDSHAKE_MAX_JSON_BYTES
+                            or not verify_heartbeat_with_hw(
+                                key, peer_id, server_nonce, hw, bytes.fromhex(signature_hex))):
+                        self._heartbeat_rate_limiter.record_failure(peer_ip)
+                        return
+                    self._queue_peer_probe(peer_id, peer_ip, HardwareExchange.from_json_bytes(hw))
             elif not fleet_key and data.startswith(b"PING"):
                 # Open heartbeat (backward compatible)
                 writer.write(f"PONG {self.node_id}\n".encode())
@@ -692,10 +617,7 @@ class PoolAgent:
         Used when mDNS is blocked (e.g. enterprise WiFi with client isolation).
         Sends a heartbeat ping to verify the peer is reachable and running.
 
-        v2.2 Issue 6: when authenticated, sends APING v2 (5-field with HW payload)
-        and parses APONG v2 to extract the peer's real HardwareProfile + data_port.
-        If the peer responds with APONG v1 (4-field), falls back to zero-HW
-        placeholder for v2.1 compat.
+        Secure peers exchange hardware after verifying the endpoint's TLS-bound proof.
         """
         writer: Optional[asyncio.StreamWriter] = None
         try:
@@ -718,100 +640,21 @@ class PoolAgent:
             )
             assert writer is not None  # narrow Optional for mypy
 
-            local_hw_json: Optional[bytes] = None
+            peer_hw: Optional[HardwareExchange] = None
+            peer_data_port = port + 1
             if fleet_key:
-                # v2.2: send APING v2 with local HW so peer can register us with
-                # real compute_score + data_port on their side. Peer responds with
-                # APONG v2 (or APONG v1 if older).
-                nonce = secrets_mod.token_bytes(16)
-                local_hw_json = self._local_hw_exchange().to_json_bytes()
-                sig = sign_heartbeat_with_hw(
-                    fleet_key, self.node_id, nonce, local_hw_json,
-                )
-                writer.write(
-                    (
-                        f"APING {self.node_id} {nonce.hex()} "
-                        f"{sig.hex()} {local_hw_json.hex()}\n"
-                    ).encode()
-                )
-                await asyncio.wait_for(writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC)
-                response = await asyncio.wait_for(reader.readline(), timeout=10.0)
+                peer_node_id, hw_json = await asyncio.wait_for(request_heartbeat(
+                    reader, writer, fleet_key, self.node_id,
+                    self._local_hw_exchange().to_json_bytes(), expected_peer_id,
+                ), timeout=10.0)
+                if hw_json is not None:
+                    peer_hw = HardwareExchange.from_json_bytes(hw_json)
+                    if peer_hw.data_port:
+                        peer_data_port = peer_hw.data_port
             else:
                 writer.write(f"PING {self.node_id}\n".encode())
                 await asyncio.wait_for(writer.drain(), timeout=HEARTBEAT_WRITE_TIMEOUT_SEC)
                 response = await asyncio.wait_for(reader.readline(), timeout=10.0)
-
-            peer_hw: Optional[HardwareExchange] = None
-            peer_data_port = port + 1
-
-            # Parse response
-            if fleet_key:
-                if not response.startswith(b"APONG"):
-                    console.print(
-                        f"[red]Peer {peer_addr}: no authenticated response "
-                        f"(got: {response[:50]!r})[/red]"
-                    )
-                    return
-                parts = response.decode().strip().split(" ")
-                if len(parts) == 5:
-                    # APONG v2: peer returned signed HW
-                    _, peer_node_id, resp_nonce_hex, resp_sig_hex, peer_hw_hex = parts
-                    try:
-                        resp_nonce = bytes.fromhex(resp_nonce_hex)
-                        resp_sig = bytes.fromhex(resp_sig_hex)
-                        peer_hw_json = bytes.fromhex(peer_hw_hex)
-                    except ValueError:
-                        console.print(f"[red]Peer {peer_addr}: malformed hex in APONG v2[/red]")
-                        return
-                    if len(peer_hw_json) > HW_HANDSHAKE_MAX_JSON_BYTES:
-                        console.print(
-                            f"[red]Peer {peer_addr}: HW payload "
-                            f"{len(peer_hw_json)}B exceeds max[/red]"
-                        )
-                        return
-                    if not verify_heartbeat_response(
-                        fleet_key, peer_node_id, resp_nonce, nonce, resp_sig,
-                        hw_json=peer_hw_json,
-                    ):
-                        console.print(
-                            f"[red]Peer {peer_addr}: authentication failed "
-                            f"(wrong token, replayed response, or version "
-                            f"mismatch — secure fleets need all nodes on the "
-                            f"same MacFleet version)[/red]"
-                        )
-                        return
-                    try:
-                        peer_hw = HardwareExchange.from_json_bytes(peer_hw_json)
-                    except HandshakeHwValidationError as e:
-                        console.print(f"[red]Peer {peer_addr}: bad HW payload: {e}[/red]")
-                        return
-                    if peer_hw.data_port > 0:
-                        peer_data_port = peer_hw.data_port
-                elif len(parts) == 4:
-                    # APONG without HW — fall back to zero-HW placeholder
-                    _, peer_node_id, resp_nonce_hex, resp_sig_hex = parts
-                    if not verify_heartbeat_response(
-                        fleet_key, peer_node_id,
-                        bytes.fromhex(resp_nonce_hex), nonce,
-                        bytes.fromhex(resp_sig_hex),
-                    ):
-                        console.print(
-                            f"[red]Peer {peer_addr}: authentication failed "
-                            f"(wrong token, replayed response, or version "
-                            f"mismatch)[/red]"
-                        )
-                        return
-                    logger.info(
-                        "Peer %s responded with APONG without HW. "
-                        "Registering with zero compute_score.", peer_node_id,
-                    )
-                else:
-                    console.print(
-                        f"[red]Peer {peer_addr}: malformed response "
-                        f"({len(parts)} fields)[/red]"
-                    )
-                    return
-            else:
                 if not response.startswith(b"PONG"):
                     console.print(f"[red]Peer {peer_addr}: no response (got: {response[:50]!r})[/red]")
                     return
@@ -957,7 +800,7 @@ class PoolAgent:
         console.print(f"[green]Peer recovered:[/green] {node_id}")
 
     def _gossip_local_hw_bytes(self) -> Optional[bytes]:
-        """Return the local HW exchange JSON for gossip APING v2, or None."""
+        """Return the local HW exchange JSON for authenticated gossip, or None."""
         if self.hardware is None:
             return None
         try:

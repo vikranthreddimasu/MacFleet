@@ -129,8 +129,6 @@ class MLXEngine:
         self._loss_fn: Optional[Callable] = None
         self._loss_and_grad_fn: Optional[Callable] = None
         self._grads: Optional[dict] = None
-        self._last_batch: Optional[dict] = None
-        self._last_loss: Optional[Any] = None
         self._param_names: list[str] = []  # ordered parameter names
 
     @property
@@ -186,7 +184,6 @@ class MLXEngine:
         different randomness and produced mismatched loss/gradients.
         """
         assert self._loss_and_grad_fn is not None, "No model loaded — call load_model() first"
-        self._last_batch = batch
 
         if isinstance(batch, dict):
             loss, self._grads = self._loss_and_grad_fn(self._model, **batch)
@@ -198,7 +195,6 @@ class MLXEngine:
         mx.eval(loss, self._grads)
         if not bool(mx.isfinite(loss).all()):
             raise ValueError("Loss is NaN or Inf; training aborted before optimizer update")
-        self._last_loss = loss
         return loss
 
     def backward(self, loss: Any) -> None:

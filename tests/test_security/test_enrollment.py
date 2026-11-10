@@ -335,3 +335,21 @@ async def test_request_enrollment_rejects_non_string_fleet_id(monkeypatch):
 def test_enrollment_limits_cannot_disable_expiry_or_usage_caps(kwargs):
     with pytest.raises(EnrollmentError):
         EnrollmentServer(token="a" * 64, **kwargs)
+
+
+@pytest.mark.parametrize("change", ["unsigned", "token", "fleet_id", "server_node", "nonce", "certificate"])
+async def test_client_rejects_forged_or_replayed_credentials(change, monkeypatch):
+    from macfleet.security.enrollment import _server_proof
+
+    nonce = b"a" * 16
+    monkeypatch.setattr(secrets, "token_bytes", lambda n: nonce)
+    response = dict(ok=True, version=ENROLLMENT_VERSION, token="victim-fleet-token",
+                    fleet_id="fleet", server_node="host")
+    if change != "unsigned":
+        response["proof"] = _server_proof(
+            "ABCD-EFGH-IJKL-MNOP", b"b"*16 if change == "nonce" else nonce,
+            b"other-cert" if change == "certificate" else b"test-channel-binding", response)
+    if change in ("token", "fleet_id", "server_node"):
+        response[change] = "attacker-selected-value"
+    with pytest.raises(EnrollmentError, match="prove knowledge"):
+        await _request_with_response_line(json.dumps(response).encode(), monkeypatch)

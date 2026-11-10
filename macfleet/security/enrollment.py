@@ -28,7 +28,7 @@ from macfleet.security.auth import (
     tls_channel_binding_from_writer,
 )
 
-ENROLLMENT_VERSION = 1
+ENROLLMENT_VERSION = 2
 DEFAULT_ENROLLMENT_TTL_SEC = 300
 DEFAULT_ENROLLMENT_MAX_USES = 1
 ENROLLMENT_READ_LIMIT_BYTES = 4096
@@ -36,7 +36,7 @@ ENROLLMENT_READ_TIMEOUT_SEC = 10.0
 ENROLLMENT_NONCE_BYTES = 16
 ENROLLMENT_PROOF_BYTES = 32
 
-_LABEL_CLIENT = b"MFENROLLv1-C:"
+_LABEL_CLIENT = b"MFENROLLv2-C:"
 
 
 class EnrollmentError(ValueError):
@@ -80,6 +80,11 @@ def _proof(code: str, nonce: bytes, channel_binding: bytes) -> bytes:
 
 def _verify_proof(code: str, nonce: bytes, channel_binding: bytes, proof: bytes) -> bool:
     return hmac.compare_digest(_proof(code, nonce, channel_binding), proof)
+
+
+def _server_proof(code: str, nonce: bytes, binding: bytes, response: dict) -> str:
+    credentials = json.dumps(response, sort_keys=True, separators=(",", ":")).encode()
+    return hmac.digest(_code_key(code), b"MFENROLLv2-S:" + nonce + binding + credentials, "sha256").hex()
 
 
 def parse_host_port(host_port: str) -> tuple[str, int]:
@@ -267,17 +272,16 @@ class EnrollmentServer:
                 self._uses += 1
 
             self._rate_limiter.record_success(peer_ip)
-            await self._write_response(
-                writer,
-                {
-                    "ok": True,
-                    "version": ENROLLMENT_VERSION,
-                    "token": self.token,
-                    "fleet_id": self.fleet_id,
-                    "server_node": self.node_id,
-                    "expires_at": self._expires_at_epoch,
-                },
-            )
+            response = {
+                "ok": True,
+                "version": ENROLLMENT_VERSION,
+                "token": self.token,
+                "fleet_id": self.fleet_id,
+                "server_node": self.node_id,
+                "expires_at": self._expires_at_epoch,
+            }
+            response["proof"] = _server_proof(self.code, nonce, self._cert_binding, response)
+            await self._write_response(writer, response)
             audit_event(
                 "enrollment.completed",
                 node_id=self.node_id,
@@ -349,6 +353,11 @@ async def request_enrollment(
         server_node = response.get("server_node")
         if server_node is not None and not isinstance(server_node, str):
             raise EnrollmentError("Enrollment server returned an invalid server node")
+        proof = response.pop("proof", None)
+        if (response.get("version") != ENROLLMENT_VERSION or not isinstance(proof, str)
+                or not proof.isascii()
+                or not hmac.compare_digest(proof, _server_proof(code, nonce, binding, response))):
+            raise EnrollmentError("Enrollment server did not prove knowledge of the pairing code")
         result = EnrollmentResult(
             token=token,
             fleet_id=fleet_id,

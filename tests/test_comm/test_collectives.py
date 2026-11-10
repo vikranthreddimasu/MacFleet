@@ -561,3 +561,54 @@ async def test_failed_send_cancels_sibling_receive():
     with pytest.raises(ConnectionError, match="send failed"):
         await collectives._gather(fail(), receive())
     assert cancelled.is_set()
+
+
+@pytest.mark.parametrize("other", [np.ones((3, 1), np.float32), np.ones(2, np.float32), np.ones(3, np.int32)])
+async def test_ring_rejects_original_layout_on_every_rank(other):
+    transports, _ = await _setup_mesh(3)
+    try:
+        x = np.ones(3, np.float32)
+        outcomes = await asyncio.gather(*(g.allreduce(a) for g, a in zip(_make_groups(transports), [x, other, x])),
+                                        return_exceptions=True)
+        assert all(isinstance(error, ValueError) and "mismatch" in str(error) for error in outcomes)
+    finally:
+        await _teardown_mesh(transports)
+
+
+async def test_chunked_checkpoint_and_gradient_cross_frame_boundary(monkeypatch):
+    monkeypatch.setattr(collectives, "MAX_PAYLOAD_SIZE", 128)
+    monkeypatch.setattr(collectives, "_ARRAY_CHUNK_BYTES", 64)
+    transports, _ = await _setup_mesh(2)
+    groups = _make_groups(transports)
+    try:
+        a = np.arange(201, dtype=np.float32).reshape(67, 3).T
+        state = await asyncio.gather(groups[0].broadcast(a), groups[1].broadcast(np.empty(0)))
+        np.testing.assert_array_equal(state[1], a)
+        for value in await asyncio.gather(groups[0].allreduce(a), groups[1].allreduce(a * 3)):
+            np.testing.assert_array_equal(value, a * 2)
+    finally:
+        await _teardown_mesh(transports)
+
+
+@pytest.mark.parametrize("bad_length", [0, 63, 65])
+async def test_chunk_length_checked_before_appending(bad_length, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(collectives, "MAX_PAYLOAD_SIZE", 128)
+    monkeypatch.setattr(collectives, "_ARRAY_CHUNK_BYTES", 64)
+    descriptor = b"\x00\x00" + collectives._array_header(np.empty(129, dtype=np.uint8))
+    transport = SimpleNamespace(recv=AsyncMock(side_effect=[descriptor, bytes(bad_length)]))
+    group = CollectiveGroup(0, 2, transport, {1: "other"})
+    with pytest.raises(ValueError, match="chunk size"):
+        await group._recv_array(1)
+
+
+async def test_direct_mean_checks_original_integer_dtypes_before_promotion():
+    transports, _ = await _setup_mesh(2)
+    try:
+        a, b = _make_groups(transports)
+        errors = await asyncio.gather(a.allreduce(np.ones(3, np.int32)), b.allreduce(np.ones(3, np.int64)),
+                                      return_exceptions=True)
+        assert all(isinstance(error, ValueError) and "mismatch" in str(error) for error in errors)
+    finally:
+        await _teardown_mesh(transports)

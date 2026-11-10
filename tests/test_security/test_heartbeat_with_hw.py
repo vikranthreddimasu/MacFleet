@@ -1,14 +1,4 @@
-"""Tests for v2.2 heartbeat-with-HW protocol (Issue 6 / PR 5).
-
-Covers:
-    - sign/verify primitives over `node_id || nonce || hw_json`
-    - APING v2 wire format (5 fields) accepted by agent server handler
-    - APING v1 wire format (4 fields) still accepted for v2.1 compat
-    - Replay-protection: re-using a nonce with different HW fails verification
-    - DoS bounds: oversize HW payload rejected
-    - `_add_manual_peer` registers peer with real HW pulled from APONG v2
-"""
-
+"""Authenticated heartbeat, hardware exchange, and membership lifecycle."""
 from __future__ import annotations
 
 import asyncio
@@ -21,11 +11,14 @@ import pytest
 
 from macfleet.comm.transport import HardwareExchange
 from macfleet.pool.agent import PoolAgent
+from macfleet.pool.heartbeat import request_heartbeat
 from macfleet.pool.network import NetworkTopology
 from macfleet.security.auth import (
     HW_HANDSHAKE_MAX_JSON_BYTES,
     SecurityConfig,
     create_client_ssl_context,
+    heartbeat_channel_key,
+    sign_heartbeat,
     sign_heartbeat_response,
     sign_heartbeat_with_hw,
     verify_heartbeat_with_hw,
@@ -91,7 +84,7 @@ def _start_agent(token: str, fleet_id=None) -> PoolAgent:
     from macfleet.engines.base import HardwareProfile
 
     agent = PoolAgent(
-        token=token, fleet_id=fleet_id, tls=False,
+        token=token, fleet_id=fleet_id, tls=True,
         port=50051, data_port=50052,
     )
     agent.hardware = HardwareProfile(
@@ -108,206 +101,49 @@ def _start_agent(token: str, fleet_id=None) -> PoolAgent:
     return agent
 
 
-class TestAPingV2ServerHandler:
-    async def test_v2_ping_returns_v2_pong(self):
-        sec = SecurityConfig(token="fleet-token")
-        fleet_key = sec.fleet_key
-        agent = _start_agent("fleet-token")
-
-        server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
-        )
-        port = server.sockets[0].getsockname()[1]
-
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        nonce = secrets.token_bytes(16)
-        client_hw = HardwareExchange(gpu_cores=16, chip_name="M4 Ultra").to_json_bytes()
-        sig = sign_heartbeat_with_hw(fleet_key, "pinger", nonce, client_hw)
-        writer.write(
-            f"APING pinger {nonce.hex()} {sig.hex()} {client_hw.hex()}\n".encode()
-        )
+@pytest.mark.parametrize("fault", ["legacy", "wrong_key", "tamper", "oversize", "valid"])
+async def test_authenticated_hardware_exchange(fault):
+    agent = _start_agent("heartbeat-long-token")
+    agent._queue_peer_probe = Mock()
+    server = await asyncio.start_server(agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx)
+    port = server.sockets[0].getsockname()[1]
+    reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
+    key = heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert)
+    nonce = secrets.token_bytes(16)
+    signature = sign_heartbeat(b"wrong" if fault == "wrong_key" else key, "client", nonce)
+    suffix = " 7b7d" if fault == "legacy" else ""
+    try:
+        writer.write(f"APING client {nonce.hex()} {signature.hex()}{suffix}\n".encode())
         await writer.drain()
-
-        response = await asyncio.wait_for(reader.readline(), timeout=2.0)
-        assert response.startswith(b"APONG")
-
-        parts = response.decode().strip().split(" ")
-        assert len(parts) == 5, f"expected 5-field APONG v2, got: {parts}"
-        _, peer_id, resp_nonce_hex, resp_sig_hex, peer_hw_hex = parts
-        resp_nonce = bytes.fromhex(resp_nonce_hex)
-        resp_sig = bytes.fromhex(resp_sig_hex)
-        peer_hw_json = bytes.fromhex(peer_hw_hex)
-        # v2.3: the APONG signature is bound to OUR request nonce.
-        from macfleet.security.auth import verify_heartbeat_response
-        assert verify_heartbeat_response(
-            fleet_key, peer_id, resp_nonce, nonce, resp_sig, hw_json=peer_hw_json,
-        )
-        # An unbound (pre-v2.3) verification must NOT accept it.
-        assert not verify_heartbeat_with_hw(
-            fleet_key, peer_id, resp_nonce, peer_hw_json, resp_sig,
-        )
-        peer_hw = HardwareExchange.from_json_bytes(peer_hw_json)
-        # Agent's local HW should round-trip through APONG v2
-        assert peer_hw.gpu_cores == 10
-        assert peer_hw.ram_gb == 24.0
-        assert peer_hw.chip_name == "Apple M4 Pro (test)"
-        assert peer_hw.data_port == 50052
-
+        response = await reader.readline()
+        if fault in ("legacy", "wrong_key"):
+            assert response == b""
+        else:
+            verb, peer, nonce_hex, _, hw = response.decode().split()
+            assert (verb, peer) == ("APONG", agent.node_id)
+            assert HardwareExchange.from_json_bytes(bytes.fromhex(hw)).gpu_cores == 10
+            data = b" " * (HW_HANDSHAKE_MAX_JSON_BYTES + 1) if fault == "oversize" else b'{"data_port":50052}'
+            proof = sign_heartbeat_with_hw(key, "client", bytes.fromhex(nonce_hex), data)
+            if fault == "tamper":
+                data = b'{"data_port":12345}'
+            writer.write(f"AHW {proof.hex()} {data.hex()}\n".encode())
+            await writer.drain()
+            assert await reader.readline() == b""
+        assert agent._queue_peer_probe.call_count == int(fault == "valid")
+    finally:
         writer.close()
         await writer.wait_closed()
         server.close()
         await server.wait_closed()
-
-    async def test_v1_ping_still_returns_v1_pong(self):
-        """A v2.1 (4-field) APING from a legacy peer still gets a v1 APONG."""
-        from macfleet.security.auth import sign_heartbeat
-
-        sec = SecurityConfig(token="fleet-token")
-        fleet_key = sec.fleet_key
-        agent = _start_agent("fleet-token")
-
-        server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
-        )
-        port = server.sockets[0].getsockname()[1]
-
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        nonce = secrets.token_bytes(16)
-        sig = sign_heartbeat(fleet_key, "legacy-pinger", nonce)
-        writer.write(f"APING legacy-pinger {nonce.hex()} {sig.hex()}\n".encode())
-        await writer.drain()
-
-        response = await asyncio.wait_for(reader.readline(), timeout=2.0)
-        assert response.startswith(b"APONG")
-        parts = response.decode().strip().split(" ")
-        assert len(parts) == 4, f"legacy ping should get 4-field APONG, got: {parts}"
-
-        writer.close()
-        await writer.wait_closed()
-        server.close()
-        await server.wait_closed()
-
-    async def test_v2_wrong_key_no_response(self):
-        wrong_key = SecurityConfig(token="wrong-token").fleet_key
-        agent = _start_agent("correct-token")
-
-        server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
-        )
-        port = server.sockets[0].getsockname()[1]
-
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        nonce = secrets.token_bytes(16)
-        hw_json = HardwareExchange(gpu_cores=1).to_json_bytes()
-        sig = sign_heartbeat_with_hw(wrong_key, "attacker", nonce, hw_json)
-        writer.write(
-            f"APING attacker {nonce.hex()} {sig.hex()} {hw_json.hex()}\n".encode()
-        )
-        await writer.drain()
-
-        # Expect connection closed with no APONG
-        response = await asyncio.wait_for(reader.read(1024), timeout=1.0)
-        assert not response.startswith(b"APONG")
-
-        writer.close()
-        await writer.wait_closed()
-        server.close()
-        await server.wait_closed()
-
-    async def test_v2_tampered_hw_no_response(self):
-        """Signature over one HW, wire carrying a different HW → rejected."""
-        sec = SecurityConfig(token="fleet-token")
-        fleet_key = sec.fleet_key
-        agent = _start_agent("fleet-token")
-
-        server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
-        )
-        port = server.sockets[0].getsockname()[1]
-
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        nonce = secrets.token_bytes(16)
-        real_hw = HardwareExchange(gpu_cores=8).to_json_bytes()
-        lying_hw = HardwareExchange(gpu_cores=128).to_json_bytes()
-        sig = sign_heartbeat_with_hw(fleet_key, "pinger", nonce, real_hw)
-        # Wire the inflated HW but use the signature over the honest HW
-        writer.write(
-            f"APING pinger {nonce.hex()} {sig.hex()} {lying_hw.hex()}\n".encode()
-        )
-        await writer.drain()
-
-        response = await asyncio.wait_for(reader.read(1024), timeout=1.0)
-        assert not response.startswith(b"APONG")
-
-        writer.close()
-        await writer.wait_closed()
-        server.close()
-        await server.wait_closed()
-
-    async def test_v2_oversize_hw_rejected(self):
-        """HW payload past HW_HANDSHAKE_MAX_JSON_BYTES → silently dropped."""
-        sec = SecurityConfig(token="fleet-token")
-        fleet_key = sec.fleet_key
-        agent = _start_agent("fleet-token")
-
-        server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
-        )
-        port = server.sockets[0].getsockname()[1]
-
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        nonce = secrets.token_bytes(16)
-        # Craft a valid signature over a giant HW blob (still rejected by bounds)
-        giant_hw = b"x" * (HW_HANDSHAKE_MAX_JSON_BYTES + 100)
-        sig = sign_heartbeat_with_hw(fleet_key, "pinger", nonce, giant_hw)
-        writer.write(
-            f"APING pinger {nonce.hex()} {sig.hex()} {giant_hw.hex()}\n".encode()
-        )
-        await writer.drain()
-
-        response = await asyncio.wait_for(reader.read(1024), timeout=1.0)
-        assert not response.startswith(b"APONG")
-
-        writer.close()
-        await writer.wait_closed()
-        server.close()
-        await server.wait_closed()
-
-    async def test_v2_malformed_hex_rejected(self):
-        agent = _start_agent("fleet-token")
-
-        server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
-        )
-        port = server.sockets[0].getsockname()[1]
-
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        writer.write(b"APING attacker not-hex not-hex not-hex\n")
-        await writer.drain()
-
-        response = await asyncio.wait_for(reader.read(1024), timeout=1.0)
-        assert not response.startswith(b"APONG")
-
-        writer.close()
-        await writer.wait_closed()
-        server.close()
-        await server.wait_closed()
-
-
-# ------------------------------------------------------------------ #
-# Integration: _add_manual_peer registers with real HW from APONG v2  #
-# ------------------------------------------------------------------ #
 
 
 class TestAddManualPeerCapabilityExchange:
     async def test_manual_peer_registered_with_real_hw(self):
         """Alice `--peer`s Bob; after APING/APONG v2 Alice's registry has Bob's real HW."""
         sec = SecurityConfig(token="fleet-token")
-        sec.tls = False  # test uses plain TCP server; skip TLS
 
         # Bob: the peer Alice will connect to
         bob = _start_agent("fleet-token")
-        bob._security.tls = False
         # Override Bob's HW so we can detect that Alice got the real values
         from macfleet.engines.base import HardwareProfile
         bob.hardware = HardwareProfile(
@@ -324,14 +160,13 @@ class TestAddManualPeerCapabilityExchange:
         bob.data_port = 60052
 
         bob_server = await asyncio.start_server(
-            bob._handle_heartbeat_ping, "127.0.0.1", 0,
+            bob._handle_heartbeat_ping, "127.0.0.1", 0, ssl=bob._heartbeat_ssl_ctx,
         )
         bob_port = bob_server.sockets[0].getsockname()[1]
 
         # Alice: the caller. We need her background components up to use
         # _add_manual_peer. Minimum: registry + heartbeat bookkeeping.
         alice = _start_agent("fleet-token")
-        alice._security.tls = False
         alice.hardware.node_id = "alice-aaaaaaaa"
         alice.hardware.hostname = "alice"
 
@@ -375,7 +210,8 @@ class TestAddManualPeerCapabilityExchange:
         from macfleet.security.auth import sign_heartbeat_response
 
         sec = SecurityConfig(token="fleet-token")
-        fleet_key = sec.fleet_key
+        bob = _start_agent("fleet-token")
+        fleet_key = heartbeat_channel_key(sec.fleet_key, bob._heartbeat_cert)
 
         # Bob answers the (5-field) APING with a 4-field APONG whose
         # signature is correctly bound to Alice's request nonce.
@@ -396,11 +232,10 @@ class TestAddManualPeerCapabilityExchange:
             writer.close()
             await writer.wait_closed()
 
-        server = await asyncio.start_server(hw_less_bob, "127.0.0.1", 0)
+        server = await asyncio.start_server(hw_less_bob, "127.0.0.1", 0, ssl=bob._heartbeat_ssl_ctx)
         bob_port = server.sockets[0].getsockname()[1]
 
         alice = _start_agent("fleet-token")
-        alice._security.tls = False
         alice.hardware.node_id = "alice-aaaaaaaa"
 
         from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig
@@ -441,7 +276,8 @@ class TestAddManualPeerCapabilityExchange:
         from macfleet.security.auth import sign_heartbeat
 
         sec = SecurityConfig(token="fleet-token")
-        fleet_key = sec.fleet_key
+        bob = _start_agent("fleet-token")
+        fleet_key = heartbeat_channel_key(sec.fleet_key, bob._heartbeat_cert)
 
         async def legacy_bob(reader, writer):
             data = await asyncio.wait_for(reader.readline(), timeout=2.0)
@@ -458,11 +294,10 @@ class TestAddManualPeerCapabilityExchange:
             writer.close()
             await writer.wait_closed()
 
-        server = await asyncio.start_server(legacy_bob, "127.0.0.1", 0)
+        server = await asyncio.start_server(legacy_bob, "127.0.0.1", 0, ssl=bob._heartbeat_ssl_ctx)
         bob_port = server.sockets[0].getsockname()[1]
 
         alice = _start_agent("fleet-token")
-        alice._security.tls = False
         alice.hardware.node_id = "alice-bbbbbbbb"
 
         from macfleet.pool.heartbeat import GossipHeartbeat, HeartbeatConfig
@@ -560,7 +395,8 @@ async def test_reverse_probe_requires_fresh_matching_identity(manual_agents, inv
             elif invalid_reply == "nan_hardware":
                 hardware = b'{"ram_gb":NaN}'
             signature = sign_heartbeat_response(
-                bob._security.fleet_key, node_id, response_nonce, signed_nonce, hw_json=hardware,
+                heartbeat_channel_key(bob._security.fleet_key, bob._heartbeat_cert),
+                node_id, response_nonce, signed_nonce, hw_json=hardware,
             )
             suffix = f" {hardware.hex()}" if hardware is not None else ""
             writer.write(f"APONG {node_id} {response_nonce.hex()} {signature.hex()}{suffix}\n".encode())
@@ -572,15 +408,10 @@ async def test_reverse_probe_requires_fresh_matching_identity(manual_agents, inv
     server = await asyncio.start_server(endpoint, "127.0.0.1", 0, ssl=bob._heartbeat_ssl_ctx)
     port = server.sockets[0].getsockname()[1]
     hardware = json.dumps({"heartbeat_port": port, "data_port": 50052}).encode()
-    signature = sign_heartbeat_with_hw(bob._security.fleet_key, "claimed-peer", original_nonce, hardware)
-    captured_ping = f"APING claimed-peer {original_nonce.hex()} {signature.hex()} {hardware.hex()}\n".encode()
-
     async def replay_ping():
         reader, writer = await asyncio.open_connection("127.0.0.1", bob.port, ssl=create_client_ssl_context())
         try:
-            writer.write(captured_ping)
-            await writer.drain()
-            assert (await reader.readline()).startswith(b"APONG")
+            await request_heartbeat(reader, writer, bob._security.fleet_key, "claimed-peer", hardware, bob.node_id)
         finally:
             writer.close()
             await writer.wait_closed()
@@ -635,7 +466,6 @@ async def test_late_authenticated_heartbeat_cannot_update_changed_membership(mem
     from macfleet.pool.registry import ClusterRegistry
 
     agent = _start_agent("heartbeat-lifecycle-token")
-    agent._security.tls = False  # Exercise signed APONG over a controlled loopback server.
     agent._registry = ClusterRegistry(agent.node_id)
     agent._heartbeat = GossipHeartbeat(
         agent.node_id, security=agent._security,
@@ -655,7 +485,8 @@ async def test_late_authenticated_heartbeat_cannot_update_changed_membership(mem
             await reply.wait()
             nonce = secrets.token_bytes(16)
             signature = sign_heartbeat_response(
-                agent._security.fleet_key, "peer", nonce, request_nonce, hw_json=old_hw,
+                heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert),
+                "peer", nonce, request_nonce, hw_json=old_hw,
             )
             writer.write(f"APONG peer {nonce.hex()} {signature.hex()} {old_hw.hex()}\n".encode())
             await writer.drain()
@@ -664,7 +495,7 @@ async def test_late_authenticated_heartbeat_cannot_update_changed_membership(mem
             await writer.wait_closed()
             endpoint_done.set()
 
-    server = await asyncio.start_server(endpoint, "127.0.0.1", 0)
+    server = await asyncio.start_server(endpoint, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx)
     discovered = DiscoveredNode(
         hostname="peer", node_id="peer", ip_address="127.0.0.1",
         port=server.sockets[0].getsockname()[1], data_port=50052,
@@ -700,3 +531,39 @@ async def test_late_authenticated_heartbeat_cannot_update_changed_membership(mem
         await asyncio.wait_for(endpoint_done.wait(), 1)
         server.close()
         await server.wait_closed()
+
+
+async def test_tls_relay_cannot_authenticate_or_read_client_hardware():
+    from macfleet.security.auth import create_server_tls_context
+
+    backend = _start_agent("relay-test-fleet-token")
+    intercepted = []
+    relay_ctx, _ = create_server_tls_context()
+    async with await asyncio.start_server(backend._handle_heartbeat_ping, "127.0.0.1", 0,
+                                          ssl=backend._heartbeat_ssl_ctx) as service:
+        async def relay(reader, writer):
+            upstream, connection = await asyncio.open_connection(
+                "127.0.0.1", service.sockets[0].getsockname()[1], ssl=create_client_ssl_context())
+            try:
+                intercepted.append(await reader.readline())
+                connection.write(intercepted[0])
+                await connection.drain()
+                intercepted.append(await upstream.readline())
+                writer.write(intercepted[1])
+                await writer.drain()
+            finally:
+                connection.close()
+                writer.close()
+                await asyncio.gather(connection.wait_closed(), writer.wait_closed())
+
+        async with await asyncio.start_server(relay, "127.0.0.1", 0, ssl=relay_ctx) as proxy:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", proxy.sockets[0].getsockname()[1], ssl=create_client_ssl_context())
+            try:
+                with pytest.raises(ValueError, match="heartbeat response"):
+                    await request_heartbeat(reader, writer, backend._security.fleet_key, "alice", b"private hardware")
+            finally:
+                writer.close()
+                await writer.wait_closed()
+    assert len(intercepted[0].split()) == 4
+    assert intercepted[1] == b""

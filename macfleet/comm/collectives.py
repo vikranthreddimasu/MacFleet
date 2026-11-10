@@ -25,7 +25,7 @@ from typing import Any, Optional, cast
 
 import numpy as np
 
-from macfleet.comm.protocol import MessageType
+from macfleet.comm.protocol import MAX_PAYLOAD_SIZE, MessageType
 from macfleet.comm.transport import PeerTransport
 
 # --------------------------------------------------------------------------- #
@@ -34,6 +34,7 @@ from macfleet.comm.transport import PeerTransport
 # --------------------------------------------------------------------------- #
 
 MAX_ARRAY_DTYPE_LEN = 32
+_ARRAY_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_ARRAY_NDIMS = 8
 MAX_ARRAY_NUMEL = 2_000_000_000
 ALLOWED_ARRAY_DTYPES = frozenset({
@@ -52,7 +53,7 @@ ALLOWED_ARRAY_DTYPES = frozenset({
 })
 
 
-def pack_array(array: np.ndarray) -> bytes:
+def _array_header(array: np.ndarray) -> bytes:
     """Serialize a numpy array to bytes with shape/dtype metadata."""
     if not isinstance(array, np.ndarray):
         raise TypeError("array serialization requires a numpy.ndarray")
@@ -67,10 +68,14 @@ def pack_array(array: np.ndarray) -> bytes:
     if str(array.dtype) not in ALLOWED_ARRAY_DTYPES:
         raise ValueError(f"unsupported array dtype: {array.dtype}")
     header = struct.pack(f"!HH{'I' * ndims}", len(dtype_str), ndims, *array.shape)
-    return header + dtype_str + array.tobytes()  # type: ignore[no-any-return]
+    return header + dtype_str
 
 
-def unpack_array(data: bytes) -> np.ndarray:
+def pack_array(array: np.ndarray) -> bytes:
+    return _array_header(array) + array.tobytes()  # type: ignore[no-any-return]
+
+
+def _parse_array_header(data: bytes) -> tuple[np.dtype, tuple[int, ...], int, int]:
     """Deserialize bytes back to a numpy array."""
     if len(data) < 4:
         raise ValueError("Array payload too short for metadata header")
@@ -96,9 +101,12 @@ def unpack_array(data: bytes) -> np.ndarray:
         numel *= int(dim)
         if numel > MAX_ARRAY_NUMEL:
             raise ValueError(f"Array element count {numel} exceeds limit {MAX_ARRAY_NUMEL}")
-    data_start = dtype_end
+    return dtype, shape, dtype_end, numel * dtype.itemsize
+
+
+def unpack_array(data: bytes) -> np.ndarray:
+    dtype, shape, data_start, expected_bytes = _parse_array_header(data)
     payload = data[data_start:]
-    expected_bytes = numel * dtype.itemsize
     if len(payload) != expected_bytes:
         raise ValueError(
             f"Array payload size mismatch: expected {expected_bytes}B, got {len(payload)}B"
@@ -194,20 +202,42 @@ class CollectiveGroup:
     async def _send_array(self, rank: int, array: np.ndarray) -> None:
         """Send a numpy array to the peer at the given rank."""
         peer_id = self._peer_for_rank(rank)
-        payload = pack_array(array)
-        await asyncio.wait_for(
-            self._transport.send(peer_id, payload, msg_type=MessageType.GRADIENT),
-            timeout=self._config.recv_timeout_sec,
-        )
+        header = _array_header(array)
+
+        async def send(payload: bytes) -> None:
+            await asyncio.wait_for(
+                self._transport.send(peer_id, payload, msg_type=MessageType.GRADIENT),
+                timeout=self._config.recv_timeout_sec,
+            )
+
+        if len(header) + array.nbytes <= MAX_PAYLOAD_SIZE:
+            await send(header + array.tobytes())
+            return
+        # Zero dtype length distinguishes a chunk descriptor from an ordinary array.
+        await send(b"\x00\x00" + header)
+        raw = np.ascontiguousarray(array).data.cast("B")
+        for start in range(0, len(raw), _ARRAY_CHUNK_BYTES):
+            await send(bytes(raw[start:start + _ARRAY_CHUNK_BYTES]))
 
     async def _recv_array(self, rank: int) -> np.ndarray:
-        """Receive a numpy array from the peer at the given rank."""
         peer_id = self._peer_for_rank(rank)
-        payload = await asyncio.wait_for(
-            self._transport.recv(peer_id),
-            timeout=self._config.recv_timeout_sec,
-        )
-        return unpack_array(payload)
+
+        async def recv() -> bytes:
+            return await asyncio.wait_for(self._transport.recv(peer_id), timeout=self._config.recv_timeout_sec)
+
+        payload = await recv()
+        if not payload.startswith(b"\x00\x00"):
+            return unpack_array(payload)
+        dtype, shape, end, size = _parse_array_header(payload[2:])
+        if end + 2 != len(payload) or size + end <= MAX_PAYLOAD_SIZE:
+            raise ValueError("Invalid chunked array descriptor")
+        data = bytearray()
+        while len(data) < size:
+            chunk = await recv()
+            if len(chunk) != min(size - len(data), _ARRAY_CHUNK_BYTES):
+                raise ValueError("Invalid array chunk size")
+            data.extend(chunk)
+        return np.frombuffer(data, dtype=dtype).reshape(shape)
 
     @staticmethod
     def _validate_array(expected: np.ndarray, received: np.ndarray) -> None:
@@ -238,14 +268,25 @@ class CollectiveGroup:
         if op not in ("mean", "sum"):
             raise ValueError(f"Unknown reduction op: {op!r}. Valid ops: 'mean', 'sum'")
 
+        if self.world_size >= 3:
+            # Ring padding and integer promotion erase the original layout.
+            metadata = np.full(MAX_ARRAY_NDIMS + 3, -1, dtype=np.int64)
+            valid = str(array.dtype) in ALLOWED_ARRAY_DTYPES and array.ndim <= MAX_ARRAY_NDIMS
+            metadata[:3] = (array.dtype.num if valid else -1, array.ndim, int(op == "mean"))
+            metadata[3:3 + array.ndim] = array.shape[:MAX_ARRAY_NDIMS]
+            gathered = await self.gather(metadata, dst=0)
+            consistent = np.array([valid and gathered is not None and np.all(gathered == metadata)])
+            if not (await self.broadcast(consistent, src=0)).item():
+                raise ValueError("Collective array mismatch: all ranks must use the same shape, dtype and op")
+
+        if self.world_size == 2:
+            return await self._direct_allreduce(array, op)
+
         # Integer means must not truncate on the ring or overflow before division.
         if op == "mean" and array.dtype.kind in "biu":
             array = array.astype(np.float64)
         if self.world_size == 1:
             return array
-
-        if self.world_size == 2:
-            return await self._direct_allreduce(array, op)
 
         return await self._ring_allreduce(array, op)
 
@@ -268,6 +309,8 @@ class CollectiveGroup:
         self._validate_array(array, remote)
 
         if op == "mean":
+            if array.dtype.kind in "biu":
+                array = array.astype(np.float64)
             return cast(np.ndarray, (array + remote) / 2.0)
         elif op == "sum":
             return cast(np.ndarray, array + remote)

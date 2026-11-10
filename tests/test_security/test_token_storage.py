@@ -56,3 +56,27 @@ def test_read_checks_permissions_of_opened_file(token_path, monkeypatch):
     monkeypatch.setattr(os, "open", replace_before_open)
     with pytest.raises(PermissionError, match="permissive mode"):
         auth._read_token_file()
+
+
+def test_concurrent_first_start_returns_one_saved_token(token_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from time import sleep
+
+    token_path.unlink()
+    monkeypatch.delenv(auth.TOKEN_ENV_VAR, raising=False)
+    generate = auth.generate_fleet_token
+
+    def slow_generate():
+        sleep(0.05)
+        return generate()
+
+    monkeypatch.setattr(auth, "generate_fleet_token", slow_generate)
+    start = Barrier(8)
+
+    def resolve(_):
+        start.wait()
+        return auth.resolve_token_with_file(auto_generate=True)
+
+    with ThreadPoolExecutor(8) as workers:
+        assert set(workers.map(resolve, range(8))) == {token_path.read_text()}

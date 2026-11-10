@@ -26,6 +26,8 @@ from macfleet.security.auth import (
     HW_HANDSHAKE_MAX_JSON_BYTES,
     RATE_LIMIT_MAX_FAILURES,
     SecurityConfig,
+    create_client_ssl_context,
+    heartbeat_channel_key,
     sign_heartbeat,
     sign_heartbeat_with_hw,
 )
@@ -36,8 +38,7 @@ CONFIG = TransportConfig(connect_timeout_sec=5.0, recv_timeout_sec=5.0)
 def _start_agent_with_token(token: str = "fleet-token-very-long-and-strong") -> PoolAgent:
     """Build a PoolAgent for in-process heartbeat handler testing."""
     from macfleet.engines.base import HardwareProfile
-    agent = PoolAgent(token=token, tls=False, port=50051, data_port=50052)
-    agent._security.tls = False
+    agent = PoolAgent(token=token, tls=True, port=50051, data_port=50052)
     agent.hardware = HardwareProfile(
         hostname="test-host", node_id="test-host-abc123",
         gpu_cores=10, ram_gb=24.0, memory_bandwidth_gbps=300.0,
@@ -66,13 +67,13 @@ class TestBruteForceBan:
             agent._heartbeat_rate_limiter.record_failure("127.0.0.1")
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
         # The 5th wrong-key APING completes the ban condition.
         try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
             nonce = secrets.token_bytes(16)
             sig = sign_heartbeat(wrong_key, "attacker", nonce)
             writer.write(f"APING attacker {nonce.hex()} {sig.hex()}\n".encode())
@@ -97,8 +98,8 @@ class TestBruteForceBan:
         )
 
         # Even a valid ping is dropped without APONG once banned.
-        fleet_key = agent._security.fleet_key
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        fleet_key = heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         nonce = secrets.token_bytes(16)
         sig = sign_heartbeat(fleet_key, "honest", nonce)
         writer.write(f"APING honest {nonce.hex()} {sig.hex()}\n".encode())
@@ -126,10 +127,10 @@ class TestBruteForceBan:
 class TestReplayAttack:
     async def test_captured_aping_replayed_with_changed_nonce_rejected(self):
         agent = _start_agent_with_token()
-        fleet_key = agent._security.fleet_key
+        fleet_key = heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert)
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
@@ -139,7 +140,7 @@ class TestReplayAttack:
 
         # Replay it with a tampered nonce — sig is no longer valid.
         tampered_nonce = secrets.token_bytes(16)
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         writer.write(
             f"APING honest-peer {tampered_nonce.hex()} {sig.hex()}\n".encode(),
         )
@@ -168,10 +169,10 @@ class TestReplayAttack:
     async def test_captured_hw_payload_with_different_nonce_rejected(self):
         """v2.2 PR 4: the HW HMAC binds to the per-session nonce."""
         agent = _start_agent_with_token()
-        fleet_key = agent._security.fleet_key
+        fleet_key = heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert)
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
@@ -184,7 +185,7 @@ class TestReplayAttack:
 
         # Replay the same sig with a fresh nonce.
         new_nonce = secrets.token_bytes(16)
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         writer.write(
             (
                 f"APING honest-peer {new_nonce.hex()} "
@@ -217,14 +218,14 @@ class TestReplayAttack:
 class TestOversizePayloadDoS:
     async def test_oversize_hw_in_aping_v2_rejected(self):
         agent = _start_agent_with_token()
-        fleet_key = agent._security.fleet_key
+        fleet_key = heartbeat_channel_key(agent._security.fleet_key, agent._heartbeat_cert)
 
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         nonce = secrets.token_bytes(16)
         # Build HW payload larger than the cap. Sign it correctly so we
         # exercise the size check (not the HMAC check).
@@ -269,7 +270,7 @@ class TestOversizePayloadDoS:
             0, 0, 0,
         )
         # Connect raw; bypass handshake auth (server will reject quickly).
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         writer.write(evil_header)
         await writer.drain()
 
@@ -296,14 +297,14 @@ class TestSlowloris:
     async def test_handler_drops_silent_connection_within_timeout(self):
         agent = _start_agent_with_token()
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
         # Open a connection but never send.
         import time
         start = time.monotonic()
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         # Server's read timeout is HEARTBEAT_READ_TIMEOUT_SEC (1s). It
         # should drop us shortly after.
         try:
@@ -405,12 +406,12 @@ class TestBenignNoise:
         """RST-on-connect / port scan shouldn't increment the failure counter."""
         agent = _start_agent_with_token()
         server = await asyncio.start_server(
-            agent._handle_heartbeat_ping, "127.0.0.1", 0,
+            agent._handle_heartbeat_ping, "127.0.0.1", 0, ssl=agent._heartbeat_ssl_ctx,
         )
         port = server.sockets[0].getsockname()[1]
 
         # Connect, immediately close (no data).
-        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port, ssl=create_client_ssl_context())
         writer.close()
         try:
             await writer.wait_closed()

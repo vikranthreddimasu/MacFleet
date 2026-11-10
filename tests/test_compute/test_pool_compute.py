@@ -94,8 +94,8 @@ class TestPoolMap:
     def test_map_timeout_is_enforced_for_registered_tasks(self):
         with Pool(open=True) as pool:
             start = time.monotonic()
-            with pytest.raises(TimeoutError, match="Pool.map task .* timed out after 0.05s"):
-                pool.map(_slow_value, [0.5], timeout=0.05)
+            with pytest.raises(TimeoutError, match="Pool.map batch timed out after 0.05s"):
+                pool.map(_slow_value, [0.035] * 4, timeout=0.05, max_workers=1)
             elapsed = time.monotonic() - start
 
         assert elapsed < 0.25

@@ -33,8 +33,8 @@ macfleet pair --host 192.168.1.10:61234 --code AB12CD-EF34GH-IJ56KL-MN78OP
 macfleet join
 ```
 
-The one-time code proves to the enrollment server that Mac #2 saw the
-human-visible code. The credential transfer itself happens over TLS and
+Both Macs must run the same updated build. Each proves it knows the one-time
+code; Mac #2 verifies the returned credentials before saving them. The credential transfer itself happens over TLS and
 uses a channel-bound HMAC proof, so the permanent fleet token is not
 placed in terminal history, pasteboards, QR images, or chat logs.
 

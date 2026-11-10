@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security and training
+
+- Pairing now authenticates the returned credentials. Secure heartbeat peers
+  prove fleet membership on the same TLS connection before exchanging hardware.
+  Upgrade every Mac together; older secure heartbeat and pairing peers will be rejected.
+- Weight gradients by sample count for uneven batches; preserve unused Torch
+  parameters and publish rank zero's final buffers. Both engines retain integer inputs.
+- Reject incompatible ring inputs before padding and transfer large collective
+  arrays across multiple frames. Concurrent first starts share one saved token.
+
 ### Reliability and simplification
 
 - Clean up interrupted pool joins before propagating the error, allowing the

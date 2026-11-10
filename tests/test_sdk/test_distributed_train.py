@@ -266,3 +266,66 @@ async def test_global_batch_size_must_not_be_silently_rounded():
         for i in range(2)
     ), return_exceptions=True)
     assert all(isinstance(result, ValueError) and "divisible" in str(result) for result in results)
+
+
+async def test_embedding_batchnorm_inference_matches_single_mac_shard_reference():
+    import copy
+
+    from macfleet.training.sampler import WeightedDistributedSampler
+
+    torch.manual_seed(18)
+    model = nn.Sequential(nn.Embedding(16, 3), nn.BatchNorm1d(3), nn.Linear(3, 1))
+    ids = np.arange(8, dtype=np.int64)
+    targets = torch.arange(8, dtype=torch.float32).reshape(-1, 1)
+    replicas = [copy.deepcopy(model) for _ in range(2)]
+    # Compute both shard losses locally, retaining rank zero's running stats.
+    refs = [model, copy.deepcopy(model)]
+    for rank, ref in enumerate(refs):
+        indices = list(WeightedDistributedSampler(ids, 2, rank, seed=0, drop_last=True))
+        nn.functional.mse_loss(ref(torch.from_numpy(ids[indices])), targets[indices]).backward()
+    for p, q in zip(model.parameters(), refs[1].parameters()):
+        p.grad = (p.grad + q.grad) / 2
+    torch.optim.SGD(model.parameters(), lr=.01).step()
+    expected = model.eval()(torch.from_numpy(ids))
+    specs = _make_specs(2)
+    await asyncio.gather(*(
+        _distributed_train_torch(local_id=spec.node_id, nodes=specs, model=replica, dataset=(ids, targets),
+                                 optimizer=torch.optim.SGD(replica.parameters(), lr=.01), loss_fn=nn.MSELoss(),
+                                 epochs=1, batch_size=8, lr=.01, device="cpu")
+        for spec, replica in zip(specs, replicas)
+    ))
+    for replica in replicas:
+        for name, value in replica.state_dict().items():
+            torch.testing.assert_close(value, model.state_dict()[name])
+        torch.testing.assert_close(replica.eval()(torch.from_numpy(ids)), expected)
+
+
+async def test_mlx_embedding_step_matches_single_mac():
+    mx = pytest.importorskip("mlx.core")
+    import mlx.nn as mnn
+    import mlx.optimizers as optim
+
+    from macfleet.sdk.pool import _distributed_train_mlx
+
+    ids = np.arange(8, dtype=np.int32) % 4
+    y = np.arange(8, dtype=np.float32)
+    def make():
+        model = mnn.Embedding(4, 1)
+        model.weight = mx.arange(4, dtype=mx.float32).reshape(4, 1)
+        return model
+
+    def loss(model, x, target):
+        return mx.mean((model(x).reshape(-1) - target)**2)
+
+    ref = make()
+    _, grads = mnn.value_and_grad(ref, loss)(ref, mx.array(ids), mx.array(y))
+    optim.SGD(learning_rate=.1).update(ref, grads)
+    models = [make(), make()]
+    specs = _make_specs(2)
+    await asyncio.gather(*(
+        _distributed_train_mlx(local_id=s.node_id, nodes=specs, model=m, optimizer=optim.SGD(learning_rate=.1),
+                               dataset=(ids, y), loss_fn=loss, epochs=1, batch_size=8, lr=.1)
+        for s, m in zip(specs, models)
+    ))
+    for model in models:
+        np.testing.assert_allclose(np.array(model.weight), np.array(ref.weight), atol=1e-6)

@@ -23,9 +23,10 @@ pool.train(
 Returns a dict: `{"loss": ..., "epochs": ..., "time_sec": ..., "steps": ...}`.
 In distributed mode it also includes `rank`, `world_size`,
 `avg_sync_time_sec`, `params_sha256`, `degraded`, `unsynced_steps`,
-`validation_fallback_steps`, and `last_sync_error`. The hash matches
-across ranks iff the fleet stayed in sync (same check
-`tools/two_mac_real_train.py` uses).
+`validation_fallback_steps`, and `last_sync_error`. The hash covers final parameter values. PyTorch also broadcasts rank
+zero's final buffers, including BatchNorm running statistics, so every replica
+uses the same buffers at inference. During training, BatchNorm still computes
+statistics on each local batch.
 
 `degraded=True` means at least one step used a local fallback instead of
 a clean synchronized gradient. `unsynced_steps` counts allreduce or
@@ -46,6 +47,11 @@ after `loss.backward(); optimizer.step()`, the module's parameters
 have moved. The returned dict is the training summary, not the final
 state. If you want to save weights, save from the same `model`
 object after `pool.train` returns.
+
+For low-level `training_loop` callers using `DistributedBatchSampler`, use a
+mean loss over local examples. Gradients are weighted by each rank's actual
+share of that batch, including partial or padded final batches. Direct
+`DataParallel.sync_gradients` callers can pass `sample_weight` for uneven batches.
 
 ## Batching across ranks
 

@@ -148,7 +148,7 @@ async def training_loop(
         epoch_sync_times = []
         epoch_step_times = []
 
-        for batch in dataloader:
+        for batch_index, batch in enumerate(dataloader):
             step_start = time.monotonic()
 
             # Forward + backward
@@ -157,7 +157,9 @@ async def training_loop(
             engine.backward(loss)
 
             # Gradient sync across all nodes
-            sync_time = await dp.sync_gradients()
+            weight = getattr(sampler, "sample_weight", None)
+            sync_time = (await dp.sync_gradients(sample_weight=weight(batch_index))
+                         if weight is not None else await dp.sync_gradients())
 
             if config.max_grad_norm > 0:
                 gradients = engine.get_flat_gradients()
@@ -165,7 +167,11 @@ async def training_loop(
                 if not math.isfinite(norm):
                     raise RuntimeError("Non-finite gradient norm; optimizer step aborted")
                 if norm > config.max_grad_norm:
-                    engine.apply_flat_gradients(gradients * (config.max_grad_norm / norm))
+                    clipped = gradients * (config.max_grad_norm / norm)
+                    if hasattr(engine, "gradient_presence"):
+                        engine.apply_flat_gradients(clipped, presence=engine.gradient_presence())  # type: ignore[call-arg]
+                    else:
+                        engine.apply_flat_gradients(clipped)
 
             # Optimizer step
             engine.step()
@@ -204,6 +210,8 @@ async def training_loop(
         if config.on_epoch:
             config.on_epoch(epoch, epoch_result)
 
+    if dp.world_size > 1:
+        await dp.sync_buffers()
     total_time = time.monotonic() - total_start
     return TrainingResult(
         epochs_completed=config.epochs,
