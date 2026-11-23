@@ -8,6 +8,8 @@ Your first distributed training run, start to finish.
 
 Before adding a second Mac, verify the basics work solo:
 
+Install PyTorch first with `pip install "macfleet[torch]"`.
+
 ```python
 import macfleet
 import torch
@@ -37,9 +39,8 @@ with macfleet.Pool() as pool:
 print(result)  # {"loss": 0.4, "epochs": 5, "time_sec": 2.1, "steps": 80}
 ```
 
-That runs single-node, no agent, no discovery. (A fleet token is
-auto-generated to `~/.macfleet/fleet-token` on first run, but no peers
-are advertised until you set `enable_pool_distributed=True`.)
+That runs single-node, with no agent or discovery. A fleet token is generated
+when you first join a secure fleet, including when distributed mode starts.
 Good baseline.
 
 ## Two-Mac setup

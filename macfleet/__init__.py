@@ -8,7 +8,7 @@ Zero-config discovery. Framework-agnostic engines. Adaptive networking. Lazy-imp
 import logging
 from typing import TYPE_CHECKING
 
-__version__ = "2.2.1"
+__version__ = "2.3.0.dev0"
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())
 

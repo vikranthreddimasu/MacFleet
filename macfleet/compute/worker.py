@@ -145,23 +145,21 @@ class TaskWorker:
                 execution = loop.run_in_executor(self._executor, partial(entry.fn, *args, **kwargs))
                 self._executions.add(execution)
                 execution.add_done_callback(self._executions.discard)
-                value = await asyncio.wait_for(
-                    asyncio.shield(execution),
-                    timeout=spec.timeout_sec,
-                )
-                result = TaskResult.success(spec.task_id, value)
-                audit_event(
-                    "task.executed",
-                    task_name=spec.task_name,
-                    coordinator=self._coordinator,
-                )
-            except asyncio.TimeoutError:
-                result = TaskResult(
-                    task_id=spec.task_id,
-                    ok=False,
-                    error=(f"Task timed out after {spec.timeout_sec}s. "
-                           "Execution may still be running; check the worker before retrying."),
-                )
+                done, _ = await asyncio.wait([execution], timeout=spec.timeout_sec)
+                if done:
+                    result = TaskResult.success(spec.task_id, execution.result())
+                    audit_event(
+                        "task.executed",
+                        task_name=spec.task_name,
+                        coordinator=self._coordinator,
+                    )
+                else:
+                    result = TaskResult(
+                        task_id=spec.task_id,
+                        ok=False,
+                        error=(f"Task timed out after {spec.timeout_sec}s. "
+                               "Execution may still be running; check the worker before retrying."),
+                    )
             except TaskAuthorizationError as e:
                 audit_event(
                     "task.authorization_denied",

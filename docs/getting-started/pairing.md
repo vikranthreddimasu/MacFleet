@@ -21,9 +21,9 @@ macfleet join --bootstrap
 This starts the normal agent and prints a command like:
 
 ```bash
-Pair another Mac with this one-time command:
+Pair another Mac with this enrollment command:
   macfleet pair --host 192.168.1.10:61234 --code AB12CD-EF34GH-IJ56KL-MN78OP
-Code expires at 14:05:31 and can be used once.
+Code expires at 14:05:31 and can be used 1 time.
 ```
 
 On Mac #2:
@@ -33,10 +33,15 @@ macfleet pair --host 192.168.1.10:61234 --code AB12CD-EF34GH-IJ56KL-MN78OP
 macfleet join
 ```
 
-Both Macs must run the same updated build. Each proves it knows the one-time
-code; Mac #2 verifies the returned credentials before saving them. The credential transfer itself happens over TLS and
-uses a channel-bound HMAC proof, so the permanent fleet token is not
-placed in terminal history, pasteboards, QR images, or chat logs.
+Install the same MacFleet build on both Macs. Enrollment protocol 2 uses the
+code to authenticate both sides. The joining Mac verifies a proof covering the
+returned credentials, its fresh nonce and the server's TLS certificate before
+saving its token. Earlier enrollment endpoints require an upgrade.
+
+If the connection drops while the credentials are being delivered, or the
+joining Mac cannot save them, a single-use code may already be spent. Fix
+the connection or file permissions, then issue a fresh code on the bootstrap
+Mac. For a named fleet, keep using the `--fleet-id` printed after pairing.
 
 Defaults:
 

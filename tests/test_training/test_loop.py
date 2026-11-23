@@ -127,3 +127,56 @@ async def test_weighted_gradient_and_unused_parameters_match_single_mac(optimize
             assert model.unused.grad is None and model.unused not in opt.state
     finally:
         await _teardown_mesh(transports)
+
+
+@pytest.mark.parametrize("optimizer_name", ["SGD", "AdamW"])
+async def test_clipped_conditional_gradients_match_single_mac(optimizer_name):
+    import asyncio
+
+    torch = pytest.importorskip("torch")
+    from macfleet.engines.torch_engine import TorchEngine
+    from macfleet.training.data_parallel import DataParallel
+    from macfleet.training.loop import training_loop
+    from tests.test_comm.test_collectives import _make_groups, _setup_mesh, _teardown_mesh
+
+    class Conditional(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.used = torch.nn.Parameter(torch.ones(()))
+            self.branch = torch.nn.Parameter(torch.ones(()))
+            self.unused = torch.nn.Parameter(torch.ones(()))
+
+        def forward(self, x):
+            value = self.used * x
+            if (x > 0).any():
+                value = value + self.branch * (x > 0)
+            return value.mean()
+
+    def build():
+        model = Conditional()
+        opt = getattr(torch.optim, optimizer_name)(model.parameters(), lr=0.1, weight_decay=0.1)
+        return model, opt
+
+    shards = [torch.tensor([0., 0.]), torch.tensor([2., 2.])]
+    expected, optimizer = build()
+    expected(torch.cat(shards)).backward()
+    torch.nn.utils.clip_grad_norm_(expected.parameters(), 0.5)
+    optimizer.step()
+
+    transports, _ = await _setup_mesh(2)
+    try:
+        ranks = [build(), build()]
+        runs = []
+        for group, (model, opt), shard in zip(_make_groups(transports), ranks, shards):
+            engine = TorchEngine(device="cpu")
+            engine.load_model(model, opt)
+            runs.append(training_loop(engine, DataParallel(engine, group), [shard],
+                                      TrainingConfig(epochs=1, max_grad_norm=0.5)))
+        await asyncio.gather(*runs)
+        for model, opt in ranks:
+            for param, ref in zip(model.parameters(), expected.parameters()):
+                torch.testing.assert_close(param, ref)
+            assert model.unused.grad is None and model.unused not in opt.state
+            torch.testing.assert_close(model.branch.grad, expected.branch.grad)
+    finally:
+        await _teardown_mesh(transports)

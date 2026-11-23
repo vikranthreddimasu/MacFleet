@@ -39,7 +39,7 @@ def test_status_reports_token_read_failure_without_traceback(monkeypatch):
     result = runner.invoke(cli, ["status"])
 
     assert result.exit_code == 1
-    assert "couldn't read fleet token" in result.output
+    assert "couldn't read fleet token" in result.output.lower()
     assert "status --open" in result.output
     assert "Traceback" not in result.output
 
@@ -65,7 +65,7 @@ def test_status_open_skips_saved_token_read(monkeypatch):
     result = runner.invoke(cli, ["status", "--open"])
 
     assert result.exit_code == 0
-    assert "No pool members found" in result.output
+    assert "No pool advertisements found" in result.output
 
 
 def test_status_json_outputs_empty_pool_without_human_banner(monkeypatch):
@@ -91,9 +91,31 @@ def test_status_json_outputs_empty_pool_without_human_banner(monkeypatch):
         "fleet_id": None,
         "count": 0,
         "nodes": [],
+        "discovery_only": True,
     }
     assert "Scanning" not in result.output
-    assert "No pool members" not in result.output
+    assert "No pool advertisements" not in result.output
+
+
+def test_status_discovery_error_is_actionable_in_text_and_json(monkeypatch):
+    class DeniedRegistry:
+        def __init__(self, security=None):
+            pass
+
+        def find_peers(self, timeout=3.0):
+            raise PermissionError("multicast denied")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr("macfleet.pool.discovery.ServiceRegistry", DeniedRegistry)
+    for args in (["status", "--open"], ["status", "--open", "--json"]):
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 1
+        assert "Local Network permission" in " ".join(result.output.split())
+        assert "Traceback" not in result.output
+        if "--json" in args:
+            assert "multicast denied" in json.loads(result.output)["error"]
 
 
 def test_status_json_outputs_sorted_nodes(monkeypatch):

@@ -34,7 +34,7 @@ import asyncio
 import math
 import time
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from macfleet.comm.collectives import CollectiveGroup, _gather
 from macfleet.comm.transport import (
@@ -118,6 +118,7 @@ async def form_mesh(
     local_hw: Optional[HardwareExchange] = None,
     config: Optional[TransportConfig] = None,
     bind_host: str = "0.0.0.0",
+    current_members: Optional[Callable[[], set[str]]] = None,
     rendezvous_timeout_sec: float = 60.0,
 ) -> Mesh:
     """Form a full training mesh among `nodes` and return it.
@@ -134,6 +135,7 @@ async def form_mesh(
             handshake (optional; affects election metadata only).
         config: TransportConfig override (timeouts, buffer sizes).
         bind_host: Address the local transport server binds to.
+        current_members: Live registry identities, used to detect a departing rank during setup.
         rendezvous_timeout_sec: Total budget for all peers to show up.
 
     Returns:
@@ -209,33 +211,42 @@ async def form_mesh(
                         f"Could not connect to peer {spec.node_id} at "
                         f"{peer_address}:{spec.data_port} within "
                         f"{rendezvous_timeout_sec:.0f}s. Check that the peer is "
-                        f"running the same training script, and that "
-                        f"'macfleet status' shows it as alive. Last error: {type(exc).__name__}: {exc}"
+                        f"running the same training script on that data port. "
+                        f"Last error: {type(exc).__name__}: {exc}"
                     ) from exc
                 await asyncio.sleep(_CONNECT_RETRY_INTERVAL_SEC)
 
-    try:
-        if outbound:
-            await _gather(*(_connect_with_retry(s) for s in outbound))
+    async def connect_outbound() -> None:
+        await _gather(*(_connect_with_retry(s) for s in outbound))
 
-        # Wait for inbound connections from lower-id peers. The transport
-        # registers each connection under the peer_id it authenticated as.
-        missing = [
-            pid for pid in inbound_ids if transport.get_connection(pid) is None
-        ]
-        while missing:
-            if time.monotonic() >= deadline:
-                raise MeshFormationError(
-                    f"Peers never connected within {rendezvous_timeout_sec:.0f}s: "
-                    f"{', '.join(missing)}. Each Mac must run the same training "
-                    f"script; check 'macfleet status' on the missing peers."
-                )
-            await asyncio.sleep(_INBOUND_POLL_INTERVAL_SEC)
-            missing = [
-                pid for pid in inbound_ids if transport.get_connection(pid) is None
-            ]
+    connections = asyncio.create_task(connect_outbound())
+    try:
+        while True:
+            if current_members is not None:
+                present = current_members()
+                departed = by_id.keys() - present
+                if departed:
+                    raise MeshFormationError(
+                        f"Training peer(s) left during rendezvous: {', '.join(sorted(departed))}. "
+                        f"Current members: {', '.join(sorted(present))}. Stop all standalone "
+                        "'macfleet join' agents and restart the same training script on every Mac."
+                    )
+            if connections.done():
+                connections.result()
+                missing = [pid for pid in inbound_ids if transport.get_connection(pid) is None]
+                if not missing:
+                    break
+                if time.monotonic() >= deadline:
+                    raise MeshFormationError(
+                        f"Peers never connected within {rendezvous_timeout_sec:.0f}s: "
+                        f"{', '.join(missing)}. Run the same training script on every Mac."
+                    )
+                await asyncio.sleep(_INBOUND_POLL_INTERVAL_SEC)
+            else:
+                await asyncio.wait({connections}, timeout=_INBOUND_POLL_INTERVAL_SEC)
     except BaseException:
-        # Don't leak the half-formed mesh (server socket + partial conns).
+        connections.cancel()
+        await asyncio.gather(connections, return_exceptions=True)
         await transport.disconnect_all()
         raise
 

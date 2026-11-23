@@ -30,6 +30,24 @@ call through the local registry and execute in local threads. For remote work,
 use explicit `TaskDispatcher`/`TaskWorker` transports; that wire uses msgpack.
 A distributed Pool rejects these local-only convenience methods.
 
+## Run a task between two Macs
+
+Pair both Macs and install the same checkout on each. In the repository directory on the worker Mac, run:
+
+```bash
+python tools/two_mac_tasks.py
+```
+
+When the worker prints its port, run the following on the other Mac, replacing the example address with the worker’s IPv4 address:
+
+```bash
+python tools/two_mac_tasks.py --connect 192.0.2.10
+```
+
+The first call returns `ValueError: expected a nonnegative number`. The next call prints the worker’s hostname and the result `81`. Both processes read their local paired credential and authenticate the connection. If you paired using a named fleet, pass the same `--fleet-id` on both Macs. Press Ctrl+C in the worker terminal after the caller exits. [Runnable example](../../tools/two_mac_tasks.py)
+
+If a connection is replaced while a task is pending, the dispatcher reports that the outcome is unknown. The worker may have completed the task before its result was lost. Check the worker’s records before submitting it again. New submissions use the replacement connection.
+
 ## Timeouts and local parallelism
 
 `timeout` bounds the caller's wait. For `map`, all items share a single

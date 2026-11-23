@@ -54,3 +54,13 @@ class TestPoolMLX:
         assert result["epochs"] == 3
         assert result["loss"] > 0
         assert len(result["loss_history"]) == 3
+
+
+def test_numpy_embedding_indices_preserve_integer_type():
+    with Pool(engine="mlx") as pool:
+        result = pool.train(
+            mlx_nn.Embedding(4, 2),
+            (np.arange(16, dtype=np.int32) % 4, np.zeros((16, 2), dtype=np.float32)),
+            loss_fn=lambda model, x, y: mlx.mean((model(x) - y) ** 2), epochs=1, batch_size=8,
+        )
+    assert result["steps"] == 2

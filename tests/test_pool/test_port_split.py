@@ -11,7 +11,7 @@ import pytest
 from macfleet.engines.base import HardwareProfile
 from macfleet.pool.agent import PoolAgent
 from macfleet.pool.discovery import DiscoveredNode
-from macfleet.pool.registry import NodeRecord
+from macfleet.pool.registry import ClusterRegistry, NodeRecord
 
 
 class TestDiscoveredNodeDataPortDefault:
@@ -104,6 +104,31 @@ class TestPoolAgentPortSplit:
 
 class TestPoolAgentRegistryLifecycle:
     """Peer callbacks should tolerate startup/shutdown race windows."""
+
+    @pytest.mark.asyncio
+    async def test_connection_refused_gives_training_guidance(self, monkeypatch, capsys):
+        async def refused(*args, **kwargs):
+            raise ConnectionRefusedError("peer is starting")
+
+        monkeypatch.setattr("macfleet.pool.agent.asyncio.open_connection", refused)
+        await PoolAgent(token="test-token-long-enough")._add_manual_peer("127.0.0.1:50051")
+        output = " ".join(capsys.readouterr().out.split())
+        assert "start the same training script" in output
+        assert "macfleet join" not in output
+
+    @pytest.mark.parametrize(("token", "chip", "cores", "expected"), [
+        ("test-token-long-enough", "unknown", 0, "hardware details omitted from secure discovery"),
+        (None, "Apple M5 Max", 40, "Apple M5 Max, 40 GPU cores"),
+        (None, "unknown", 0, "unknown, GPU cores unknown"),
+    ])
+    def test_discovery_message_describes_available_hardware(self, token, chip, cores, expected, capsys):
+        agent = PoolAgent(token=token)
+        agent._registry = ClusterRegistry("local")
+        agent._on_peer_discovered(DiscoveredNode(
+            hostname="peer", node_id="peer-1", ip_address="127.0.0.1", port=50051,
+            gpu_cores=cores, ram_gb=0, chip_name=chip, link_types="", pool_version="2.3.0.dev0",
+        ))
+        assert f"Discovered peer ({expected})" in capsys.readouterr().out
 
     def test_peer_callbacks_noop_before_registry_exists(self):
         agent = PoolAgent(token="secret-token-long-enough-to-pass-min")

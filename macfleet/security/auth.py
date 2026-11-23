@@ -85,6 +85,7 @@ SCRYPT_MAXMEM = 64 * 1024 * 1024
 # Domain-separation labels for the v3 authenticated handshake (v2.3).
 # Each HMAC in the handshake covers a distinct label so a digest from one
 # protocol step can never be replayed as another step's digest.
+HANDSHAKE_VERSION = 3
 HS_LABEL_CLIENT_HELLO = b"MFHSv3-C1:"
 HS_LABEL_SERVER_RESP = b"MFHSv3-S:"
 HS_LABEL_CLIENT_RESP = b"MFHSv3-C2:"

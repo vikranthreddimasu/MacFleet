@@ -11,10 +11,12 @@ from macfleet.security.enrollment import (
     EnrollmentError,
     EnrollmentServer,
     _proof,
+    _server_proof,
     format_pair_command,
     generate_enrollment_code,
     normalize_enrollment_code,
     parse_host_port,
+    print_enrollment_info,
     request_enrollment,
 )
 
@@ -90,7 +92,16 @@ def _valid_enrollment_line(server: EnrollmentServer) -> bytes:
     return (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
 
 
-async def _request_with_response_line(line: bytes, monkeypatch):
+async def _request_with_response_line(line: bytes, monkeypatch, *, signed=False):
+    if signed:
+        response = json.loads(line)
+        nonce = b"a" * 16
+        monkeypatch.setattr(secrets, "token_bytes", lambda size: nonce)
+        response["proof"] = _server_proof(
+            "ABCD-EFGH-IJKL-MNOP", nonce, b"test-channel-binding", response
+        )
+        line = (json.dumps(response) + "\n").encode()
+
     async def fake_open_connection(*args, **kwargs):
         return _ImmediateReader(line), _FakeWriter()
 
@@ -132,6 +143,13 @@ def test_format_pair_command_does_not_include_token():
     cmd = format_pair_command("192.168.1.10", 4242, "ABCD-EFGH-IJKL-MNOP")
     assert cmd == "macfleet pair --host 192.168.1.10:4242 --code ABCD-EFGH-IJKL-MNOP"
     assert "token" not in cmd.lower()
+
+
+@pytest.mark.parametrize("uses, expected", [(1, "1 time."), (3, "3 times.")])
+def test_enrollment_info_reports_actual_use_limit(uses, expected):
+    text = print_enrollment_info("127.0.0.1", 1234, "test-code", time.time(),
+                                 max_uses=uses, to_pasteboard=False)
+    assert expected in text
 
 
 @pytest.mark.asyncio
@@ -283,9 +301,61 @@ async def test_enrollment_malformed_proof_size_records_failure():
 
 
 @pytest.mark.asyncio
+async def test_server_rejects_old_protocol_without_issuing_token():
+    server = EnrollmentServer(token="enrollment-token-long-enough")
+    _prepare_started_server(server)
+    request = json.loads(_valid_enrollment_line(server))
+    request["version"] = 1
+    writer = _FakeWriter()
+    await server._handle_client(_ImmediateReader((json.dumps(request) + "\n").encode()), writer)
+    assert writer.writes == []
+    assert server._uses == 0
+
+
+@pytest.mark.asyncio
 async def test_request_enrollment_rejects_non_object_response(monkeypatch):
     with pytest.raises(EnrollmentError, match="malformed response"):
         await _request_with_response_line(b"[]\n", monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_enrollment_rejection_uses_local_message(monkeypatch):
+    with pytest.raises(EnrollmentError, match="^Enrollment rejected") as error:
+        await _request_with_response_line(b'{"ok": false, "error": "remote diagnostic"}', monkeypatch)
+    assert "remote diagnostic" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_request_enrollment_rejects_unsigned_success(monkeypatch):
+    response = {"ok": True, "version": ENROLLMENT_VERSION,
+                "token": "enrollment-token-long-enough", "fleet_id": "lab",
+                "server_node": "node-a", "expires_at": time.time() + 60}
+    with pytest.raises(EnrollmentError, match="issuer proof"):
+        await _request_with_response_line((json.dumps(response) + "\n").encode(), monkeypatch)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["token", "fleet_id", "server_node", "expires_at", "nonce", "certificate"])
+async def test_request_rejects_modified_or_replayed_response(field, monkeypatch):
+    nonce = b"a" * 16
+    monkeypatch.setattr(secrets, "token_bytes", lambda size: nonce)
+    response = {"ok": True, "version": ENROLLMENT_VERSION, "token": "enrollment-token-long-enough",
+                "fleet_id": "lab", "server_node": "node-a", "expires_at": 12345.0}
+    response["proof"] = _server_proof(
+        "ABCD-EFGH-IJKL-MNOP", b"b" * 16 if field == "nonce" else nonce,
+        b"different-certificate" if field == "certificate" else b"test-channel-binding", response,
+    )
+    if field in response and field != "proof":
+        response[field] = 45678.0 if field == "expires_at" else "changed-value-long-enough"
+    with pytest.raises(EnrollmentError, match="issuer proof"):
+        await _request_with_response_line((json.dumps(response) + "\n").encode(), monkeypatch)
+
+
+@pytest.mark.asyncio
+async def test_request_rejects_old_enrollment_protocol(monkeypatch):
+    response = {"ok": True, "version": 1, "token": "enrollment-token-long-enough"}
+    with pytest.raises(EnrollmentError, match="protocol version"):
+        await _request_with_response_line((json.dumps(response) + "\n").encode(), monkeypatch)
 
 
 @pytest.mark.asyncio
@@ -305,7 +375,7 @@ async def test_request_enrollment_rejects_non_string_token(monkeypatch):
     ).encode("utf-8")
 
     with pytest.raises(EnrollmentError, match="invalid token"):
-        await _request_with_response_line(line, monkeypatch)
+        await _request_with_response_line(line, monkeypatch, signed=True)
 
 
 @pytest.mark.asyncio
@@ -325,7 +395,7 @@ async def test_request_enrollment_rejects_non_string_fleet_id(monkeypatch):
     ).encode("utf-8")
 
     with pytest.raises(EnrollmentError, match="invalid fleet id"):
-        await _request_with_response_line(line, monkeypatch)
+        await _request_with_response_line(line, monkeypatch, signed=True)
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -339,8 +409,6 @@ def test_enrollment_limits_cannot_disable_expiry_or_usage_caps(kwargs):
 
 @pytest.mark.parametrize("change", ["unsigned", "token", "fleet_id", "server_node", "nonce", "certificate"])
 async def test_client_rejects_forged_or_replayed_credentials(change, monkeypatch):
-    from macfleet.security.enrollment import _server_proof
-
     nonce = b"a" * 16
     monkeypatch.setattr(secrets, "token_bytes", lambda n: nonce)
     response = dict(ok=True, version=ENROLLMENT_VERSION, token="victim-fleet-token",
@@ -351,5 +419,5 @@ async def test_client_rejects_forged_or_replayed_credentials(change, monkeypatch
             b"other-cert" if change == "certificate" else b"test-channel-binding", response)
     if change in ("token", "fleet_id", "server_node"):
         response[change] = "attacker-selected-value"
-    with pytest.raises(EnrollmentError, match="prove knowledge"):
+    with pytest.raises(EnrollmentError, match="issuer proof"):
         await _request_with_response_line(json.dumps(response).encode(), monkeypatch)

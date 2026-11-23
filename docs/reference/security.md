@@ -88,9 +88,11 @@ fingerprint (see [TLS](#tls)). Replaying a captured hello yields only
 the byte-identical ACK the attacker already has — completing the
 handshake requires answering the fresh `c_b`.
 
-**Version compatibility:** secure fleets require every node on the
-same MacFleet version (>= 2.3). Pre-v2.3 secure hellos carry no proof
-and are rejected — answering them would reopen the oracle.
+**Version compatibility:** use the same MacFleet build on every node.
+Secure peers reject hellos without the client-first proof; a displayed
+package version alone does not establish protocol compatibility. The
+unreleased checkout identifies itself as `2.3.0.dev0` to distinguish it
+from the published `2.2.1` package.
 
 ### HW profile exchange (v2.2 PR 4 addition)
 
@@ -169,9 +171,11 @@ macfleet pair --host 192.168.1.10:61234 --code AB12CD-EF34GH-IJ56KL-MN78OP
 
 The displayed code is not the fleet token. It is a one-time verifier
 used to authenticate a TLS request to the enrollment server, where the
-permanent token is returned only after a channel-bound HMAC proof. The client
-verifies the server’s proof over the credentials, request nonce and TLS certificate before saving the token. The
-default code lifetime is 5 minutes and the default use count is 1.
+permanent token is returned only after a channel-bound HMAC proof. Enrollment
+protocol v2 also verifies an issuer proof over the response, request nonce,
+and TLS certificate before accepting the token. Both Macs must use this
+version; older enrollment protocols are rejected. The default code lifetime
+is 5 minutes and the default use count is 1.
 
 Legacy `macfleet://pair?token=...` URLs are still accepted only for
 migration. Treat them as passwords and rotate after exposure. Helpers

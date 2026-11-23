@@ -111,6 +111,7 @@ class TaskDispatcher:
             self._finish(TaskResult(task_id=task_id, ok=False, error=reason))
 
     def _fail_pending_for_worker(self, worker_id: str, reason: str) -> None:
+        reason += ". Task outcome unknown. MacFleet did not resubmit it. Check the worker before retrying."
         for task_id, assigned in list(self._task_to_worker.items()):
             if assigned == worker_id:
                 self._finish(TaskResult(task_id=task_id, ok=False, error=reason))

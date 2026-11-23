@@ -207,9 +207,12 @@ class TorchEngine:
         references to .grad). Only the initial step pays the .to(device)
         cost when grad is first created.
         """
-        validate_flat_array(flat_grads, sum(p.numel() for p in self._collect_trainable_params()))
+        params = self._collect_trainable_params()
+        validate_flat_array(flat_grads, sum(p.numel() for p in params))
+        if presence is not None and presence.shape != (len(params),):
+            raise ValueError("Gradient presence must contain one entry per trainable parameter")
         offset = 0
-        for index, param in enumerate(self._collect_trainable_params()):
+        for index, param in enumerate(params):
             numel = param.numel()
             if presence is not None and not presence[index]:
                 param.grad = None
@@ -243,7 +246,7 @@ class TorchEngine:
         if self._model is None:
             raise RuntimeError("No model loaded")
         return json.dumps([
-            "torch", type(self._model).__qualname__,
+            "torch", "gradient-presence-v1", type(self._model).__qualname__,
             [(name, list(p.shape), str(p.dtype), p.requires_grad) for name, p in self._model.named_parameters()],
             [(name, list(b.shape), str(b.dtype)) for name, b in self._model.named_buffers()],
             self._optimizer_layout(),
@@ -332,7 +335,7 @@ class TorchEngine:
                 gpu_cores=0,
                 ram_gb=0.0,
                 memory_bandwidth_gbps=0.0,
-                has_ane=True,
+                has_ane=False,
                 chip_name="Unknown",
                 mps_available=torch.backends.mps.is_available(),
             )

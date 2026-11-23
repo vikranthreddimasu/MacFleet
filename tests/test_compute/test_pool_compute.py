@@ -170,3 +170,13 @@ class TestPoolTrainRegression:
         assert "loss" in result
         assert result["epochs"] == 2
         assert result["time_sec"] > 0
+
+
+def test_registered_task_preserves_its_own_timeout():
+    @task
+    def device_timeout():
+        raise TimeoutError("sensor read deadline")
+
+    with Pool() as pool:
+        with pytest.raises(TimeoutError, match="^sensor read deadline$"):
+            pool.submit(device_timeout, timeout=300)

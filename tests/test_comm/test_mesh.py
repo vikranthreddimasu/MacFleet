@@ -227,3 +227,22 @@ class TestSecureMesh:
                 bind_host="127.0.0.1",
                 rendezvous_timeout_sec=1.0,
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_index", [0, 1])
+async def test_departed_identity_aborts_rendezvous_and_releases_port(local_index):
+    specs = _make_specs(2)
+    local, peer = specs[local_index], specs[1 - local_index]
+    members = {local.node_id, peer.node_id}
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.15, members.discard, peer.node_id)
+    loop.call_later(0.15, members.add, "replacement")
+    with pytest.raises(MeshFormationError, match=f"left during rendezvous: {peer.node_id}.*replacement"):
+        await asyncio.wait_for(
+            form_mesh(local.node_id, specs, current_members=members.copy,
+                      bind_host="127.0.0.1", rendezvous_timeout_sec=60),
+            timeout=3,
+        )
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", local.data_port))

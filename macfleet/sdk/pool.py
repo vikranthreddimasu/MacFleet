@@ -29,9 +29,7 @@ import time
 from concurrent.futures import (
     ProcessPoolExecutor,
     ThreadPoolExecutor,
-)
-from concurrent.futures import (
-    TimeoutError as FutureTimeoutError,
+    wait,
 )
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 
@@ -131,6 +129,7 @@ def _mlx_dataset(dataset: Any) -> tuple[Any, Any]:
     x, y = dataset
     if not isinstance(x, mx.array):
         import numpy as np
+
         values = np.asarray(x if not hasattr(x, "numpy") else x.numpy())
         x = mx.array(values.astype(np.float32, copy=False) if values.dtype.kind == "f" else values)
     if not isinstance(y, mx.array):
@@ -177,6 +176,7 @@ async def _distributed_train_torch(
     link_type: Any = None,
     rendezvous_timeout_sec: float = 60.0,
     seed: int = 0,
+    current_members: Optional[Callable[[], set[str]]] = None,
 ) -> dict:
     """N-node data-parallel PyTorch training over a freshly formed mesh.
 
@@ -212,6 +212,7 @@ async def _distributed_train_torch(
         security=security,
         local_hw=local_hw,
         rendezvous_timeout_sec=rendezvous_timeout_sec,
+        current_members=current_members,
     )
     try:
         engine = TorchEngine(device=device)
@@ -307,6 +308,7 @@ async def _distributed_train_mlx(
     link_type: Any = None,
     rendezvous_timeout_sec: float = 60.0,
     seed: int = 0,
+    current_members: Optional[Callable[[], set[str]]] = None,
 ) -> dict:
     """N-node data-parallel MLX training over a freshly formed mesh.
 
@@ -334,6 +336,7 @@ async def _distributed_train_mlx(
         security=security,
         local_hw=local_hw,
         rendezvous_timeout_sec=rendezvous_timeout_sec,
+        current_members=current_members,
     )
     try:
         engine = MLXEngine()
@@ -807,6 +810,7 @@ class Pool:
         agent's background loop keeps gossiping heartbeats untouched —
         training compute must never starve liveness detection.
         """
+        from macfleet.pool.heartbeat import NodeStatus
         from macfleet.pool.network import LinkType, get_network_topology
         from macfleet.training.mesh import NodeSpec, derive_ranks
 
@@ -814,7 +818,8 @@ class Pool:
         if agent is None or agent.registry is None:
             raise RuntimeError("Distributed training requires a running pool agent.")
 
-        records = agent.registry.alive_nodes
+        registry = agent.registry
+        records = registry.alive_nodes
         nodes = [
             NodeSpec(
                 node_id=r.node_id,
@@ -859,6 +864,9 @@ class Pool:
             compression=compression,
             link_type=link_type,
             rendezvous_timeout_sec=self.rendezvous_timeout_sec,
+            current_members=lambda: {
+                r.node_id for r in registry.all_nodes if r.status not in (NodeStatus.LEFT, NodeStatus.FAILED)
+            },
         )
         if engine_type == "torch":
             return asyncio.run(_distributed_train_torch(device=device, **common))
@@ -1174,13 +1182,14 @@ class Pool:
         executor = ThreadPoolExecutor(max_workers=1)
         future = executor.submit(entry.fn, *resolved_args, **resolved_kwargs)
         try:
-            return future.result(timeout=spec.timeout_sec)
-        except FutureTimeoutError as e:
-            future.cancel()
-            raise TimeoutError(
-                f"Pool task {spec.task_id!r} timed out after {spec.timeout_sec}s. "
-                "Execution may still be running; check the task before retrying."
-            ) from e
+            done, _ = wait([future], timeout=spec.timeout_sec)
+            if not done:
+                future.cancel()
+                raise TimeoutError(
+                    f"Pool task {spec.task_id!r} timed out after {spec.timeout_sec}s. "
+                    "Execution may still be running; check the task before retrying."
+                )
+            return future.result()
         finally:
             executor.shutdown(wait=future.done(), cancel_futures=True)
 
@@ -1200,7 +1209,6 @@ class Pool:
             raise ValueError("max_workers must be a positive integer when provided")
 
         import os
-        from concurrent.futures import wait
 
         from macfleet.compute.models import TaskSpec
 

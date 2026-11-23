@@ -13,7 +13,7 @@ import math
 import random
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Optional
 
@@ -144,6 +144,10 @@ class GossipHeartbeat:
     def peers(self) -> dict[str, PeerState]:
         return dict(self._peers)
 
+    def get_peer(self, node_id: str) -> Optional[PeerState]:
+        """Return the tracking object for this membership, if present."""
+        return self._peers.get(node_id)
+
     @property
     def alive_peers(self) -> list[PeerState]:
         return [p for p in self._peers.values() if p.is_alive]
@@ -168,7 +172,7 @@ class GossipHeartbeat:
     def remove_peer(self, node_id: str) -> None:
         """Remove a peer (graceful departure)."""
         if node_id in self._peers:
-            self._peers[node_id].status = NodeStatus.LEFT
+            self._peers[node_id] = replace(self._peers[node_id], status=NodeStatus.LEFT)
 
     def record_heartbeat(self, node_id: str) -> None:
         """Record that we heard from a peer (they're alive)."""

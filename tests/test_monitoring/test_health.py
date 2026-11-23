@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from subprocess import CompletedProcess
+
 import pytest
 
 import macfleet.monitoring.health as health_module
@@ -51,6 +53,17 @@ class TestMemoryInfo:
 
         assert get_memory_info() == MemoryInfo()
         assert get_battery_info() == (None, None)
+
+    def test_memory_capacity_includes_pages_outside_vm_stat_subset(self, monkeypatch):
+        stats = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+                 "Pages free: 65536.\nPages inactive: 196608.\nPages occupied by compressor: 400000.")
+        monkeypatch.setattr(
+            health_module.subprocess, "run",
+            lambda cmd, **kwargs: CompletedProcess(cmd, 0, stats if cmd[0] == "vm_stat" else str(24 << 30)),
+        )
+        memory = get_memory_info()
+        assert memory == MemoryInfo(total_gb=24, used_gb=20, available_gb=4)
+        assert NodeHealth(memory=memory).health_score < 1
 
 
 # ------------------------------------------------------------------ #

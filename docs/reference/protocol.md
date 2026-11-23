@@ -119,7 +119,7 @@ The trailing `block_size` lets the receiver peel the suffix off a
 variable-length base (`node_id + challenge_a`) without reparsing from
 the left.
 
-Secure fleets reject proof-less pre-v2.3 handshakes. Open fleets
+Secure fleets reject handshakes without the client-first proof. Open fleets
 (created only with `--open --allow-insecure-open`) use the older
 plain `node_id` exchange and do not carry hardware suffixes.
 

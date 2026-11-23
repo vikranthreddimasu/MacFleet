@@ -329,3 +329,13 @@ async def test_mlx_embedding_step_matches_single_mac():
     ))
     for model in models:
         np.testing.assert_allclose(np.array(model.weight), np.array(ref.weight), atol=1e-6)
+
+
+def test_numpy_embedding_indices_preserve_integer_type():
+    with Pool() as pool:
+        result = pool.train(
+            nn.Embedding(4, 2),
+            (np.arange(16, dtype=np.int64) % 4, np.zeros((16, 2), dtype=np.float32)),
+            loss_fn=nn.MSELoss(), epochs=1, batch_size=8, device="cpu",
+        )
+    assert result["steps"] == 2

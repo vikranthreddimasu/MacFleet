@@ -437,7 +437,7 @@ class MLXEngine:
                 gpu_cores=0,
                 ram_gb=0.0,
                 memory_bandwidth_gbps=0.0,
-                has_ane=True,
+                has_ane=False,
                 chip_name="Unknown",
                 mlx_available=True,
             )

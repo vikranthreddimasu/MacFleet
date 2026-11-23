@@ -48,6 +48,8 @@ pip install "macfleet[all]"             # everything
 
 ## The 5-minute path
 
+Install the Torch extra for this example: `pip install "macfleet[torch]"`.
+
 **1. Scaffold a starter script:**
 
 ```bash
@@ -145,6 +147,7 @@ macfleet info         Show local hardware profile
 macfleet train        Run training (demo or custom script)
 macfleet bench        Benchmark compute, network, or allreduce
 macfleet doctor       System health check
+macfleet verify       Verify the local install or paired Macs
 macfleet quickstart   Write a starter training script
 ```
 
@@ -164,7 +167,7 @@ reducing wire bytes. Use `"none"` for full precision.
 
 ## Requirements
 
-- macOS 14+ with Apple Silicon (M1/M2/M3/M4)
+- macOS 14+ with Apple Silicon (M1/M2/M3/M4/M5)
 - Python 3.11+
 - PyTorch 2.1+ or MLX 0.5+ (optional, pick your engine)
 

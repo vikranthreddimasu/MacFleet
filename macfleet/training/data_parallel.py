@@ -18,8 +18,9 @@ import asyncio
 import hashlib
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 import numpy as np
 
@@ -246,7 +247,8 @@ class DataParallel:
         identical weights.
         """
         if self.world_size > 1:
-            await self._validate_model_consistency()
+            with self._initial_peer_exchange():
+                await self._validate_model_consistency()
             if self.config.broadcast_params_on_start:
                 # Synchronize frozen parameters, buffers and optimizer moments,
                 # not only the flattened trainable weights.
@@ -254,9 +256,24 @@ class DataParallel:
                     np.frombuffer(self.engine.state_dict(), dtype=np.uint8)
                     if self.rank == 0 else np.empty(0, np.uint8)
                 )
-                state = await self.group.broadcast(state, src=0)
+                with self._initial_peer_exchange():
+                    state = await self.group.broadcast(state, src=0)
                 if self.rank != 0:
                     self.engine.load_state_dict(state.tobytes())
+
+    @contextmanager
+    def _initial_peer_exchange(self) -> Iterator[None]:
+        try:
+            yield
+        except (EOFError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as exc:
+            peers = ", ".join(
+                f"rank {rank}={self.group._peer_for_rank(rank)}"
+                for rank in range(self.world_size) if rank != self.rank
+            )
+            raise ConnectionError(
+                f"Peer disconnected during initial model exchange on rank {self.rank}. Expected peers: {peers}. "
+                "Stop any standalone 'macfleet join' on every Mac, then restart the same training script on all ranks."
+            ) from exc
 
     async def _validate_model_consistency(self) -> None:
         """Share every rank's count, then reject mismatches on every rank.
@@ -328,11 +345,11 @@ class DataParallel:
         if self._expected_grad_size is None:
             self._expected_grad_size = flat_grads.size
 
-        original_bytes = flat_grads.nbytes
-
         get_presence = getattr(self.engine, "gradient_presence", None)
         local_presence = get_presence() if get_presence is not None else None
         presence = local_presence
+        original_bytes = flat_grads.nbytes
+
         try:
             dense = flat_grads
             if self._compressor is not None:
@@ -341,6 +358,9 @@ class DataParallel:
                          if isinstance(compressed, CompressedArray) else compressed)
             if local_presence is not None:
                 presence = await self.group.allreduce(local_presence, op="sum")
+                if np.any(presence < local_presence) or np.any(presence > self.world_size):
+                    raise GradientValidationError("Invalid per-parameter gradient participation count")
+                self._bytes_sent += local_presence.nbytes
             if sample_weight is None:
                 averaged = await self.group.allreduce(dense, op="mean")
             else:

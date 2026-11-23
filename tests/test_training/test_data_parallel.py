@@ -704,3 +704,17 @@ async def test_training_loop_rejects_configuration_mismatch_on_every_rank(mismat
             np.testing.assert_array_equal(engine.get_flat_parameters(), before)
     finally:
         await _teardown_mesh(transports)
+
+
+@pytest.mark.parametrize("cause", [asyncio.IncompleteReadError(b"", 24), ConnectionResetError("connection reset")])
+async def test_initial_disconnect_identifies_expected_ranks_and_preserves_cause(cause):
+    from unittest.mock import AsyncMock
+
+    _, engine = _make_model_and_engine(seed=0)
+    transport = PeerTransport(local_id="local", config=CONFIG)
+    group = CollectiveGroup(rank=0, world_size=2, transport=transport, rank_to_peer={1: "other-mac"})
+    group.gather = AsyncMock(side_effect=cause)
+    with pytest.raises(ConnectionError, match="rank 1=other-mac") as error:
+        await DataParallel(engine, group).setup()
+    assert "macfleet join" in str(error.value) and "all ranks" in str(error.value)
+    assert error.value.__cause__ is cause

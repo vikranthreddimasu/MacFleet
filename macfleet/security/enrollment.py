@@ -2,8 +2,8 @@
 
 Legacy pairing URLs embed the permanent fleet token. They are convenient, but
 they turn terminal history, screenshots, and pasteboards into long-lived fleet
-credentials. The enrollment flow here keeps the permanent token on the first
-Mac and exposes only a short-lived, one-time code.
+credentials. Enrollment displays a short-lived code and transfers the
+permanent token to the joining Mac over authenticated TLS.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ ENROLLMENT_NONCE_BYTES = 16
 ENROLLMENT_PROOF_BYTES = 32
 
 _LABEL_CLIENT = b"MFENROLLv2-C:"
+_LABEL_SERVER = b"MFENROLLv2-S:"
 
 
 class EnrollmentError(ValueError):
@@ -82,9 +83,9 @@ def _verify_proof(code: str, nonce: bytes, channel_binding: bytes, proof: bytes)
     return hmac.compare_digest(_proof(code, nonce, channel_binding), proof)
 
 
-def _server_proof(code: str, nonce: bytes, binding: bytes, response: dict) -> str:
-    credentials = json.dumps(response, sort_keys=True, separators=(",", ":")).encode()
-    return hmac.digest(_code_key(code), b"MFENROLLv2-S:" + nonce + binding + credentials, "sha256").hex()
+def _server_proof(code: str, nonce: bytes, channel_binding: bytes, response: dict) -> str:
+    encoded = json.dumps(response, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hmac.digest(_code_key(code), _LABEL_SERVER + nonce + channel_binding + encoded, "sha256").hex()
 
 
 def parse_host_port(host_port: str) -> tuple[str, int]:
@@ -343,7 +344,17 @@ async def request_enrollment(
         if not isinstance(response, dict):
             raise EnrollmentError("Enrollment server returned a malformed response")
         if not response.get("ok"):
-            raise EnrollmentError(str(response.get("error") or "enrollment rejected"))
+            # An issuer that denies enrollment has supplied no proof of its identity.
+            raise EnrollmentError("Enrollment rejected. Request a fresh code from the bootstrap Mac.")
+        if response.get("version") != ENROLLMENT_VERSION:
+            raise EnrollmentError("Unsupported enrollment protocol version; update both Macs")
+        proof = response.pop("proof", None)
+        try:
+            expected = _server_proof(code, nonce, binding, response)
+        except (TypeError, ValueError):
+            raise EnrollmentError("Enrollment issuer proof is invalid") from None
+        if not isinstance(proof, str) or not proof.isascii() or not hmac.compare_digest(proof, expected):
+            raise EnrollmentError("Enrollment issuer proof is invalid")
         token = response.get("token")
         if not isinstance(token, str) or len(token) < MIN_TOKEN_LENGTH:
             raise EnrollmentError("Enrollment server returned an invalid token")
@@ -353,11 +364,6 @@ async def request_enrollment(
         server_node = response.get("server_node")
         if server_node is not None and not isinstance(server_node, str):
             raise EnrollmentError("Enrollment server returned an invalid server node")
-        proof = response.pop("proof", None)
-        if (response.get("version") != ENROLLMENT_VERSION or not isinstance(proof, str)
-                or not proof.isascii()
-                or not hmac.compare_digest(proof, _server_proof(code, nonce, binding, response))):
-            raise EnrollmentError("Enrollment server did not prove knowledge of the pairing code")
         result = EnrollmentResult(
             token=token,
             fleet_id=fleet_id,
@@ -392,6 +398,7 @@ def print_enrollment_info(
     code: str,
     expires_at_epoch: float,
     *,
+    max_uses: int = DEFAULT_ENROLLMENT_MAX_USES,
     out: Optional[TextIO] = None,
     to_pasteboard: bool = True,
 ) -> str:
@@ -401,9 +408,9 @@ def print_enrollment_info(
     rendered = "\n".join(
         [
             "",
-            "Pair another Mac with this one-time command:",
+            "Pair another Mac with this enrollment command:",
             f"  {command}",
-            f"Code expires at {expires_local} and can be used once.",
+            f"Code expires at {expires_local} and can be used {max_uses} time{'s' if max_uses != 1 else ''}.",
             "",
         ]
     )

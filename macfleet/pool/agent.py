@@ -102,10 +102,10 @@ def _detect_chip_name() -> str:
             capture_output=True, text=True, timeout=2,
         )
         if result.returncode == 0:
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+            return result.stdout.strip() or "unknown"
+    except (subprocess.TimeoutExpired, OSError):
         pass
-    return "Apple Silicon"
+    return "unknown"
 
 
 def _detect_gpu_cores() -> int:
@@ -122,9 +122,9 @@ def _detect_gpu_cores() -> int:
                         return int(line.split(":")[-1].strip())
                     except ValueError:
                         pass
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         pass
-    return 8  # safe default for Apple Silicon
+    return 0
 
 
 def _detect_ram_gb() -> float:
@@ -136,15 +136,17 @@ def _detect_ram_gb() -> float:
         )
         if result.returncode == 0:
             return int(result.stdout.strip()) / (1024 ** 3)
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+    except (subprocess.TimeoutExpired, OSError, ValueError):
         pass
-    return 8.0
+    return 0.0
 
 
 def _detect_memory_bandwidth() -> float:
     """Estimate memory bandwidth in GB/s based on chip."""
     chip = _detect_chip_name().lower()
     # Rough estimates based on known Apple Silicon specs
+    if not any(chip == f"apple m{n}" or chip.startswith(f"apple m{n} ") for n in range(1, 5)):
+        return 0.0
     if "ultra" in chip:
         return 800.0
     elif "max" in chip:
@@ -195,7 +197,7 @@ def profile_hardware() -> HardwareProfile:
         gpu_cores=_detect_gpu_cores(),
         ram_gb=_detect_ram_gb(),
         memory_bandwidth_gbps=_detect_memory_bandwidth(),
-        has_ane=True,  # All Apple Silicon has ANE
+        has_ane=_detect_chip_name().lower().startswith("apple m"),
         chip_name=_detect_chip_name(),
         thermal_pressure=get_thermal_state().pressure,
         mps_available=_check_mps_available(),
@@ -527,6 +529,8 @@ class PoolAgent:
                     self._heartbeat_rate_limiter.record_failure(peer_ip)
                     return
                 self._heartbeat_rate_limiter.record_success(peer_ip)
+                heartbeat = self._heartbeat
+                prior_peer = heartbeat.get_peer(peer_id) if heartbeat is not None else None
                 server_nonce = secrets_mod.token_bytes(16)
                 hardware = self._local_hw_exchange().to_json_bytes()
                 proof = sign_heartbeat_response(key, self.node_id, server_nonce, nonce, hardware)
@@ -541,7 +545,11 @@ class PoolAgent:
                                 key, peer_id, server_nonce, hw, bytes.fromhex(signature_hex))):
                         self._heartbeat_rate_limiter.record_failure(peer_ip)
                         return
-                    self._queue_peer_probe(peer_id, peer_ip, HardwareExchange.from_json_bytes(hw))
+                    # Discovery can replace this member while its inbound handshake is suspended.
+                    if self._heartbeat is heartbeat and (
+                        heartbeat is None or heartbeat.get_peer(peer_id) is prior_peer
+                    ):
+                        self._queue_peer_probe(peer_id, peer_ip, HardwareExchange.from_json_bytes(hw))
             elif not fleet_key and data.startswith(b"PING"):
                 # Open heartbeat (backward compatible)
                 writer.write(f"PONG {self.node_id}\n".encode())
@@ -605,11 +613,17 @@ class PoolAgent:
         self._peer_probes[peer_id] = probe
 
         def finished(done: asyncio.Task) -> None:
-            self._peer_probes.pop(peer_id, None)
+            if self._peer_probes.get(peer_id) is done:
+                self._peer_probes.pop(peer_id)
             if not done.cancelled() and (error := done.exception()) is not None:
                 logger.debug("Reverse peer probe failed for %s: %s", peer_id, type(error).__name__)
 
         probe.add_done_callback(finished)
+
+    def _cancel_peer_probe(self, node_id: str) -> None:
+        probe = self._peer_probes.pop(node_id, None)
+        if probe is not None:
+            probe.cancel()
 
     async def _add_manual_peer(self, peer_addr: str, *, expected_peer_id: Optional[str] = None) -> None:
         """Connect to a manually specified peer (bypasses mDNS).
@@ -619,6 +633,9 @@ class PoolAgent:
 
         Secure peers exchange hardware after verifying the endpoint's TLS-bound proof.
         """
+        # The responder's ID is learned from the verified reply. Snapshot tracker
+        # identities before the await so a departed or replaced peer cannot be restored.
+        tracked = self._heartbeat.peers if self._security.is_secure and self._heartbeat is not None else {}
         writer: Optional[asyncio.StreamWriter] = None
         try:
             if ":" in peer_addr:
@@ -689,15 +706,30 @@ class PoolAgent:
             heartbeat = self._heartbeat
             if registry is None or heartbeat is None:
                 raise RuntimeError("PoolAgent manual peer registration requires start() first")
-            registry.register(NodeRecord(
-                node_id=peer_node_id,
-                hostname=peer_node_id,
-                ip_address=host,
-                port=port,
-                data_port=peer_data_port,
-                hardware=hw,
-            ))
-            heartbeat.add_peer(peer_node_id, host, port, hw.compute_score)
+            if self._security.is_secure and heartbeat.get_peer(peer_node_id) is not tracked.get(peer_node_id):
+                return
+            # Store the address that answered (a manual hostname can resolve to multiple IPs).
+            peername = writer.get_extra_info("peername") if self._security.is_secure else None
+            address = peername[0] if isinstance(peername, tuple) and peername else host
+            previous = registry.get_node(peer_node_id)
+            endpoint = (address, port, peer_data_port)
+            same_endpoint = (previous is not None and previous.status != NodeStatus.LEFT
+                             and (previous.ip_address, previous.port, previous.data_port) == endpoint)
+            if self._security.is_secure and same_endpoint and tracked.get(peer_node_id) is not None:
+                if peer_hw is not None:
+                    registry.update_hardware(peer_node_id, hw)
+                registry.mark_alive(peer_node_id)
+                heartbeat.record_heartbeat(peer_node_id)
+            else:
+                registry.register(NodeRecord(
+                    node_id=peer_node_id,
+                    hostname=peer_node_id,
+                    ip_address=address,
+                    port=port,
+                    data_port=peer_data_port,
+                    hardware=hw,
+                ))
+                heartbeat.add_peer(peer_node_id, address, port, hw.compute_score)
 
             hw_label = (
                 f"{hw.chip_name}, {hw.gpu_cores} GPU cores, {hw.ram_gb:.0f} GB"
@@ -711,7 +743,10 @@ class PoolAgent:
 
         except (OSError, ssl.SSLError, asyncio.TimeoutError, ConnectionRefusedError, ValueError) as e:
             console.print(f"[red]Failed to connect to peer {peer_addr}: {type(e).__name__}: {e}[/red]")
-            console.print("[dim]Make sure the peer is running 'macfleet join' and is reachable[/dim]")
+            console.print(
+                "[dim]Check the peer's heartbeat address and port. "
+                "For SDK training, start the same training script on every Mac.[/dim]"
+            )
         finally:
             if writer is not None:
                 try:
@@ -743,7 +778,7 @@ class PoolAgent:
             chip_name=node.chip_name,
         )
 
-        registry.register(NodeRecord(
+        registered = registry.register_discovered(NodeRecord(
             node_id=node.node_id,
             hostname=node.hostname,
             ip_address=node.ip_address,
@@ -754,12 +789,21 @@ class PoolAgent:
             status=NodeStatus.SUSPECTED if self._security.is_secure else NodeStatus.ALIVE,
         ))
 
+        if not registered:
+            return
+        self._cancel_peer_probe(node.node_id)
+
         # Use locally-computed score, not the broadcast one. Guard against the
         # discovery callback firing before _heartbeat is constructed in start().
         if self._heartbeat is not None:
             self._heartbeat.add_peer(node.node_id, node.ip_address, node.port, hw.compute_score)
 
-        console.print(f"[cyan]Discovered[/cyan] {node.hostname} ({node.chip_name}, {node.gpu_cores} GPU cores)")
+        if self._security.is_secure:
+            details = "hardware details omitted from secure discovery"
+        else:
+            cores = f"{node.gpu_cores} GPU cores" if node.gpu_cores else "GPU cores unknown"
+            details = f"{node.chip_name}, {cores}"
+        console.print(f"[cyan]Discovered[/cyan] {node.hostname} ({details})")
 
         if registry.is_coordinator:
             console.print(
@@ -769,6 +813,7 @@ class PoolAgent:
 
     def _on_peer_removed(self, node_id: str) -> None:
         """Called when a peer's mDNS registration expires."""
+        self._cancel_peer_probe(node_id)
         registry = self._registry
         if registry is not None:
             registry.deregister(node_id)

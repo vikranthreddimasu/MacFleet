@@ -41,6 +41,9 @@ class NodeRecord:
     current_weight: float = 0.0  # assigned by scheduler
     network_links: tuple[NetworkLink, ...] = field(default_factory=tuple)
 
+    # Retain the announced port separately when a signed heartbeat supplies a different one.
+    advertised_data_port: Optional[int] = None
+
     def __post_init__(self) -> None:
         if self.data_port == 0:
             self.data_port = self.port + 1
@@ -104,6 +107,20 @@ class ClusterRegistry:
         with self._lock:
             self._nodes[record.node_id] = record
             self._elect_coordinator_locked()
+
+    def register_discovered(self, record: NodeRecord) -> bool:
+        """Record discovery, preserving an existing secure peer across duplicate advertisements."""
+        with self._lock:
+            current = self._nodes.get(record.node_id)
+            if record.status == NodeStatus.SUSPECTED and current is not None and current.status != NodeStatus.LEFT:
+                same_control = (current.ip_address, current.port) == (record.ip_address, record.port)
+                if same_control and record.data_port in (current.data_port, current.advertised_data_port):
+                    current.advertised_data_port = record.data_port
+                    return False
+            record.advertised_data_port = record.data_port
+            self._nodes[record.node_id] = record
+            self._elect_coordinator_locked()
+            return True
 
     def deregister(self, node_id: str) -> None:
         """Remove a node from the registry."""

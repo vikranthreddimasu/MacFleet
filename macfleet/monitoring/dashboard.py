@@ -24,16 +24,17 @@ from macfleet.monitoring.health import HealthStatus, NodeHealth
 # ------------------------------------------------------------------ #
 
 
-def build_cluster_table(nodes: list[NodeHealth]) -> Table:
+def build_cluster_table(nodes: list[NodeHealth], *, compact: bool = False) -> Table:
     """Build a table showing all cluster nodes."""
     table = Table(title="Cluster Nodes", expand=True)
     table.add_column("Node", style="cyan", no_wrap=True)
     table.add_column("Status", justify="center")
     table.add_column("Thermal", justify="center")
     table.add_column("Memory", justify="right")
-    table.add_column("Throughput", justify="right")
-    table.add_column("Sync", justify="right")
-    table.add_column("Score", justify="right")
+    if not compact:
+        table.add_column("Throughput", justify="right")
+        table.add_column("Sync", justify="right")
+        table.add_column("Score", justify="right")
 
     for node in nodes:
         # Status indicator
@@ -79,18 +80,13 @@ def build_cluster_table(nodes: list[NodeHealth]) -> Table:
         else:
             score_str = f"[red]{score:.2f}[/red]"
 
-        table.add_row(
-            node.node_id or "unknown",
-            status,
-            thermal_str,
-            mem_str,
-            tp_str,
-            sync_str,
-            score_str,
-        )
+        row = [node.node_id or "unknown", status, thermal_str, mem_str]
+        if not compact:
+            row.extend((tp_str, sync_str, score_str))
+        table.add_row(*row)
 
     if not nodes:
-        table.add_row("[dim]No nodes connected[/dim]", "", "", "", "", "", "")
+        table.add_row("[dim]No nodes connected[/dim]")
 
     return table
 
@@ -321,34 +317,34 @@ class Dashboard:
             size=3,
         )
 
-        # Main content
+        training = Layout(build_training_panel(
+            epoch=self._epoch, total_epochs=self._total_epochs, step=self._step, loss=self._loss,
+            throughput=self._throughput, elapsed_sec=self._elapsed_sec, compression_ratio=self._compression_ratio,
+        ))
+        network = Layout(build_network_panel(
+            bytes_sent=self._bytes_sent, bytes_saved=self._bytes_saved, avg_latency_ms=self._avg_latency_ms,
+        ))
+        warnings = Layout(build_warnings_panel(self._nodes))
         body = Layout()
-
-        # Left: cluster table
-        left = Layout(build_cluster_table(self._nodes), ratio=3)
-
-        # Right: stacked panels
-        right = Layout(ratio=2)
-        right.split_column(
-            Layout(build_training_panel(
-                epoch=self._epoch,
-                total_epochs=self._total_epochs,
-                step=self._step,
-                loss=self._loss,
-                throughput=self._throughput,
-                elapsed_sec=self._elapsed_sec,
-                compression_ratio=self._compression_ratio,
-            )),
-            Layout(build_network_panel(
-                bytes_sent=self._bytes_sent,
-                bytes_saved=self._bytes_saved,
-                avg_latency_ms=self._avg_latency_ms,
-            )),
-            Layout(build_warnings_panel(self._nodes)),
-        )
-
-        body.split_row(left, right)
-
+        width, height = self._console.size
+        compact = width < 116 or height < 28
+        cluster = Layout(build_cluster_table(self._nodes, compact=compact))
+        details = Layout()
+        if compact:
+            cluster.size = min(max(6, len(self._nodes) + 4), max(6, height // 3))
+            if width >= 68:
+                side = Layout(ratio=2)
+                side.split_column(network, warnings)
+                training.ratio = 3
+                details.split_row(training, side)
+            else:
+                details.split_column(training, warnings)
+            body.split_column(cluster, details)
+        else:
+            cluster.ratio = 3
+            details.ratio = 2
+            details.split_column(training, network, warnings)
+            body.split_row(cluster, details)
         layout.split_column(header, body)
         return layout
 

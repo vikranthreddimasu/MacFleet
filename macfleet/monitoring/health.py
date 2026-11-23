@@ -130,63 +130,29 @@ class NodeHealth:
 
 
 def get_memory_info() -> MemoryInfo:
-    """Get system memory info using vm_stat on macOS."""
+    """Estimate used memory as physical RAM less free and inactive pages."""
     try:
-        result = subprocess.run(
-            ["vm_stat"],
-            capture_output=True, text=True, timeout=2,
+        physical = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=True, timeout=2,
         )
-        if result.returncode == 0:
-            page_size = 16384  # Apple Silicon default
-            pages_free = 0
-            pages_active = 0
-            pages_inactive = 0
-            pages_wired = 0
-            pages_speculative = 0
+        total = int(physical.stdout.strip()) / (1024**3)
+        if total <= 0:
+            return MemoryInfo()
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return MemoryInfo()
 
-            for line in result.stdout.split("\n"):
-                if "page size of" in line:
-                    try:
-                        page_size = int(line.split()[-2])
-                    except (ValueError, IndexError):
-                        pass
-                elif "Pages free:" in line:
-                    pages_free = _parse_vm_stat_value(line)
-                elif "Pages active:" in line:
-                    pages_active = _parse_vm_stat_value(line)
-                elif "Pages inactive:" in line:
-                    pages_inactive = _parse_vm_stat_value(line)
-                elif "Pages wired down:" in line:
-                    pages_wired = _parse_vm_stat_value(line)
-                elif "Pages speculative:" in line:
-                    pages_speculative = _parse_vm_stat_value(line)
-
-            total_pages = pages_free + pages_active + pages_inactive + pages_wired + pages_speculative
-            used_pages = pages_active + pages_wired
-            available_pages = pages_free + pages_inactive
-
-            to_gb = page_size / (1024**3)
-            return MemoryInfo(
-                total_gb=total_pages * to_gb,
-                used_gb=used_pages * to_gb,
-                available_gb=available_pages * to_gb,
-            )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError):
-        pass
-
-    # Fallback: sysctl
     try:
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            capture_output=True, text=True, timeout=2,
-        )
-        if result.returncode == 0:
-            total_bytes = int(result.stdout.strip())
-            return MemoryInfo(total_gb=total_bytes / (1024**3))
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, UnicodeDecodeError, ValueError):
-        pass
-
-    return MemoryInfo()
+        stats = subprocess.run(["vm_stat"], capture_output=True, text=True, check=True, timeout=2)
+        header, *rows = stats.stdout.splitlines()
+        page_size = int(header.split("page size of ")[1].split()[0])
+        counts = dict(row.split(":", 1) for row in rows if ":" in row)
+        reclaimable = sum(int(counts[key].strip().rstrip(".")) for key in ("Pages free", "Pages inactive"))
+        if page_size <= 0 or reclaimable < 0:
+            return MemoryInfo(total_gb=total)
+        available = min(total, reclaimable * page_size / (1024**3))
+        return MemoryInfo(total_gb=total, used_gb=total - available, available_gb=available)
+    except (subprocess.SubprocessError, OSError, ValueError, IndexError, KeyError):
+        return MemoryInfo(total_gb=total)
 
 
 def get_battery_info() -> tuple[Optional[float], Optional[bool]]:
@@ -215,14 +181,6 @@ def get_battery_info() -> tuple[Optional[float], Optional[bool]]:
         pass
 
     return None, None
-
-
-def _parse_vm_stat_value(line: str) -> int:
-    """Parse a vm_stat line to get the page count."""
-    try:
-        return int(line.split(":")[-1].strip().rstrip("."))
-    except (ValueError, IndexError):
-        return 0
 
 
 class HealthMonitor:

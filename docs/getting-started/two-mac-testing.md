@@ -1,6 +1,6 @@
 # Two-Mac Testing Walkthrough
 
-> Scripted checks: `tools/two_mac_verify.py` in the repo root.
+> Scripted checks: `macfleet verify` (requires the Torch extra).
 
 This guide assumes you have one stronger Mac and one M1 MacBook Air, and that
 you are new to MacFleet.
@@ -100,7 +100,7 @@ Mac. This needs only one machine and takes a few seconds. Run it on both:
 
 ```bash
 source .venv/bin/activate
-python tools/two_mac_verify.py --self-check
+macfleet verify --self-check
 ```
 
 It checks import and version, network-interface detection, deterministic
@@ -115,9 +115,9 @@ The process exits `0` only when every check passes, so you can gate a script on
 it. If a Mac fails here, fix that Mac before pairing — a broken install will
 only look like a confusing distributed bug later.
 
-If you installed from PyPI rather than this repo, copy
-`tools/two_mac_verify.py` from this repository onto each Mac and run it the same
-way.
+The repository entry point `python tools/two_mac_verify.py --self-check`
+also runs the same checks. Published versions may not yet include `verify`;
+use the same checkout build on both Macs when testing unreleased changes.
 
 ## Pair The Macs
 
@@ -151,7 +151,7 @@ macfleet status
 Pass condition:
 
 - `macfleet status` shows 2 nodes.
-- Both chips look roughly right.
+- Both Macs appear by their advertised names. Secure discovery keeps chip and memory details private. The distributed verifier below reads hardware profiles after authentication.
 - Each node has a heartbeat port and a data port.
 
 If status shows no nodes, check that both Macs are on the same network, the
@@ -206,7 +206,7 @@ within about 45 seconds of each other:
 
 ```bash
 source .venv/bin/activate
-python tools/two_mac_verify.py
+macfleet verify
 ```
 
 On each Mac it forms quorum, checks the registry (two distinct nodes, each with
@@ -216,15 +216,18 @@ runs a distributed `Pool.train`. Each Mac prints a summary and a single machine
 
 ```
   4/4 checks passed
-VERIFY-RESULT host=strong-mac world_size=2 degraded=False params_sha256=ab12cd...
+VERIFY-RESULT host=strong-mac rank=0 steps=24 world_size=2 degraded=False unsynced_steps=0 params_sha256=<full hash>
 ```
 
 Pass condition (this is the whole point of two Macs):
 
 - Both Macs print `4/4 checks passed`.
-- Both `VERIFY-RESULT` lines show `world_size=2` and `degraded=False`.
+- Both `VERIFY-RESULT` lines show `world_size=2`, `degraded=False`, and
+  `unsynced_steps=0`, with distinct ranks and matching nonzero steps.
 - The `params_sha256` on the two Macs is **identical** — that proves the
   gradient allreduce kept the model in sync across machines.
+
+For a named fleet, use `macfleet verify --fleet-id YOUR_FLEET_ID` on both Macs.
 
 If the two hashes differ, that is a real synchronization bug. Keep both
 `~/.macfleet/verify-*.json` artifacts and both terminal logs.

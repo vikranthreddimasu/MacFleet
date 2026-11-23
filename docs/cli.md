@@ -52,7 +52,10 @@ macbook-pro             192.168.1.11      Apple M1 Pro     16
 ```
 
 Use `--json` for scripts and monitors. It suppresses human banners and
-prints stable JSON with `secure`, `fleet_id`, `count`, and `nodes`.
+prints JSON with `secure`, `fleet_id`, `count`, `nodes`, and `discovery_only`.
+Results are advertisements, not proof of authentication, a reachable data
+port, or training readiness. Secure advertisements can omit hardware details.
+On discovery failure, JSON contains `error` and the command exits 1.
 Use `--open` to scan unauthenticated open fleets without reading the
 saved local fleet token.
 
@@ -100,6 +103,15 @@ def main(engine, epochs, batch_size, lr, compression, config_path):
     ...
 ```
 
+## `macfleet verify`
+
+Install `macfleet[torch]`, then run `macfleet verify --self-check` on each Mac.
+After pairing and stopping both CLI agents, run `macfleet verify` on both Macs;
+use `--fleet-id NAME` on both if the fleet was paired with a name. Compare the
+two result lines: checks must pass, ranks must differ, and steps, world size,
+and the full parameter hash must match with no degraded or unsynced steps.
+See the [two-Mac walkthrough](getting-started/two-mac-testing.md).
+
 ## `macfleet rotate-token`
 
 Replace the saved local fleet token.
@@ -118,24 +130,28 @@ old manual setup.
 Diagnoses common environment issues.
 
 ```
-macfleet doctor [--json]
+macfleet doctor [--json] [--engine torch|mlx] [--fleet]
 ```
 
 Checks:
 
 - Python version >= 3.11
-- macOS version >= 14
+- macOS and Apple Silicon
 - Apple Silicon (arch == arm64)
 - MPS backend available (if torch installed)
 - MLX installed (if applicable)
 - Thermal state (not throttling at rest)
-- mDNS reachability (can we actually broadcast?)
+- Network interfaces (when `--fleet` is selected; does not test mDNS)
 - Token file regular-file shape and permissions
 
-Prints a checklist. Green = OK, yellow = warning, red = blocker.
-Use `--json` for CI and local monitors. It prints `status`, `ready`,
-summary counts, and a `checks` array with stable ids, sections, names,
-statuses, and redacted details.
+Core checks are required. Select `--engine torch` or `--engine mlx` to
+require that framework; MPS availability remains informational because Torch
+can use CPU. Select `--fleet` to require network interfaces and a valid,
+configured token. Other checks are informational. Both `doctor` and its
+`diagnose` alias exit 0 when all required checks pass and 1 otherwise.
+Use `--json` for CI and local monitors. `passed`, `failed`, and `total` count
+required checks; `informational` counts the rest. Each check includes
+`required`, `passed`, and a status of `ok`, `fail`, or `info`.
 
 ## Leaving the pool
 

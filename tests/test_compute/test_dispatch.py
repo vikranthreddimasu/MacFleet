@@ -603,9 +603,12 @@ async def test_replaced_listener_cannot_fail_new_connection_tasks():
     new = SimpleNamespace(recv_message=receive)
     current = [old]
 
+    sent = []
+
     async def send(payload, **kwargs):
+        spec = TaskSpec.unpack(payload)
+        sent.append(spec.task_id)
         if current[0] is new:
-            spec = TaskSpec.unpack(payload)
             results.put_nowait(SimpleNamespace(
                 msg_type=MessageType.RESULT, payload=TaskResult.success(spec.task_id, 42).pack(),
             ))
@@ -618,9 +621,30 @@ async def test_replaced_listener_cannot_fail_new_connection_tasks():
         first = await dispatcher.submit(times_two, 1, timeout=1)
         current[0] = new
         second = await dispatcher.submit(times_two, 21, timeout=.3)
-        with pytest.raises(RemoteTaskError, match="connection replaced"):
+        with pytest.raises(RemoteTaskError, match="connection replaced.*did not resubmit"):
             await first.result(timeout=1)
         assert await second.result(timeout=1) == 42
+        assert sent == [first.task_id, second.task_id]
         assert not dispatcher._deadlines
     finally:
         await dispatcher.stop()
+
+
+async def test_worker_reports_task_raised_timeout_as_task_failure():
+    @task
+    def device_timeout():
+        raise TimeoutError("sensor read deadline")
+
+    coordinator, transport, _ = await _setup_pair()
+    dispatcher = TaskDispatcher(coordinator, ["worker-0"])
+    worker = TaskWorker(transport, "coordinator")
+    try:
+        await dispatcher.start()
+        await worker.start()
+        future = await dispatcher.submit(device_timeout, timeout=300)
+        with pytest.raises(RemoteTaskError, match="TimeoutError: sensor read deadline"):
+            await future.result(timeout=2)
+    finally:
+        await worker.stop()
+        await dispatcher.stop()
+        await _teardown(coordinator, transport)

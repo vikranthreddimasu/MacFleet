@@ -154,8 +154,12 @@ never shows up:
 ```
 MeshFormationError: Could not connect to peer mac-mini-9f2e at
 192.168.1.10:50052 within 60s. Check that the peer is running the
-same training script, and that 'macfleet status' shows it as alive.
+same training script on that data port.
 ```
+
+If the registry reports that a selected peer has left during rendezvous, MacFleet
+aborts the setup and lists the departed and current identities. Stop standalone
+join agents on every Mac before restarting the training scripts together.
 
 A wrong fleet token fails immediately (`PeerAuthError`) instead of
 retrying until the deadline.

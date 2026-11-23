@@ -140,7 +140,7 @@ def join(
 
     Security is enabled by default. A fleet token is auto-generated on first
     run and saved to ~/.macfleet/fleet-token. Pairing uses a short-lived
-    one-time code so the permanent token does not need to leave this Mac.
+    code. The joining Mac receives the fleet token over authenticated TLS.
 
     Use --open --allow-insecure-open to disable security (not recommended).
 
@@ -282,6 +282,7 @@ def join(
                     enrollment_server.bound_port,
                     enrollment_server.code,
                     enrollment_server.expires_at_epoch,
+                    max_uses=enroll_uses,
                     out=sys.stdout,
                 )
             console.print("\n[dim]Press Ctrl+C to leave the pool[/dim]\n")
@@ -307,11 +308,28 @@ def join(
 
 
 @cli.command()
+@click.option("--self-check", is_flag=True, help="Run local checks only")
+@click.option("--fleet-id", default=None, help="Fleet identifier used during pairing")
+def verify(self_check: bool, fleet_id: str | None):
+    """Verify the local install or training across paired Macs (requires Torch)."""
+    from macfleet.cli.verify import main
+
+    args = (["--self-check"] if self_check else []) + (["--fleet-id", fleet_id] if fleet_id else [])
+    try:
+        result = main(args)
+    except ImportError as e:
+        raise click.ClickException("Verification requires PyTorch; install `macfleet[torch]`.") from e
+    raise click.exceptions.Exit(result)
+
+
+@cli.command()
 def info():
     """Show local hardware information."""
     from macfleet.monitoring.thermal import get_thermal_state, thermal_state_to_string
     from macfleet.pool.agent import profile_hardware
     from macfleet.pool.network import get_network_topology
+    from macfleet.security.auth import HANDSHAKE_VERSION
+    from macfleet.security.enrollment import ENROLLMENT_VERSION
 
     hw = profile_hardware()
     topo = get_network_topology()
@@ -322,11 +340,13 @@ def info():
     table.add_column("Value")
 
     table.add_row("Hostname", hw.hostname)
+    table.add_row("Protocols", f"secure handshake v{HANDSHAKE_VERSION}, enrollment v{ENROLLMENT_VERSION}")
     table.add_row("Chip", hw.chip_name)
-    table.add_row("GPU Cores", str(hw.gpu_cores))
-    table.add_row("RAM", f"{hw.ram_gb:.0f} GB")
-    table.add_row("Memory Bandwidth", f"~{hw.memory_bandwidth_gbps:.0f} GB/s")
-    table.add_row("Compute Score", f"{hw.compute_score:.0f}")
+    table.add_row("GPU Cores", str(hw.gpu_cores) if hw.gpu_cores else "unknown")
+    table.add_row("RAM", f"{hw.ram_gb:.0f} GB" if hw.ram_gb else "unknown")
+    bandwidth = f"~{hw.memory_bandwidth_gbps:.0f} GB/s" if hw.memory_bandwidth_gbps else "unknown"
+    table.add_row("Memory Bandwidth (estimate)", bandwidth)
+    table.add_row("Compute Score (estimate)", f"{hw.compute_score:.0f}")
     table.add_row("MPS Available", "yes" if hw.mps_available else "no")
     table.add_row("MLX Available", "yes" if hw.mlx_available else "no")
     table.add_row("Thermal", thermal_state_to_string(thermal))
@@ -357,9 +377,13 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool, json_outpu
         try:
             resolved = resolve_token_with_file(token)
         except OSError as e:
-            console.print(f"[red]Error: couldn't read fleet token at {e.filename or 'configured path'}: {e}[/red]")
-            console.print("[dim]Use `macfleet status --open` to scan unauthenticated open fleets.[/dim]")
-            sys.exit(1)
+            message = f"Couldn't read fleet token at {e.filename or 'configured path'}: {e}"
+            if json_output:
+                click.echo(json.dumps({"error": message}))
+            else:
+                console.print(f"[red]Error: {message}[/red]")
+                console.print("[dim]Use `macfleet status --open` to scan unauthenticated open fleets.[/dim]")
+            raise click.exceptions.Exit(1) from e
 
     sec = SecurityConfig(token=resolved, fleet_id=fleet_id) if resolved else None
     secure = bool(sec and sec.is_secure)
@@ -372,6 +396,13 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool, json_outpu
     registry = ServiceRegistry(security=sec)
     try:
         peers = registry.find_peers(timeout=3.0)
+    except OSError as e:
+        message = f"Discovery failed: {e}. Check network access and macOS Local Network permission."
+        if json_output:
+            click.echo(json.dumps({"error": message}))
+        else:
+            console.print(f"[red]{message}[/red]")
+        raise click.exceptions.Exit(1) from e
     finally:
         registry.stop()
 
@@ -382,15 +413,17 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool, json_outpu
             "fleet_id": fleet_id or ("default" if secure else None),
             "count": len(sorted_peers),
             "nodes": [_status_node_to_dict(node) for node in sorted_peers],
+            "discovery_only": True,
         }
         click.echo(json.dumps(payload, sort_keys=True))
         return
 
     if not peers:
-        console.print("[yellow]No pool members found on the network.[/yellow]")
+        console.print("[yellow]No pool advertisements found on the network.[/yellow]")
         console.print("[dim]Run 'macfleet join' on this and other Macs to form a pool.[/dim]")
         return
 
+    console.print("[dim]Discovery advertisements only; authentication and training readiness are not checked.[/dim]")
     table = Table(title=f"MacFleet Pool ({len(peers)} nodes)")
     table.add_column("Hostname", style="bold")
     table.add_column("Chip")
@@ -402,11 +435,11 @@ def status(token: str | None, fleet_id: str | None, open_fleet: bool, json_outpu
     for node in sorted_peers:
         table.add_row(
             node.hostname,
-            node.chip_name,
-            str(node.gpu_cores),
-            str(node.ram_gb),
+            node.chip_name if node.chip_name and node.chip_name.lower() != "unknown" else "unknown",
+            str(node.gpu_cores) if node.gpu_cores else "unknown",
+            str(node.ram_gb) if node.ram_gb else "unknown",
             f"{node.ip_address} :{node.port} :{node.data_port}",
-            f"{node.compute_score:.0f}",
+            f"{node.compute_score:.0f}" if node.compute_score else "unknown",
         )
 
     console.print(table)
@@ -431,15 +464,18 @@ def _status_node_to_dict(node) -> dict[str, object]:
 
 @cli.command()
 @click.option("--json", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
-def diagnose(json_output: bool):
+@click.option("--engine", type=click.Choice(["torch", "mlx"]), default=None, help="Require the selected engine")
+@click.option("--fleet", is_flag=True, help="Require networking and a configured fleet token")
+def diagnose(json_output: bool, engine: str | None, fleet: bool):
     """Run system health checks."""
     import json
     import os
     import platform
+    import re
     import stat as stat_mod
 
     from macfleet.monitoring.thermal import get_thermal_state
-    from macfleet.pool.agent import _check_mlx_available, _check_mps_available, profile_hardware
+    from macfleet.pool.agent import _check_mlx_available, _check_mps_available, _probe_framework, profile_hardware
     from macfleet.pool.network import detect_interfaces
     from macfleet.security.auth import (
         RECOMMENDED_TOKEN_LENGTH,
@@ -449,14 +485,17 @@ def diagnose(json_output: bool):
 
     checks: list[dict[str, object]] = []
 
-    def add_check(section: str, name: str, passed: bool, detail: str = ""):
+    def add_check(section: str, name: str, passed: bool, detail: str = "", required: bool | None = None):
+        if required is None:
+            required = fleet if section in {"Network", "Security"} else True
         checks.append(
             {
                 "id": _diagnostic_check_id(section, name),
                 "section": section,
                 "name": name,
-                "status": "ok" if passed else "fail",
+                "status": ("ok" if passed else "fail") if required else "info",
                 "passed": bool(passed),
+                "required": required,
                 "detail": detail,
             }
         )
@@ -479,7 +518,7 @@ def diagnose(json_output: bool):
     add_check(
         "Hardware",
         "Apple Silicon detected",
-        "apple" in hw.chip_name.lower() or "m" in hw.chip_name.lower(),
+        bool(re.match(r"^apple m\d+(?:\s|$)", hw.chip_name, re.IGNORECASE)),
         hw.chip_name,
     )
     add_check("Hardware", "GPU cores detected", hw.gpu_cores > 0, f"{hw.gpu_cores} cores")
@@ -487,8 +526,12 @@ def diagnose(json_output: bool):
     add_check("Hardware", "RAM >= 8 GB", hw.ram_gb >= 8, f"{hw.ram_gb:.0f} GB")
 
     # Frameworks
-    add_check("ML Frameworks", "MPS available", _check_mps_available())
-    add_check("ML Frameworks", "MLX available", _check_mlx_available())
+    add_check(
+        "ML Frameworks", "Torch available", _probe_framework("import torch"),
+        required=engine == "torch",
+    )
+    add_check("ML Frameworks", "MPS available", _check_mps_available(), required=False)
+    add_check("ML Frameworks", "MLX available", _check_mlx_available(), required=engine == "mlx")
 
     # Thermal
     thermal = get_thermal_state()
@@ -550,22 +593,27 @@ def diagnose(json_output: bool):
                     ),
                 )
 
-    passed_count = sum(1 for check in checks if check["passed"])
-    total_count = len(checks)
+    required_checks = [check for check in checks if check["required"]]
+    passed_count = sum(1 for check in required_checks if check["passed"])
+    total_count = len(required_checks)
     report: dict[str, object] = {
         "status": "ok" if passed_count == total_count else "fail",
         "ready": passed_count == total_count,
         "passed": passed_count,
         "failed": total_count - passed_count,
         "total": total_count,
+        "informational": len(checks) - total_count,
+        "engine": engine,
+        "fleet": fleet,
         "checks": checks,
     }
 
     if json_output:
         click.echo(json.dumps(report, sort_keys=True))
-        return
-
-    _print_diagnostics_report(report)
+    else:
+        _print_diagnostics_report(report)
+    if not report["ready"]:
+        raise click.exceptions.Exit(1)
 
 
 def _diagnostic_check_id(section: str, name: str) -> str:
@@ -588,13 +636,15 @@ def _print_diagnostics_report(report: dict[str, object]):
             current_section = section
 
         passed = bool(check["passed"])
-        label = "[green]PASS[/green]" if passed else "[red]FAIL[/red]"
+        label = ("[green]PASS[/green]" if passed else "[red]FAIL[/red]") if check["required"] else "[dim]INFO[/dim]"
         detail = check["detail"]
+        if not check["required"]:
+            detail = ("available" if passed else "unavailable") + (f"; {detail}" if detail else "")
         console.print(f"  {label} {check['name']}" + (f" — {detail}" if detail else ""))
 
-    console.print(f"\n[bold]{report['passed']}/{report['total']} checks passed[/bold]")
+    console.print(f"\n[bold]{report['passed']}/{report['total']} required checks passed[/bold]")
     if report["ready"]:
-        console.print("[green]System is ready for MacFleet![/green]")
+        console.print("[green]Selected checks passed.[/green]")
     else:
         console.print("[yellow]Some checks failed. See above for details.[/yellow]")
 
@@ -869,7 +919,9 @@ def _train_demo_torch(epochs: int, batch_size: int, lr: float) -> None:
 
     console.print("\n[green]Training complete![/green]")
     console.print("[dim]To train across multiple Macs, use the Python SDK:[/dim]")
-    console.print("[dim]  macfleet.Pool().train(model, dataset, epochs=10)[/dim]")
+    console.print("[dim]Stop CLI agents, then run the same script on both paired Macs:[/dim]")
+    console.print("[dim]  with macfleet.Pool(enable_pool_distributed=True, quorum_size=2) as pool:[/dim]")
+    console.print("[dim]      pool.train(model, dataset, epochs=10)[/dim]")
 
 
 def _train_demo_mlx(epochs: int, batch_size: int, lr: float) -> None:
@@ -951,7 +1003,9 @@ def _train_demo_mlx(epochs: int, batch_size: int, lr: float) -> None:
 
     console.print("\n[green]Training complete![/green]")
     console.print("[dim]To train across multiple Macs, use the Python SDK:[/dim]")
-    console.print("[dim]  macfleet.Pool().train(model, dataset, epochs=10)[/dim]")
+    console.print("[dim]Stop CLI agents, then run the same script on both paired Macs:[/dim]")
+    console.print("[dim]  with macfleet.Pool(enable_pool_distributed=True, quorum_size=2) as pool:[/dim]")
+    console.print("[dim]      pool.train(model, dataset, epochs=10)[/dim]")
 
 
 def _train_from_script(
@@ -1537,12 +1591,14 @@ def rotate_token(yes: bool, show_token: bool):
 # Users trained by `brew doctor` / `rustup doctor` look for this name first.
 @cli.command()
 @click.option("--json", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+@click.option("--engine", type=click.Choice(["torch", "mlx"]), default=None, help="Require the selected engine")
+@click.option("--fleet", is_flag=True, help="Require networking and a configured fleet token")
 @click.pass_context
-def doctor(ctx, json_output: bool):
+def doctor(ctx, json_output: bool, engine: str | None, fleet: bool):
     """System health check (alias for `diagnose`)."""
     # Delegate through Click's context so diagnose runs with a proper context
     # (obj, exception handling) instead of a bare callback() call.
-    ctx.invoke(diagnose, json_output=json_output)
+    ctx.invoke(diagnose, json_output=json_output, engine=engine, fleet=fleet)
 
 
 # v2.2 PR 16 (D10): `macfleet quickstart` scaffolds a demo training script.
@@ -1554,10 +1610,9 @@ Written by `macfleet quickstart`. Run it:
 
     python {filename}
 
-If you've paired a second Mac via `macfleet join --bootstrap` + `macfleet pair`,
-stop `macfleet join` on both Macs, set `enable_pool_distributed=True` below,
-and run THIS SAME SCRIPT on both Macs (each Mac becomes one rank; gradients are
-averaged every step).
+After pairing a second Mac via `macfleet join --bootstrap` + `macfleet pair`,
+stop the CLI agents on both Macs. Set `enable_pool_distributed=True` and
+`quorum_size=2` below, then run THIS SAME SCRIPT on both Macs.
 """
 
 import macfleet
@@ -1586,7 +1641,7 @@ def main() -> None:
 
     with macfleet.Pool(
         engine="torch",
-        # Flip to True after pairing a second Mac (see docs/getting-started/pairing.md)
+        # After pairing and stopping both CLI agents, set this True on both Macs.
         enable_pool_distributed=False,
         quorum_size=2,  # Wait for both Macs before distributed training.
     ) as pool:
@@ -1631,7 +1686,10 @@ def quickstart(output: str, force: bool):
         raise click.exceptions.Exit(1)
 
     content = QUICKSTART_TEMPLATE.format(filename=target.name)
-    target.write_text(content)
+    try:
+        target.write_text(content)
+    except OSError as e:
+        raise click.ClickException(f"Cannot write {target}: {e.strerror or e}") from e
     console.print(
         f"[green]Wrote {target} ({len(content)} bytes)[/green]\n"
         f"\nNext steps:\n"

@@ -10,20 +10,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Pairing now authenticates the returned credentials. Secure heartbeat peers
   prove fleet membership on the same TLS connection before exchanging hardware.
-  Upgrade every Mac together; older secure heartbeat and pairing peers will be rejected.
+  Upgrade every Mac together for enrollment v2 and the channel-bound heartbeat handshake.
 - Weight gradients by sample count for uneven batches; preserve unused Torch
-  parameters and publish rank zero's final buffers. Both engines retain integer inputs.
+  parameters through clipping and publish rank zero's final buffers. Both engines retain integer inputs.
 - Reject incompatible ring inputs before padding and transfer large collective
   arrays across multiple frames. Concurrent first starts share one saved token.
 
 ### Reliability and simplification
+
+- Repeated discovery of an authenticated peer preserves fleet membership, hardware
+  and recorded throughput. A changed endpoint must authenticate again.
 
 - Clean up interrupted pool joins before propagating the error, allowing the
   same Pool instance to join again without leaving background agents behind.
 - Move initialized Torch optimizer state with the model onto MPS, and reject
   non-finite Torch/MLX gradients before changing weights or optimizer moments.
 - Keep worker concurrency bounded across restarts and reattach dispatch result
-  listeners to replacement connections without accepting stale results.
+  listeners to replacement connections without accepting stale results. Check the
+  worker before retrying an interrupted task whose outcome is unknown.
 - Cancel outbound handshakes during transport shutdown and ignore heartbeat
   results for removed or replaced peer endpoints.
 - Keep generated node identities within mDNS limits for long hostnames and
@@ -82,9 +86,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Setup UX
 
-- **Short-lived enrollment codes.** `macfleet join --bootstrap` displays
-  a one-time enrollment command. Normal pairing does not print or copy the
-  permanent fleet token; legacy token URLs remain an explicit migration path.
+- The first `macfleet join` prints a short-lived enrollment command and
+  attempts to copy it to the pasteboard. Run that command on the second Mac,
+  then run `macfleet join`. On a returning Mac, use `join --bootstrap` to
+  start a new enrollment window.
 - **`macfleet doctor` gained a Security section**: fleet token
   configured, token length, token file permissions (0600).
 

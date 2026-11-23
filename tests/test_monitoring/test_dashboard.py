@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from rich.console import Console
 
 from macfleet.engines.base import ThermalPressure
 from macfleet.monitoring.dashboard import (
@@ -131,6 +132,18 @@ class TestDashboard:
         dash.update_nodes([_make_node("test-1")])
         layout = dash._render()
         assert layout is not None
+
+    @pytest.mark.parametrize(("width", "height"), [(80, 24), (140, 40)])
+    def test_health_progress_and_warning_are_readable(self, width, height):
+        dash = Dashboard()
+        dash._console = Console(width=width, height=height, color_system=None)
+        dash.update_nodes([_make_node("audit-node", pressure=ThermalPressure.SERIOUS)])
+        dash.update_training(epoch=3, total_epochs=10, step=42, throughput=123, elapsed_sec=65)
+        with dash._console.capture() as capture:
+            dash._console.print(dash._render())
+        frame = capture.get()
+        for value in ("audit-node", "Status", "Thermal", "Memory", "3/10", "123.0 samples/sec", "1m 5s", "throttling"):
+            assert value in frame
 
 
 class TestPrintTrainingSummary:
